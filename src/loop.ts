@@ -1,5 +1,4 @@
 import { chatCompletionStream } from "./llm.ts";
-import type { ToolCall } from "./llm.ts";
 import { extractToolCalls } from "./parse-fallback.ts";
 import { ContextWindow } from "./context.ts";
 import { ToolRegistry } from "./registry.ts";
@@ -25,30 +24,18 @@ export async function* runAgentLoop(
     yield { type: "thinking" };
 
     let contentAccum = "";
-    const toolCallAccum = new Map<number, { id: string; name: string; arguments: string }>();
 
     try {
-      for await (const chunk of chatCompletionStream(
-        context.getMessages(),
-        toolRegistry.getDefinitions(),
-      )) {
+      for await (const chunk of chatCompletionStream(context.getMessages(), [])) {
         switch (chunk.type) {
           case "text_delta":
             contentAccum += chunk.content;
             yield { type: "text", content: chunk.content };
             break;
 
-          case "tool_call_delta": {
-            let entry = toolCallAccum.get(chunk.index);
-            if (!entry) {
-              entry = { id: "", name: "", arguments: "" };
-              toolCallAccum.set(chunk.index, entry);
-            }
-            if (chunk.id) entry.id = chunk.id;
-            if (chunk.name) entry.name = chunk.name;
-            entry.arguments += chunk.arguments_delta;
+          case "tool_call_delta":
+            // Server-side tool calls are disabled — we parse from text below.
             break;
-          }
 
           case "finish":
             break;
@@ -60,30 +47,15 @@ export async function* runAgentLoop(
       return;
     }
 
-    let toolCalls: ToolCall[] = Array.from(toolCallAccum.entries())
-      .sort(([a], [b]) => a - b)
-      .map(([i, tc]) => ({
-        id: tc.id || `call_${Date.now()}_${i}`,
-        type: "function" as const,
-        function: {
-          name: tc.name,
-          arguments: tc.arguments,
-        },
-      }));
+    // Parse tool calls from the model's plain-text output (<tool_call>{...}</tool_call>).
+    const toolCalls = contentAccum ? extractToolCalls(contentAccum) : [];
 
-    if (toolCalls.length === 0 && contentAccum) {
-      toolCalls = extractToolCalls(contentAccum);
-    }
-
-    const content = contentAccum || null;
-    context.addMessage({
-      role: "assistant",
-      content,
-      ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-    });
+    // Always record the raw assistant text so the model can see what it said
+    // (including any <tool_call> tags) on the next turn.
+    context.addMessage({ role: "assistant", content: contentAccum || null });
 
     if (toolCalls.length === 0) {
-      yield { type: "done", content: content ?? "[No response]" };
+      yield { type: "done", content: contentAccum || "[No response]" };
       return;
     }
 
@@ -99,7 +71,13 @@ export async function* runAgentLoop(
       }
 
       yield { type: "tool_result", name: tc.function.name, result };
-      context.addMessage({ role: "tool", tool_call_id: tc.id, content: result });
+      // Feed tool result back as a user message. We deliberately avoid
+      // `role: "tool"` because llama.cpp wraps it in its tool-calling
+      // template, which is what caused the `<|tool_response|>` leak.
+      context.addMessage({
+        role: "user",
+        content: `Tool result for \`${tc.function.name}\`:\n\`\`\`\n${result}\n\`\`\``,
+      });
     }
   }
 

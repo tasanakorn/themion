@@ -25,6 +25,30 @@ export class ToolRegistry {
     return Array.from(this.tools.values()).map((t) => t.def);
   }
 
+  /**
+   * Render tool definitions as a system-prompt block. Used when the upstream
+   * server's tool-calling template is unreliable (e.g. llama.cpp wrapping
+   * Gemma), so we inject tool specs as plain text and parse calls from the
+   * model's text output instead of using the server's `tools` parameter.
+   */
+  formatToolsPrompt(): string {
+    const lines: string[] = [];
+    lines.push("You have access to the following tools. To call a tool, emit ONE JSON object wrapped in <tool_call>...</tool_call> tags on a line by itself:");
+    lines.push("");
+    lines.push('<tool_call>{"name": "tool_name", "arguments": {"key": "value"}}</tool_call>');
+    lines.push("");
+    lines.push("After you emit a tool call, stop and wait — the next user turn will contain the tool result. If you don't need a tool, answer in plain text.");
+    lines.push("");
+    lines.push("Available tools:");
+    for (const { def } of this.tools.values()) {
+      const { name, description, parameters } = def.function;
+      lines.push("");
+      lines.push(`- ${name}: ${description}`);
+      lines.push(`  parameters: ${JSON.stringify(parameters)}`);
+    }
+    return lines.join("\n");
+  }
+
   async dispatch(name: string, argsRaw: string): Promise<string> {
     const entry = this.tools.get(name);
     if (!entry) {

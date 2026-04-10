@@ -3,13 +3,19 @@ import "./tools/read-file.ts";
 import "./tools/write-file.ts";
 import "./tools/list-files.ts";
 import "./tools/escalate.ts";
+import "./tools/tmux.ts";
 
 import { ContextWindow } from "./context.ts";
 import { registry } from "./registry.ts";
 import { runAgentLoop } from "./loop.ts";
 import { SYSTEM_PROMPT } from "./config.ts";
 
-const context = new ContextWindow(SYSTEM_PROMPT);
+// Build the system prompt with tool usage instructions appended. Tool defs
+// are injected as text rather than via the server's `tools` param because
+// llama.cpp's generic tool-calling template leaks harmony-style markers
+// (`<|tool_response|>`, `<|channel|>`, etc.) into Gemma's output.
+const FULL_SYSTEM_PROMPT = `${SYSTEM_PROMPT}\n\n${registry.formatToolsPrompt()}`;
+const context = new ContextWindow(FULL_SYSTEM_PROMPT);
 
 // Single-shot mode: drain generator, print to stdout, no Ink
 const args = process.argv.slice(2);
