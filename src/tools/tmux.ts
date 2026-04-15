@@ -1,4 +1,5 @@
-import { registry } from "../registry.ts";
+import { defineTool } from "@mariozechner/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
 
 const DANGEROUS_CHARS = /[|`&;$><\n\\(){}!#]/;
 const TEXT_MAX_LENGTH = 4096;
@@ -34,8 +35,8 @@ async function runTmux(args: string[]): Promise<string> {
   }, timeoutMs);
 
   const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+    new Response(proc.stdout as ReadableStream).text(),
+    new Response(proc.stderr as ReadableStream).text(),
   ]);
 
   await proc.exited;
@@ -53,21 +54,12 @@ async function runTmux(args: string[]): Promise<string> {
   return stdout;
 }
 
-// ---------- tmux_list ----------
-
-registry.register(
-  "tmux_list",
-  "List all tmux sessions, windows, and panes as a Session > Window > Pane hierarchy",
-  {
-    type: "object",
-    properties: {},
-    required: [],
-  },
-  async () => {
-    // Single query: tab-delimited fields are safer than '|' since tmux names
-    // can contain pipes. Order: session, win_idx, win_name, win_panes,
-    // win_layout, pane_idx, pane_cmd, pane_size, pane_pos, pane_active,
-    // win_zoomed.
+export const tmuxListTool = defineTool({
+  name: "tmux_list",
+  label: "Tmux List",
+  description: "List all tmux sessions, windows, and panes as a Session > Window > Pane hierarchy",
+  parameters: Type.Object({}),
+  execute: async () => {
     const FMT = [
       "#{session_name}",
       "#{window_index}",
@@ -83,7 +75,7 @@ registry.register(
     ].join("\t");
 
     const output = await runTmux(["list-panes", "-a", "-F", FMT]);
-    if (!output.trim()) return "No tmux panes found.";
+    if (!output.trim()) return { content: [{ type: "text", text: "No tmux panes found." }], details: {} };
 
     type Pane = { idx: string; cmd: string; size: string; pos: string; active: boolean };
     type Window = { idx: string; name: string; panes: string; layout: string; zoomed: boolean; paneList: Pane[] };
@@ -105,267 +97,165 @@ registry.register(
 
       let window = session.windows.get(wIdx);
       if (!window) {
-        window = {
-          idx: wIdx,
-          name: wName,
-          panes: wPanes,
-          layout: wLayout,
-          zoomed: wZoomed === "1",
-          paneList: [],
-        };
+        window = { idx: wIdx, name: wName, panes: wPanes, layout: wLayout, zoomed: wZoomed === "1", paneList: [] };
         session.windows.set(wIdx, window);
       }
 
-      window.paneList.push({
-        idx: pIdx,
-        cmd: pCmd,
-        size: pSize,
-        pos: pPos,
-        active: pActive === "1",
-      });
+      window.paneList.push({ idx: pIdx, cmd: pCmd, size: pSize, pos: pPos, active: pActive === "1" });
     }
 
-    // Pane identifiers are emitted in tmux target form (`session:window.pane`)
-    // so they can be passed directly to tmux_capture / tmux_send_text / etc.
-    // Windows use `session:window` form for the same reason.
     const lines: string[] = [];
     for (const session of sessions.values()) {
       lines.push(`Session ${session.name}`);
       for (const window of session.windows.values()) {
         const zoom = window.zoomed ? " zoomed" : "";
         const winTarget = `${session.name}:${window.idx}`;
-        lines.push(
-          `  Window ${winTarget} [${window.name}] ${window.panes} panes${zoom} layout=${window.layout}`,
-        );
+        lines.push(`  Window ${winTarget} [${window.name}] ${window.panes} panes${zoom} layout=${window.layout}`);
         for (const pane of window.paneList) {
           const active = pane.active ? " active" : "";
           const paneTarget = `${session.name}:${window.idx}.${pane.idx}`;
-          lines.push(
-            `    Pane ${paneTarget} [${pane.cmd}] ${pane.size} at (${pane.pos})${active}`,
-          );
+          lines.push(`    Pane ${paneTarget} [${pane.cmd}] ${pane.size} at (${pane.pos})${active}`);
         }
       }
     }
 
-    return lines.join("\n");
+    return { content: [{ type: "text", text: lines.join("\n") }], details: {} };
   },
-);
+});
 
-// ---------- tmux_capture ----------
-
-registry.register(
-  "tmux_capture",
-  "Capture visible content of a tmux pane",
-  {
-    type: "object",
-    properties: {
-      target: {
-        type: "string",
-        description: "Pane target, e.g. 'mysession:0.0'",
-      },
-      lines: {
-        type: "number",
-        description: "Number of scrollback lines to capture. Omit for visible area only.",
-      },
-    },
-    required: ["target"],
-  },
-  async (args) => {
-    const target = validateTarget(args.target as string);
+export const tmuxCaptureTool = defineTool({
+  name: "tmux_capture",
+  label: "Tmux Capture",
+  description: "Capture visible content of a tmux pane",
+  parameters: Type.Object({
+    target: Type.String({ description: "Pane target, e.g. 'mysession:0.0'" }),
+    lines: Type.Optional(Type.Number({ description: "Number of scrollback lines to capture. Omit for visible area only." })),
+  }),
+  execute: async (_id, args) => {
+    const target = validateTarget(args.target);
     const tmuxArgs = ["capture-pane", "-t", target, "-p"];
 
     if (args.lines !== undefined) {
-      const lines = Number(args.lines);
-      if (!Number.isInteger(lines) || lines < 1) {
+      if (!Number.isInteger(args.lines) || args.lines < 1) {
         throw new Error("lines must be a positive integer");
       }
-      tmuxArgs.push("-S", `-${lines}`);
+      tmuxArgs.push("-S", `-${args.lines}`);
     }
 
-    return await runTmux(tmuxArgs);
+    const output = await runTmux(tmuxArgs);
+    return { content: [{ type: "text", text: output }], details: {} };
   },
-);
+});
 
-// ---------- tmux_send_keys ----------
-
-registry.register(
-  "tmux_send_keys",
-  "Send special keys to a tmux pane (Enter, C-c, Escape, Up, Down, etc.)",
-  {
-    type: "object",
-    properties: {
-      target: {
-        type: "string",
-        description: "Pane target, e.g. 'mysession:0.0'",
-      },
-      keys: {
-        type: "string",
-        description: "Keys to send, e.g. 'Enter', 'C-c', 'Escape'",
-      },
-    },
-    required: ["target", "keys"],
+export const tmuxSendKeysTool = defineTool({
+  name: "tmux_send_keys",
+  label: "Tmux Send Keys",
+  description: "Send special keys to a tmux pane (Enter, C-c, Escape, Up, Down, etc.)",
+  parameters: Type.Object({
+    target: Type.String({ description: "Pane target, e.g. 'mysession:0.0'" }),
+    keys: Type.String({ description: "Keys to send, e.g. 'Enter', 'C-c', 'Escape'" }),
+  }),
+  execute: async (_id, args) => {
+    const target = validateTarget(args.target);
+    await runTmux(["send-keys", "-t", target, args.keys]);
+    return { content: [{ type: "text", text: `Sent keys to ${target}` }], details: {} };
   },
-  async (args) => {
-    const target = validateTarget(args.target as string);
-    const keys = args.keys as string;
-    if (!keys || typeof keys !== "string") {
-      throw new Error("keys is required");
-    }
+});
 
-    await runTmux(["send-keys", "-t", target, keys]);
-    return `Sent keys to ${target}`;
-  },
-);
-
-// ---------- tmux_send_text ----------
-
-registry.register(
-  "tmux_send_text",
-  "Type text into a tmux pane, optionally pressing Enter afterwards",
-  {
-    type: "object",
-    properties: {
-      target: {
-        type: "string",
-        description: "Pane target, e.g. 'mysession:0.0'",
-      },
-      text: {
-        type: "string",
-        description: "Text to type into the pane",
-      },
-      enter: {
-        type: "boolean",
-        description: "Press Enter after typing (default: true)",
-      },
-    },
-    required: ["target", "text"],
-  },
-  async (args) => {
-    const target = validateTarget(args.target as string);
-    const text = args.text as string;
-    if (typeof text !== "string") {
-      throw new Error("text is required");
-    }
-    if (text.length > TEXT_MAX_LENGTH) {
+export const tmuxSendTextTool = defineTool({
+  name: "tmux_send_text",
+  label: "Tmux Send Text",
+  description: "Type text into a tmux pane, optionally pressing Enter afterwards",
+  parameters: Type.Object({
+    target: Type.String({ description: "Pane target, e.g. 'mysession:0.0'" }),
+    text: Type.String({ description: "Text to type into the pane" }),
+    enter: Type.Optional(Type.Boolean({ description: "Press Enter after typing (default: true)" })),
+  }),
+  execute: async (_id, args) => {
+    const target = validateTarget(args.target);
+    if (args.text.length > TEXT_MAX_LENGTH) {
       throw new Error(`text exceeds maximum length of ${TEXT_MAX_LENGTH} characters`);
     }
 
-    await runTmux(["send-keys", "-t", target, "--", text]);
+    await runTmux(["send-keys", "-t", target, "--", args.text]);
 
     const pressEnter = args.enter !== false;
     if (pressEnter) {
       await runTmux(["send-keys", "-t", target, "Enter"]);
     }
 
-    return `Sent text to ${target}${pressEnter ? " (Enter)" : ""}`;
+    return { content: [{ type: "text", text: `Sent text to ${target}${pressEnter ? " (Enter)" : ""}` }], details: {} };
   },
-);
+});
 
-// ---------- tmux_split_pane ----------
-
-registry.register(
-  "tmux_split_pane",
-  "Split a tmux pane horizontally (side-by-side) or vertically (top/bottom). Returns new pane target.",
-  {
-    type: "object",
-    properties: {
-      target: {
-        type: "string",
-        description: "Pane to split, e.g. 'mysession:0.0'",
-      },
-      direction: {
-        type: "string",
-        enum: ["horizontal", "vertical"],
-        description: "horizontal = side-by-side, vertical = top/bottom (default: vertical)",
-      },
-      command: {
-        type: "string",
-        description: "Optional command to run in the new pane",
-      },
-    },
-    required: ["target"],
-  },
-  async (args) => {
-    const target = validateTarget(args.target as string);
-    const direction = (args.direction as string) ?? "vertical";
+export const tmuxSplitPaneTool = defineTool({
+  name: "tmux_split_pane",
+  label: "Tmux Split Pane",
+  description: "Split a tmux pane horizontally (side-by-side) or vertically (top/bottom). Returns new pane target.",
+  parameters: Type.Object({
+    target: Type.String({ description: "Pane to split, e.g. 'mysession:0.0'" }),
+    direction: Type.Optional(Type.Union([Type.Literal("horizontal"), Type.Literal("vertical")], { description: "horizontal = side-by-side, vertical = top/bottom (default: vertical)" })),
+    command: Type.Optional(Type.String({ description: "Optional command to run in the new pane" })),
+  }),
+  execute: async (_id, args) => {
+    const target = validateTarget(args.target);
+    const direction = args.direction ?? "vertical";
     const flag = direction === "horizontal" ? "-h" : "-v";
 
-    const tmuxArgs = [
-      "split-window",
-      flag,
-      "-t",
-      target,
-      "-P",
-      "-F",
-      "#{session_name}:#{window_index}.#{pane_index}",
-    ];
-
+    const tmuxArgs = ["split-window", flag, "-t", target, "-P", "-F", "#{session_name}:#{window_index}.#{pane_index}"];
     if (args.command !== undefined) {
-      const command = args.command as string;
-      if (typeof command !== "string") {
-        throw new Error("command must be a string");
-      }
-      if (command.length > TEXT_MAX_LENGTH) {
+      if (args.command.length > TEXT_MAX_LENGTH) {
         throw new Error(`command exceeds maximum length of ${TEXT_MAX_LENGTH} characters`);
       }
-      tmuxArgs.push(command);
+      tmuxArgs.push(args.command);
     }
 
     const output = await runTmux(tmuxArgs);
-    return `Created pane: ${output.trim()}`;
+    return { content: [{ type: "text", text: `Created pane: ${output.trim()}` }], details: {} };
   },
-);
+});
 
-// ---------- tmux_kill_pane ----------
-
-registry.register(
-  "tmux_kill_pane",
-  "Kill a tmux pane",
-  {
-    type: "object",
-    properties: {
-      target: {
-        type: "string",
-        description: "Pane target to kill, e.g. 'mysession:0.1'",
-      },
-    },
-    required: ["target"],
-  },
-  async (args) => {
-    const target = validateTarget(args.target as string);
+export const tmuxKillPaneTool = defineTool({
+  name: "tmux_kill_pane",
+  label: "Tmux Kill Pane",
+  description: "Kill a tmux pane",
+  parameters: Type.Object({
+    target: Type.String({ description: "Pane target to kill, e.g. 'mysession:0.1'" }),
+  }),
+  execute: async (_id, args) => {
+    const target = validateTarget(args.target);
     await runTmux(["kill-pane", "-t", target]);
-    return `Killed pane: ${target}`;
+    return { content: [{ type: "text", text: `Killed pane: ${target}` }], details: {} };
   },
-);
+});
 
-// ---------- tmux_select_layout ----------
+export const tmuxSelectLayoutTool = defineTool({
+  name: "tmux_select_layout",
+  label: "Tmux Select Layout",
+  description: "Apply a preset layout to a tmux window's split panes",
+  parameters: Type.Object({
+    target: Type.String({ description: "Window target, e.g. 'mysession:0'" }),
+    layout: Type.Union([
+      Type.Literal("even-horizontal"),
+      Type.Literal("even-vertical"),
+      Type.Literal("main-horizontal"),
+      Type.Literal("main-vertical"),
+      Type.Literal("tiled")
+    ], { description: "Layout preset" }),
+  }),
+  execute: async (_id, args) => {
+    const target = validateTarget(args.target);
+    await runTmux(["select-layout", "-t", target, args.layout]);
+    return { content: [{ type: "text", text: `Applied ${args.layout} layout to ${target}` }], details: {} };
+  },
+});
 
-registry.register(
-  "tmux_select_layout",
-  "Apply a preset layout to a tmux window's split panes",
-  {
-    type: "object",
-    properties: {
-      target: {
-        type: "string",
-        description: "Window target, e.g. 'mysession:0'",
-      },
-      layout: {
-        type: "string",
-        enum: ["even-horizontal", "even-vertical", "main-horizontal", "main-vertical", "tiled"],
-        description: "Layout preset",
-      },
-    },
-    required: ["target", "layout"],
-  },
-  async (args) => {
-    const target = validateTarget(args.target as string);
-    const layout = args.layout as string;
-    const validLayouts = ["even-horizontal", "even-vertical", "main-horizontal", "main-vertical", "tiled"];
-    if (!validLayouts.includes(layout)) {
-      throw new Error(`Invalid layout. Must be one of: ${validLayouts.join(", ")}`);
-    }
-    await runTmux(["select-layout", "-t", target, layout]);
-    return `Applied ${layout} layout to ${target}`;
-  },
-);
+export const tmuxTools = [
+  tmuxListTool,
+  tmuxCaptureTool,
+  tmuxSendKeysTool,
+  tmuxSendTextTool,
+  tmuxSplitPaneTool,
+  tmuxKillPaneTool,
+  tmuxSelectLayoutTool
+];

@@ -1,59 +1,101 @@
-import "./tools/shell.ts";
-import "./tools/read-file.ts";
-import "./tools/write-file.ts";
-import "./tools/list-files.ts";
-import "./tools/escalate.ts";
-import "./tools/tmux.ts";
+import {
+  AuthStorage,
+  ModelRegistry,
+  SessionManager,
+  SettingsManager,
+  DefaultResourceLoader,
+  codingTools,
+  createAgentSessionRuntime,
+  type CreateAgentSessionRuntimeFactory,
+  createAgentSessionServices,
+  createAgentSessionFromServices,
+  getAgentDir,
+  InteractiveMode,
+  runPrintMode,
+} from "@mariozechner/pi-coding-agent";
+import type { Model } from "@mariozechner/pi-ai";
+import { escalateTool } from "./tools/escalate.ts";
+import { tmuxTools } from "./tools/tmux.ts";
+import { SYSTEM_PROMPT, LLM_BASE_URL, MAX_TOKENS, ENABLE_THINKING } from "./config.ts";
 
-import { ContextWindow } from "./context.ts";
-import { registry } from "./registry.ts";
-import { runAgentLoop } from "./loop.ts";
-import { SYSTEM_PROMPT } from "./config.ts";
+const authStorage = AuthStorage.inMemory();
+authStorage.setRuntimeApiKey("openai", "sk-dummy"); // local LLM dummy key
+const modelRegistry = ModelRegistry.inMemory(authStorage);
 
-// Build the system prompt with tool usage instructions appended. Tool defs
-// are injected as text rather than via the server's `tools` param because
-// llama.cpp's generic tool-calling template leaks harmony-style markers
-// (`<|tool_response|>`, `<|channel|>`, etc.) into Gemma's output.
-const FULL_SYSTEM_PROMPT = `${SYSTEM_PROMPT}\n\n${registry.formatToolsPrompt()}`;
-const context = new ContextWindow(FULL_SYSTEM_PROMPT);
+const localModel: Model<string> = {
+  id: "local",
+  name: "Local Model",
+  api: "openai-completions",
+  provider: "openai",
+  baseUrl: `${LLM_BASE_URL}/v1`, // e.g., "http://localhost:30434/v1"
+  reasoning: ENABLE_THINKING,
+  input: ["text"],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 16384,
+  maxTokens: MAX_TOKENS,
+};
 
-// Single-shot mode: drain generator, print to stdout, no Ink
+const settingsManager = SettingsManager.inMemory({
+  compaction: { enabled: true },
+});
+
+const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+  // Create resource loader that overrides system prompt
+  const resourceLoader = new DefaultResourceLoader({
+    cwd,
+    settingsManager,
+    systemPromptOverride: () => SYSTEM_PROMPT,
+  });
+  await resourceLoader.reload();
+
+  const services = await createAgentSessionServices({
+    cwd,
+    settingsManager,
+    authStorage,
+    modelRegistry,
+    resourceLoaderOptions: {
+      systemPromptOverride: () => SYSTEM_PROMPT,
+    }
+  });
+  
+  return {
+    ...(await createAgentSessionFromServices({
+      services: { ...services, resourceLoader }, // explicitly inject our custom loader
+      sessionManager,
+      sessionStartEvent,
+      model: localModel,
+      scopedModels: [{ model: localModel, thinkingLevel: ENABLE_THINKING ? "high" : "off" }],
+      thinkingLevel: ENABLE_THINKING ? "high" : "off",
+      tools: codingTools,
+      customTools: [escalateTool, ...tmuxTools],
+    })),
+    services,
+    diagnostics: services.diagnostics,
+  };
+};
+
+const runtime = await createAgentSessionRuntime(createRuntime, {
+  cwd: process.cwd(),
+  agentDir: getAgentDir(),
+  sessionManager: SessionManager.inMemory(),
+});
+
 const args = process.argv.slice(2);
 if (args.length > 0) {
   const message = args.join(" ");
-  let finalContent = "";
-
-  for await (const event of runAgentLoop(message, context, registry)) {
-    switch (event.type) {
-      case "tool_call":
-        process.stderr.write(`[tool] ${event.name}(${event.args})\n`);
-        break;
-      case "tool_result":
-        process.stderr.write(`[result] ${event.result.slice(0, 200)}\n`);
-        break;
-      case "escalation":
-        console.log(`Escalation: ${event.reason}`);
-        process.exit(0);
-        break;
-      case "done":
-        finalContent = event.content;
-        break;
-      case "error":
-        console.error(`Error: ${event.message}`);
-        process.exit(1);
-        break;
-    }
-  }
-
-  console.log(finalContent);
+  await runPrintMode(runtime, {
+    mode: "text",
+    initialMessage: message,
+    initialImages: [],
+    messages: [],
+  });
+  process.exit(0);
+} else {
+  // REPL mode using InteractiveMode
+  const mode = new InteractiveMode(runtime, {
+    migratedProviders: [],
+    modelFallbackMessage: undefined,
+  });
+  await mode.run();
   process.exit(0);
 }
-
-// REPL mode: mount Ink app
-const React = await import("react");
-const { render } = await import("ink");
-const { App } = await import("./ui/App.tsx");
-
-const { waitUntilExit, unmount } = render(React.createElement(App, { context, registry }));
-await waitUntilExit();
-process.exit(0);

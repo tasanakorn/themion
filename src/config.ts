@@ -1,6 +1,6 @@
 export const LLM_BASE_URL = process.env.LLM_URL ?? "http://localhost:30434";
 export const LLM_ENDPOINT = `${LLM_BASE_URL}/v1/chat/completions`;
-export const MAX_TOKENS = 512;
+export const MAX_TOKENS = 2048;
 export const TEMPERATURE = 0;
 // Disable Gemma 3n's built-in thinking/reasoning so all output goes to `content`.
 // With thinking enabled, output goes to `reasoning_content` and can easily exhaust
