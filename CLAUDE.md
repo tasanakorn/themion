@@ -9,6 +9,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `cargo run -p themion-cli -- "your prompt"` — print mode: single turn, then exit
 - `cargo build --release` — optimized binary with LTO + strip
 
+**Never invoke `rustc` directly.** Always use `cargo build` to verify compilation. Direct `rustc` invocations drop stray `.rlib` artifacts in the working directory.
+
 ## Environment Variables
 
 | Var                  | Required | Default                    |
