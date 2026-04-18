@@ -813,15 +813,15 @@ fn make_input<'a>() -> TextArea<'a> {
     let mut ta = TextArea::default();
     ta.set_block(
         Block::default()
-            .borders(Borders::TOP)
+            .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray))
             .title(Span::styled(
-                "▸ ",
+                "❯ ",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ))
-            .padding(Padding::left(2)),
+            .padding(Padding::left(1)),
     );
     ta.set_cursor_line_style(Style::default());
     ta.set_placeholder_text(
@@ -840,7 +840,7 @@ fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Lin
                 for (i, part) in text.lines().enumerate() {
                     let prefix = if i == 0 {
                         Span::styled(
-                            "▸ ",
+                            "❯ ",
                             Style::default()
                                 .fg(Color::Cyan)
                                 .add_modifier(Modifier::BOLD),
@@ -915,15 +915,9 @@ fn draw(f: &mut Frame, app: &App) {
     let input_text = app.input.lines().join("\n");
 
     let input_block = Block::default()
-        .borders(Borders::TOP)
+        .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
-        .title(Span::styled(
-            "▸ ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .padding(Padding::left(2));
+        .padding(Padding::left(1));
 
     let input_inner = input_block.inner(area);
     let input_inner_width = input_inner.width.max(1);
@@ -943,14 +937,14 @@ fn draw(f: &mut Frame, app: &App) {
             .max(1)
     };
 
-    let input_height = (input_visual_lines + 1).clamp(3, 8);
+    let input_height = (input_visual_lines + 2).clamp(3, 8);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),
             Constraint::Length(input_height),
-            Constraint::Length(2),
+            Constraint::Length(3),
         ])
         .split(area);
 
@@ -969,16 +963,33 @@ fn draw(f: &mut Frame, app: &App) {
     f.render_widget(conv_base.scroll((scroll, 0)), chunks[0]);
 
     f.render_widget(Clear, chunks[1]);
-    let input_para = Paragraph::new(input_text.clone())
+    let display_input = if input_text.is_empty() {
+        "❯ ".to_string()
+    } else {
+        let mut lines = input_text.lines();
+        let first = lines.next().unwrap_or("");
+        let mut out = format!("❯ {}", first);
+        for line in lines {
+            out.push('\n');
+            out.push_str("  ");
+            out.push_str(line);
+        }
+        out
+    };
+    let input_para = Paragraph::new(display_input)
         .wrap(Wrap { trim: false })
         .block(input_block);
     f.render_widget(input_para, chunks[1]);
 
     let (cursor_row, cursor_col) = app.input.cursor();
-    let cursor_prefix_x = chunks[1].x + 2;
+    let cursor_prefix_x = chunks[1].x + 4;
     let cursor_prefix_y = chunks[1].y + 1;
     let cursor_y = cursor_prefix_y.saturating_add(cursor_row as u16);
-    let cursor_x = cursor_prefix_x.saturating_add(cursor_col as u16);
+    let cursor_x = if cursor_row == 0 {
+        cursor_prefix_x.saturating_add(cursor_col as u16)
+    } else {
+        (chunks[1].x + 3).saturating_add(cursor_col as u16)
+    };
     if cursor_y < chunks[1].bottom() && cursor_x < chunks[1].right() {
         f.set_cursor_position((cursor_x, cursor_y));
     }
@@ -1019,7 +1030,12 @@ fn draw(f: &mut Frame, app: &App) {
     f.render_widget(Clear, chunks[2]);
     f.render_widget(
         Paragraph::new(format!("{}\n{}", bar_top, bar_bottom))
-            .style(Style::default().bg(Color::DarkGray).fg(Color::White)),
+            .style(Style::default().bg(Color::Black).fg(Color::White))
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            ),
         chunks[2],
     );
 }
