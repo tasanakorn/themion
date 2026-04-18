@@ -1,14 +1,19 @@
-use themion_core::CodexAuth;
-use std::path::PathBuf;
 use anyhow::Result;
+use std::path::PathBuf;
+use themion_core::CodexAuth;
 
 pub fn auth_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("themion").join("auth.json"))
 }
 
 pub fn load() -> Result<Option<CodexAuth>> {
-    let path = match auth_path() { Some(p) => p, None => return Ok(None) };
-    if !path.exists() { return Ok(None); }
+    let path = match auth_path() {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
     let s = std::fs::read_to_string(&path)?;
     Ok(Some(serde_json::from_str(&s)?))
 }

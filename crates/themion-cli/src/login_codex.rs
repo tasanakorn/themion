@@ -1,7 +1,7 @@
-use std::future::Future;
-use std::pin::Pin;
 use anyhow::{anyhow, Result};
 use base64::Engine;
+use std::future::Future;
+use std::pin::Pin;
 use themion_core::CodexAuth;
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -15,7 +15,10 @@ pub struct DeviceCodeInfo {
 
 /// Returns (DeviceCodeInfo, polling future).
 /// Caller displays DeviceCodeInfo immediately, then awaits the future.
-pub async fn start_device_flow() -> Result<(DeviceCodeInfo, Pin<Box<dyn Future<Output = Result<CodexAuth>> + Send + 'static>>)> {
+pub async fn start_device_flow() -> Result<(
+    DeviceCodeInfo,
+    Pin<Box<dyn Future<Output = Result<CodexAuth>> + Send + 'static>>,
+)> {
     let client = reqwest::Client::new();
 
     // Step 1: request user code (JSON body, JSON response)
@@ -33,7 +36,8 @@ pub async fn start_device_flow() -> Result<(DeviceCodeInfo, Pin<Box<dyn Future<O
     }
 
     let json: serde_json::Value = resp.json().await?;
-    let device_auth_id = json["device_auth_id"].as_str()
+    let device_auth_id = json["device_auth_id"]
+        .as_str()
         .ok_or_else(|| anyhow!("missing device_auth_id in response"))?
         .to_string();
     let user_code = json["user_code"]
@@ -41,7 +45,8 @@ pub async fn start_device_flow() -> Result<(DeviceCodeInfo, Pin<Box<dyn Future<O
         .or_else(|| json["usercode"].as_str())
         .ok_or_else(|| anyhow!("missing user_code in response"))?
         .to_string();
-    let interval = json["interval"].as_str()
+    let interval = json["interval"]
+        .as_str()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .or_else(|| json["interval"].as_u64())
         .unwrap_or(5);
@@ -49,11 +54,13 @@ pub async fn start_device_flow() -> Result<(DeviceCodeInfo, Pin<Box<dyn Future<O
     // Verification URL is fixed — not returned by the endpoint
     let verification_uri = format!("{ISSUER}/codex/device");
 
-    let info = DeviceCodeInfo { user_code: user_code.clone(), verification_uri };
+    let info = DeviceCodeInfo {
+        user_code: user_code.clone(),
+        verification_uri,
+    };
 
-    let poll_fut = Box::pin(async move {
-        poll_for_auth(client, device_auth_id, user_code, interval).await
-    });
+    let poll_fut =
+        Box::pin(async move { poll_for_auth(client, device_auth_id, user_code, interval).await });
 
     Ok((info, poll_fut))
 }
@@ -90,10 +97,12 @@ async fn poll_for_auth(
 
         if status.is_success() {
             let json: serde_json::Value = resp.json().await?;
-            let authorization_code = json["authorization_code"].as_str()
+            let authorization_code = json["authorization_code"]
+                .as_str()
                 .ok_or_else(|| anyhow!("missing authorization_code in token poll response"))?
                 .to_string();
-            let code_verifier = json["code_verifier"].as_str()
+            let code_verifier = json["code_verifier"]
+                .as_str()
                 .ok_or_else(|| anyhow!("missing code_verifier in token poll response"))?
                 .to_string();
             return exchange_code(client, authorization_code, code_verifier).await;
@@ -137,10 +146,12 @@ async fn exchange_code(
     }
 
     let json: serde_json::Value = resp.json().await?;
-    let access_token = json["access_token"].as_str()
+    let access_token = json["access_token"]
+        .as_str()
         .ok_or_else(|| anyhow!("missing access_token"))?
         .to_string();
-    let refresh_token = json["refresh_token"].as_str()
+    let refresh_token = json["refresh_token"]
+        .as_str()
         .ok_or_else(|| anyhow!("missing refresh_token"))?
         .to_string();
     let expires_in = json["expires_in"].as_i64().unwrap_or(3600);
@@ -151,15 +162,20 @@ async fn exchange_code(
     let expires_at = now + expires_in;
 
     // Extract account_id from access_token JWT (same as pi-mono)
-    let account_id = extract_account_id(&access_token)
-        .or_else(|_| {
-            // Fallback: try id_token if present
-            json["id_token"].as_str()
-                .ok_or_else(|| anyhow!("no id_token"))
-                .and_then(extract_account_id)
-        })?;
+    let account_id = extract_account_id(&access_token).or_else(|_| {
+        // Fallback: try id_token if present
+        json["id_token"]
+            .as_str()
+            .ok_or_else(|| anyhow!("no id_token"))
+            .and_then(extract_account_id)
+    })?;
 
-    Ok(CodexAuth { access_token, refresh_token, expires_at, account_id })
+    Ok(CodexAuth {
+        access_token,
+        refresh_token,
+        expires_at,
+        account_id,
+    })
 }
 
 fn extract_account_id(jwt: &str) -> Result<String> {
@@ -178,8 +194,8 @@ fn extract_account_id(jwt: &str) -> Result<String> {
         .decode(payload_b64)
         .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(&padded))
         .map_err(|e| anyhow!("JWT base64 decode error: {e}"))?;
-    let payload: serde_json::Value = serde_json::from_slice(&decoded)
-        .map_err(|e| anyhow!("JWT JSON parse error: {e}"))?;
+    let payload: serde_json::Value =
+        serde_json::from_slice(&decoded).map_err(|e| anyhow!("JWT JSON parse error: {e}"))?;
     let account_id = payload[JWT_CLAIM_NS]["chatgpt_account_id"]
         .as_str()
         .ok_or_else(|| anyhow!("missing chatgpt_account_id in JWT"))?

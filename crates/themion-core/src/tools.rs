@@ -1,10 +1,10 @@
+use crate::db::{DbHandle, RecallArgs, RecallDirection, SearchArgs};
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
-use crate::db::{DbHandle, RecallArgs, RecallDirection, SearchArgs};
 
 pub struct ToolCtx {
     pub db: Arc<DbHandle>,
@@ -120,20 +120,28 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
 
     match name {
         "read_file" => {
-            let path = args["path"].as_str().ok_or_else(|| anyhow::anyhow!("missing path"))?;
+            let path = args["path"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing path"))?;
             let path = ctx.project_dir.join(path);
             let content = fs::read_to_string(path)?;
             Ok(content)
         }
         "write_file" => {
-            let path = args["path"].as_str().ok_or_else(|| anyhow::anyhow!("missing path"))?;
+            let path = args["path"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing path"))?;
             let path = ctx.project_dir.join(path);
-            let content = args["content"].as_str().ok_or_else(|| anyhow::anyhow!("missing content"))?;
+            let content = args["content"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing content"))?;
             fs::write(path, content)?;
             Ok(format!("Written"))
         }
         "list_directory" => {
-            let path = args["path"].as_str().ok_or_else(|| anyhow::anyhow!("missing path"))?;
+            let path = args["path"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing path"))?;
             let path = ctx.project_dir.join(path);
             let entries: Vec<String> = fs::read_dir(path)?
                 .filter_map(|e| e.ok())
@@ -142,7 +150,9 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             Ok(entries.join("\n"))
         }
         "bash" => {
-            let command = args["command"].as_str().ok_or_else(|| anyhow::anyhow!("missing command"))?;
+            let command = args["command"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing command"))?;
             // TODO: add timeout
             let output = tokio::process::Command::new("sh")
                 .arg("-c")
@@ -155,34 +165,68 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             Ok(format!("{stdout}{stderr}"))
         }
         "recall_history" => {
-            let session_id = args["session_id"].as_str().and_then(|s| Uuid::parse_str(s).ok())
+            let session_id = args["session_id"]
+                .as_str()
+                .and_then(|s| Uuid::parse_str(s).ok())
                 .or(Some(ctx.session_id));
-            let project_dir = args["project_dir"].as_str().map(PathBuf::from)
+            let project_dir = args["project_dir"]
+                .as_str()
+                .map(PathBuf::from)
                 .or_else(|| Some(ctx.project_dir.clone()));
             let limit = args["limit"].as_u64().map(|n| n as u32).unwrap_or(20);
             let direction = match args["direction"].as_str() {
                 Some("oldest") => RecallDirection::Oldest,
                 _ => RecallDirection::Newest,
             };
-            match ctx.db.recall(RecallArgs { session_id, project_dir, limit, direction }) {
-                Ok(msgs) => Ok(serde_json::to_string(&msgs.iter().map(|m| serde_json::json!({
-                    "turn_seq": m.turn_seq, "role": m.role, "content": m.content,
-                    "tool_calls": m.tool_calls_json, "tool_call_id": m.tool_call_id,
-                })).collect::<Vec<_>>()).unwrap_or_default()),
+            match ctx.db.recall(RecallArgs {
+                session_id,
+                project_dir,
+                limit,
+                direction,
+            }) {
+                Ok(msgs) => Ok(serde_json::to_string(
+                    &msgs
+                        .iter()
+                        .map(|m| {
+                            serde_json::json!({
+                                "turn_seq": m.turn_seq, "role": m.role, "content": m.content,
+                                "tool_calls": m.tool_calls_json, "tool_call_id": m.tool_call_id,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap_or_default()),
                 Err(e) => Ok(format!("Error: {e}")),
             }
         }
         "search_history" => {
             let query = args["query"].as_str().unwrap_or("").to_string();
-            let session_id = args["session_id"].as_str().and_then(|s| Uuid::parse_str(s).ok());
-            let project_dir = args["project_dir"].as_str().map(PathBuf::from)
+            let session_id = args["session_id"]
+                .as_str()
+                .and_then(|s| Uuid::parse_str(s).ok());
+            let project_dir = args["project_dir"]
+                .as_str()
+                .map(PathBuf::from)
                 .or_else(|| Some(ctx.project_dir.clone()));
             let limit = args["limit"].as_u64().map(|n| n as u32).unwrap_or(10);
-            match ctx.db.search(SearchArgs { query, session_id, project_dir, limit }) {
-                Ok(hits) => Ok(serde_json::to_string(&hits.iter().map(|h| serde_json::json!({
-                    "session_id": h.session_id, "turn_seq": h.turn_seq,
-                    "role": h.role, "snippet": h.snippet,
-                })).collect::<Vec<_>>()).unwrap_or_default()),
+            match ctx.db.search(SearchArgs {
+                query,
+                session_id,
+                project_dir,
+                limit,
+            }) {
+                Ok(hits) => Ok(serde_json::to_string(
+                    &hits
+                        .iter()
+                        .map(|h| {
+                            serde_json::json!({
+                                "session_id": h.session_id, "turn_seq": h.turn_seq,
+                                "role": h.role, "snippet": h.snippet,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap_or_default()),
                 Err(e) => Ok(format!("Error: {e}")),
             }
         }

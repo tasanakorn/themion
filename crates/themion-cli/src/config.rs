@@ -85,9 +85,14 @@ pub fn resolve_profile(profile: &ProfileConfig) -> (String, String, Option<Strin
             (base_url, None, model)
         }
         "openai-codex" => {
-            let base_url = profile.base_url.clone().filter(|s| !s.is_empty())
+            let base_url = profile
+                .base_url
+                .clone()
+                .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| CODEX_DEFAULT_BASE_URL.to_string());
-            let model = std::env::var("CODEX_MODEL").ok().filter(|s| !s.is_empty())
+            let model = std::env::var("CODEX_MODEL")
+                .ok()
+                .filter(|s| !s.is_empty())
                 .or_else(|| profile.model.clone().filter(|s| !s.is_empty()))
                 .unwrap_or_else(|| CODEX_DEFAULT_MODEL.to_string());
             (base_url, None, model)
@@ -152,12 +157,14 @@ impl Config {
 
         // Always ensure the active profile exists in the map so it appears in listings.
         // Use only file-level values here — never bake env-override values into the saved map.
-        profiles.entry(active_profile.clone()).or_insert_with(|| ProfileConfig {
-            provider: profile.provider.clone(),
-            base_url: profile.base_url.clone(),
-            model: profile.model.clone(),
-            api_key: profile.api_key.clone(),
-        });
+        profiles
+            .entry(active_profile.clone())
+            .or_insert_with(|| ProfileConfig {
+                provider: profile.provider.clone(),
+                base_url: profile.base_url.clone(),
+                model: profile.model.clone(),
+                api_key: profile.api_key.clone(),
+            });
 
         let system_prompt = std::env::var("SYSTEM_PROMPT")
             .ok()
@@ -190,7 +197,10 @@ impl Config {
 }
 
 /// Persist profiles and active profile selection back to the config file.
-pub fn save_profiles(active_profile: &str, profiles: &HashMap<String, ProfileConfig>) -> Result<()> {
+pub fn save_profiles(
+    active_profile: &str,
+    profiles: &HashMap<String, ProfileConfig>,
+) -> Result<()> {
     let path = match config_path() {
         Some(p) => p,
         None => return Ok(()),
@@ -204,9 +214,7 @@ pub fn save_profiles(active_profile: &str, profiles: &HashMap<String, ProfileCon
     let mut file_config: FileConfig = toml::from_str(&raw).unwrap_or_default();
     file_config.primary_llm_profile = Some(active_profile.to_string());
     file_config.profile = Some(profiles.clone());
-    let out = toml::to_string_pretty(&file_config)
-        .context("serializing config")?;
-    fs::write(&path, out)
-        .with_context(|| format!("writing config file {}", path.display()))?;
+    let out = toml::to_string_pretty(&file_config).context("serializing config")?;
+    fs::write(&path, out).with_context(|| format!("writing config file {}", path.display()))?;
     Ok(())
 }

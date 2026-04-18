@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 pub struct CodexAuth {
     pub access_token: String,
     pub refresh_token: String,
-    pub expires_at: i64,   // unix epoch seconds
+    pub expires_at: i64, // unix epoch seconds
     pub account_id: String,
 }
 

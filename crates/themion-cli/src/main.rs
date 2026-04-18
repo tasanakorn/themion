@@ -3,8 +3,8 @@ mod config;
 mod login_codex;
 mod tui;
 use config::{Config, ProfileConfig};
-use themion_core::agent::TurnStats;
 use std::collections::HashMap;
+use themion_core::agent::TurnStats;
 
 pub fn format_duration(ms: u128) -> String {
     if ms < 1000 {
@@ -17,10 +17,18 @@ pub fn format_duration(ms: u128) -> String {
 }
 
 pub fn format_stats(s: &TurnStats) -> String {
-    format!("[stats: rounds={} tools={} in={} out={} cached={} time={}]",
-        s.llm_rounds, s.tool_calls, s.tokens_in, s.tokens_out, s.tokens_cached, format_duration(s.elapsed_ms))
+    format!(
+        "[stats: rounds={} tools={} in={} out={} cached={} time={}]",
+        s.llm_rounds,
+        s.tool_calls,
+        s.tokens_in,
+        s.tokens_out,
+        s.tokens_cached,
+        format_duration(s.elapsed_ms)
+    )
 }
 
+#[derive(Clone)]
 pub struct Session {
     pub active_profile: String,
     pub profiles: HashMap<String, ProfileConfig>,
@@ -66,7 +74,6 @@ async fn main() -> anyhow::Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    // Parse --dir <path> flag
     let (project_dir_override, remaining_args) = {
         let mut dir: Option<std::path::PathBuf> = None;
         let mut rest = Vec::new();
@@ -89,9 +96,13 @@ async fn main() -> anyhow::Result<()> {
         let prompt = remaining_args.join(" ");
 
         let project_dir = project_dir_override
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
+            .unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            })
             .canonicalize()
-            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+            .unwrap_or_else(|_| {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            });
 
         let db = match dirs::data_dir() {
             Some(d) => {
@@ -106,20 +117,29 @@ async fn main() -> anyhow::Result<()> {
         let session_id = uuid::Uuid::new_v4();
         let _ = db.insert_session(session_id, &project_dir, false);
 
-        let client: Box<dyn themion_core::ChatBackend + Send + Sync> = if cfg.provider == "openai-codex" {
-            let auth = auth_store::load()
-                .unwrap_or(None)
-                .ok_or_else(|| anyhow::anyhow!("no codex auth; run /login codex first"))?;
-            Box::new(themion_core::client_codex::CodexClient::new(
-                cfg.base_url,
-                auth,
-                Box::new(|a: &themion_core::CodexAuth| auth_store::save(a)),
-            ))
-        } else {
-            Box::new(themion_core::client::ChatClient::new(cfg.base_url, cfg.api_key))
-        };
+        let client: Box<dyn themion_core::ChatBackend + Send + Sync> =
+            if cfg.provider == "openai-codex" {
+                let auth = auth_store::load()
+                    .unwrap_or(None)
+                    .ok_or_else(|| anyhow::anyhow!("no codex auth; run /login codex first"))?;
+                Box::new(themion_core::client_codex::CodexClient::new(
+                    cfg.base_url,
+                    auth,
+                    Box::new(|a: &themion_core::CodexAuth| auth_store::save(a)),
+                ))
+            } else {
+                Box::new(themion_core::client::ChatClient::new(
+                    cfg.base_url,
+                    cfg.api_key,
+                ))
+            };
         let mut agent = themion_core::agent::Agent::new_with_db(
-            client, cfg.model, cfg.system_prompt, session_id, project_dir, db,
+            client,
+            cfg.model,
+            cfg.system_prompt,
+            session_id,
+            project_dir,
+            db,
         );
         let (result, stats) = agent.run_loop(&prompt).await?;
         println!("{result}");

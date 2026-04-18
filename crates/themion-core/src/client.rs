@@ -134,7 +134,8 @@ impl ChatClient {
     }
 
     fn build_request(&self, body: &Value) -> reqwest::RequestBuilder {
-        let mut req = self.client
+        let mut req = self
+            .client
             .post(format!("{}/chat/completions", self.base_url))
             .header("Content-Type", "application/json")
             .json(body);
@@ -215,30 +216,41 @@ impl ChatClient {
         let mut done = false;
 
         while !done {
-            let Some(bytes) = response.chunk().await? else { break };
+            let Some(bytes) = response.chunk().await? else {
+                break;
+            };
             buf.extend_from_slice(&bytes);
 
             // Process all complete lines (\n-terminated) from the buffer.
             // Splitting on the 0x0A byte is safe: LF cannot appear as a UTF-8
             // continuation byte, so we never split a multi-byte character.
             loop {
-                let Some(pos) = buf.iter().position(|&b| b == b'\n') else { break };
+                let Some(pos) = buf.iter().position(|&b| b == b'\n') else {
+                    break;
+                };
                 let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
                 // Strip trailing CRLF or LF
-                let line_bytes = line_bytes.strip_suffix(b"\r\n")
+                let line_bytes = line_bytes
+                    .strip_suffix(b"\r\n")
                     .or_else(|| line_bytes.strip_suffix(b"\n"))
                     .unwrap_or(&line_bytes);
 
-                let Ok(line) = std::str::from_utf8(line_bytes) else { continue };
+                let Ok(line) = std::str::from_utf8(line_bytes) else {
+                    continue;
+                };
 
-                let Some(data) = line.strip_prefix("data: ") else { continue };
+                let Some(data) = line.strip_prefix("data: ") else {
+                    continue;
+                };
 
                 if data == "[DONE]" {
                     done = true;
                     break;
                 }
 
-                let Ok(chunk) = serde_json::from_str::<StreamChunkData>(data) else { continue };
+                let Ok(chunk) = serde_json::from_str::<StreamChunkData>(data) else {
+                    continue;
+                };
 
                 if let Some(u) = chunk.usage {
                     usage = Some(u);
@@ -284,18 +296,27 @@ impl ChatClient {
         let tool_calls = if tool_calls_acc.is_empty() {
             None
         } else {
-            Some(tool_calls_acc.into_iter().map(|acc| ToolCall {
-                id: acc.id,
-                function: FunctionCall {
-                    name: acc.name,
-                    arguments: acc.arguments,
-                },
-            }).collect())
+            Some(
+                tool_calls_acc
+                    .into_iter()
+                    .map(|acc| ToolCall {
+                        id: acc.id,
+                        function: FunctionCall {
+                            name: acc.name,
+                            arguments: acc.arguments,
+                        },
+                    })
+                    .collect(),
+            )
         };
 
         let message = ResponseMessage {
             role: "assistant".to_string(),
-            content: if content.is_empty() { None } else { Some(content) },
+            content: if content.is_empty() {
+                None
+            } else {
+                Some(content)
+            },
             tool_calls,
         };
 
@@ -312,6 +333,7 @@ impl ChatBackend for ChatClient {
         tools: &Value,
         on_chunk: Box<dyn FnMut(String) + Send + 'static>,
     ) -> Result<(ResponseMessage, Option<Usage>)> {
-        self.chat_completion_stream(model, messages, tools, on_chunk).await
+        self.chat_completion_stream(model, messages, tools, on_chunk)
+            .await
     }
 }

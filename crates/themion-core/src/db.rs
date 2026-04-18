@@ -229,18 +229,15 @@ impl DbHandle {
             .unwrap_or_default();
 
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(
-            rusqlite::params![session_str, project_str, limit],
-            |row| {
-                Ok(RecalledMessage {
-                    turn_seq: row.get::<_, i64>(0)? as u32,
-                    role: row.get(1)?,
-                    content: row.get(2)?,
-                    tool_calls_json: row.get(3)?,
-                    tool_call_id: row.get(4)?,
-                })
-            },
-        )?;
+        let rows = stmt.query_map(rusqlite::params![session_str, project_str, limit], |row| {
+            Ok(RecalledMessage {
+                turn_seq: row.get::<_, i64>(0)? as u32,
+                role: row.get(1)?,
+                content: row.get(2)?,
+                tool_calls_json: row.get(3)?,
+                tool_call_id: row.get(4)?,
+            })
+        })?;
 
         let mut out = Vec::new();
         for r in rows {

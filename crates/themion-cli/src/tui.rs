@@ -1,8 +1,7 @@
-use std::io;
-use std::path::PathBuf;
-use std::sync::Arc;
+use crate::config::{save_profiles, Config, ProfileConfig};
+use crate::{format_stats, Session};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers, EventStream, MouseEventKind},
+    event::{self, Event, EventStream, KeyCode, KeyModifiers, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -14,18 +13,17 @@ use ratatui::{
     widgets::{Block, Borders, Padding, Paragraph},
     Frame, Terminal,
 };
+use std::io;
+use std::path::PathBuf;
+use std::sync::Arc;
+use themion_core::agent::{Agent, AgentEvent, TurnStats};
+use themion_core::client::ChatClient;
+use themion_core::client_codex::{CodexClient, RateLimitSnapshot, RateLimitWindow};
+use themion_core::db::DbHandle;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tui_textarea::TextArea;
 use uuid::Uuid;
-use crate::config::{Config, ProfileConfig, save_profiles};
-use themion_core::agent::{Agent, AgentEvent, TurnStats};
-use themion_core::client::ChatClient;
-use themion_core::client_codex::CodexClient;
-use themion_core::db::DbHandle;
-use crate::{Session, format_stats};
-
-// ── App events ────────────────────────────────────────────────────────────────
 
 enum AppEvent {
     Key(event::KeyEvent),
@@ -33,23 +31,23 @@ enum AppEvent {
     Agent(AgentEvent),
     AgentReady(Box<Agent>, Uuid),
     Tick,
-    LoginPrompt { user_code: String, verification_uri: String },
+    LoginPrompt {
+        user_code: String,
+        verification_uri: String,
+    },
     LoginComplete(anyhow::Result<themion_core::CodexAuth>),
+    StatusResult(anyhow::Result<RateLimitSnapshot>),
 }
-
-// ── Chat entries ──────────────────────────────────────────────────────────────
 
 enum Entry {
     User(String),
     Assistant(String),
     Banner(String),
-    ToolCall(String),   // detail, e.g. "bash: ls -la"
+    ToolCall(String),
     ToolDone,
     Stats(String),
     Blank,
 }
-
-// ── App state ─────────────────────────────────────────────────────────────────
 
 pub struct AgentHandle {
     pub agent: Option<Agent>,
@@ -57,31 +55,91 @@ pub struct AgentHandle {
     pub is_interactive: bool,
 }
 
+#[derive(Clone)]
+enum BusyPhase {
+    PreparingRequest,
+    WaitingForModel,
+    StreamingResponse,
+    RunningTool(String),
+    WaitingAfterTool,
+    FetchingStatus,
+    LoginStarting,
+    WaitingForLoginBrowser,
+    Finishing,
+}
+
+impl BusyPhase {
+    fn label(&self, stream_chunks: u64, stream_chars: u64) -> String {
+        match self {
+            BusyPhase::PreparingRequest => "preparing request…".to_string(),
+            BusyPhase::WaitingForModel => "waiting for model…".to_string(),
+            BusyPhase::StreamingResponse => format!(
+                "receiving response… chunks:{} chars:{}",
+                stream_chunks, stream_chars
+            ),
+            BusyPhase::RunningTool(detail) => format!("running tool… {}", detail),
+            BusyPhase::WaitingAfterTool => "tool finished, waiting for model…".to_string(),
+            BusyPhase::FetchingStatus => "fetching status…".to_string(),
+            BusyPhase::LoginStarting => "starting login…".to_string(),
+            BusyPhase::WaitingForLoginBrowser => "waiting for login confirmation…".to_string(),
+            BusyPhase::Finishing => "finalizing…".to_string(),
+        }
+    }
+
+    fn status_bar(&self, stream_chunks: u64, stream_chars: u64) -> String {
+        match self {
+            BusyPhase::PreparingRequest => "phase: preparing".to_string(),
+            BusyPhase::WaitingForModel => "phase: waiting-model".to_string(),
+            BusyPhase::StreamingResponse => {
+                format!("phase: streaming c:{} ch:{}", stream_chunks, stream_chars)
+            }
+            BusyPhase::RunningTool(_) => "phase: running-tool".to_string(),
+            BusyPhase::WaitingAfterTool => "phase: waiting-after-tool".to_string(),
+            BusyPhase::FetchingStatus => "phase: status".to_string(),
+            BusyPhase::LoginStarting => "phase: login-start".to_string(),
+            BusyPhase::WaitingForLoginBrowser => "phase: login-wait".to_string(),
+            BusyPhase::Finishing => "phase: finalizing".to_string(),
+        }
+    }
+}
+
 pub struct App<'a> {
     session: Session,
     entries: Vec<Entry>,
-    pending: Option<String>,       // current in-progress status shown below entries
+    pending: Option<String>,
     input: TextArea<'a>,
     running: bool,
     agent_busy: bool,
-    scroll_offset: usize,          // lines from bottom (0 = pinned to bottom)
-    history: Vec<String>,          // submitted messages, oldest first
-    history_pos: Option<usize>,    // None = not navigating; Some(i) = showing history[i]
-    history_draft: String,         // input saved before starting history navigation
-    streaming_idx: Option<usize>,  // index into entries of the live assistant entry
+    scroll_offset: usize,
+    history: Vec<String>,
+    history_pos: Option<usize>,
+    history_draft: String,
+    streaming_idx: Option<usize>,
     anim_frame: u8,
     agents: Vec<AgentHandle>,
     db: Arc<DbHandle>,
     project_dir: PathBuf,
-    session_tokens: TurnStats,     // cumulative across all turns
-    last_ctx_tokens: u64,          // tokens_in from last API call
+    session_tokens: TurnStats,
+    last_ctx_tokens: u64,
+    busy_phase: Option<BusyPhase>,
+    stream_chunks: u64,
+    stream_chars: u64,
 }
 
 impl<'a> App<'a> {
-    pub fn new(session: Session, db: Arc<DbHandle>, session_id: Uuid, project_dir: PathBuf) -> Self {
+    pub fn new(
+        session: Session,
+        db: Arc<DbHandle>,
+        session_id: Uuid,
+        project_dir: PathBuf,
+    ) -> Self {
         let agent = build_agent(&session, session_id, project_dir.clone(), db.clone())
             .expect("failed to build agent");
-        let handle = AgentHandle { agent: Some(agent), session_id, is_interactive: true };
+        let handle = AgentHandle {
+            agent: Some(agent),
+            session_id,
+            is_interactive: true,
+        };
 
         let art = concat!(
             "█████  █   █  █████  █   █  ███   ███   █   █\n",
@@ -122,8 +180,18 @@ impl<'a> App<'a> {
             agents: vec![handle],
             db,
             project_dir,
-            session_tokens: TurnStats { llm_rounds: 0, tool_calls: 0, tokens_in: 0, tokens_out: 0, tokens_cached: 0, elapsed_ms: 0 },
+            session_tokens: TurnStats {
+                llm_rounds: 0,
+                tool_calls: 0,
+                tokens_in: 0,
+                tokens_out: 0,
+                tokens_cached: 0,
+                elapsed_ms: 0,
+            },
             last_ctx_tokens: 0,
+            busy_phase: None,
+            stream_chunks: 0,
+            stream_chars: 0,
         }
     }
 
@@ -164,16 +232,36 @@ impl<'a> App<'a> {
         }
     }
 
-    fn thinking_str(&self) -> String {
+    fn pending_str(&self) -> String {
         const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
         let ch = SPINNER[self.anim_frame as usize % SPINNER.len()];
-        format!("  {} thinking…", ch)
+        let phase = self
+            .busy_phase
+            .as_ref()
+            .map(|p| p.label(self.stream_chunks, self.stream_chars))
+            .unwrap_or_else(|| "thinking…".to_string());
+        format!("  {} {}", ch, phase)
+    }
+
+    fn set_busy_phase(&mut self, phase: BusyPhase) {
+        self.busy_phase = Some(phase);
+        self.pending = Some(self.pending_str());
+    }
+
+    fn clear_busy_phase(&mut self) {
+        self.busy_phase = None;
+        self.pending = None;
+    }
+
+    fn reset_stream_counters(&mut self) {
+        self.stream_chunks = 0;
+        self.stream_chars = 0;
     }
 
     fn on_tick(&mut self) {
         self.anim_frame = self.anim_frame.wrapping_add(1);
         if self.agent_busy && self.pending.is_some() {
-            self.pending = Some(self.thinking_str());
+            self.pending = Some(self.pending_str());
         }
     }
 
@@ -184,11 +272,14 @@ impl<'a> App<'a> {
     fn handle_agent_event(&mut self, ev: AgentEvent) {
         match ev {
             AgentEvent::LlmStart => {
-                self.pending = Some(self.thinking_str());
+                self.reset_stream_counters();
+                self.set_busy_phase(BusyPhase::WaitingForModel);
                 self.streaming_idx = None;
             }
             AgentEvent::AssistantChunk(chunk) => {
-                self.pending = None;
+                self.stream_chunks += 1;
+                self.stream_chars += chunk.chars().count() as u64;
+                self.set_busy_phase(BusyPhase::StreamingResponse);
                 match self.streaming_idx {
                     Some(i) => {
                         if let Some(Entry::Assistant(ref mut text)) = self.entries.get_mut(i) {
@@ -203,21 +294,22 @@ impl<'a> App<'a> {
             }
             AgentEvent::AssistantText(text) => {
                 self.streaming_idx = None;
-                self.pending = None;
+                self.clear_busy_phase();
                 self.push(Entry::Assistant(text));
             }
             AgentEvent::ToolStart { detail } => {
                 self.streaming_idx = None;
-                self.pending = None;
+                self.set_busy_phase(BusyPhase::RunningTool(detail.clone()));
                 self.push(Entry::ToolCall(detail));
             }
             AgentEvent::ToolEnd => {
                 self.push(Entry::ToolDone);
-                self.pending = Some(self.thinking_str());
+                self.set_busy_phase(BusyPhase::WaitingAfterTool);
             }
             AgentEvent::TurnDone(stats) => {
                 self.streaming_idx = None;
-                self.pending = None;
+                self.set_busy_phase(BusyPhase::Finishing);
+                self.clear_busy_phase();
                 self.push(Entry::Stats(format_stats(&stats)));
                 self.push(Entry::Blank);
                 self.agent_busy = false;
@@ -228,11 +320,16 @@ impl<'a> App<'a> {
                 self.session_tokens.llm_rounds += stats.llm_rounds;
                 self.session_tokens.tool_calls += stats.tool_calls;
                 self.session_tokens.elapsed_ms += stats.elapsed_ms;
+                self.reset_stream_counters();
             }
         }
     }
 
-    fn handle_command(&mut self, input: &str, app_tx: &mpsc::UnboundedSender<AppEvent>) -> Vec<String> {
+    fn handle_command(
+        &mut self,
+        input: &str,
+        app_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) -> Vec<String> {
         let mut out = Vec::new();
 
         if input == "/login codex" {
@@ -240,21 +337,56 @@ impl<'a> App<'a> {
                 return vec!["busy, please wait".to_string()];
             }
             self.agent_busy = true;
+            self.set_busy_phase(BusyPhase::LoginStarting);
             self.push(Entry::Assistant("logging in to OpenAI Codex…".to_string()));
             let tx = app_tx.clone();
             tokio::spawn(async move {
                 match crate::login_codex::start_device_flow().await {
-                    Err(e) => { tx.send(AppEvent::LoginComplete(Err(e))).ok(); }
+                    Err(e) => {
+                        tx.send(AppEvent::LoginComplete(Err(e))).ok();
+                    }
                     Ok((info, poll)) => {
                         tx.send(AppEvent::LoginPrompt {
                             user_code: info.user_code,
                             verification_uri: info.verification_uri,
-                        }).ok();
+                        })
+                        .ok();
                         let result = poll.await;
                         tx.send(AppEvent::LoginComplete(result)).ok();
                     }
                 }
             });
+            return out;
+        }
+
+        if input == "/status" {
+            if self.session.provider != "openai-codex" {
+                out.push("/status is only available for provider=openai-codex".to_string());
+                return out;
+            }
+            if self.agent_busy {
+                out.push("busy, please wait".to_string());
+                return out;
+            }
+            self.agent_busy = true;
+            self.set_busy_phase(BusyPhase::FetchingStatus);
+            let tx = app_tx.clone();
+            let session = self.session.clone();
+            tokio::spawn(async move {
+                let result = fetch_codex_status(&session).await;
+                let _ = tx.send(AppEvent::StatusResult(result));
+            });
+            return out;
+        }
+
+        if input == "/clear" {
+            if let Some(handle) = self.agents.iter_mut().find(|h| h.is_interactive) {
+                if let Some(agent) = handle.agent.as_mut() {
+                    agent.clear_context();
+                }
+            }
+            self.last_ctx_tokens = 0;
+            out.push("ok, future messages in this session will not include chat history before this point".to_string());
             return out;
         }
 
@@ -279,7 +411,11 @@ impl<'a> App<'a> {
                     let mut names: Vec<String> = self.session.profiles.keys().cloned().collect();
                     names.sort();
                     for name in names {
-                        let marker = if name == self.session.active_profile { "* " } else { "  " };
+                        let marker = if name == self.session.active_profile {
+                            "* "
+                        } else {
+                            "  "
+                        };
                         out.push(format!("{}{}", marker, name));
                     }
                 }
@@ -304,66 +440,110 @@ impl<'a> App<'a> {
                     };
                     self.session.profiles.insert(name.to_string(), p);
                     self.session.active_profile = name.to_string();
-                    if let Err(e) = save_profiles(&self.session.active_profile, &self.session.profiles) {
+                    if let Err(e) =
+                        save_profiles(&self.session.active_profile, &self.session.profiles)
+                    {
                         out.push(format!("warning: {}", e));
                     }
                     out.push(format!("profile '{}' created and saved", name));
                 }
                 ["profile", "use", name] => {
                     if self.session.switch_profile(name) {
-                        if let Err(e) = save_profiles(&self.session.active_profile, &self.session.profiles) {
+                        if let Err(e) =
+                            save_profiles(&self.session.active_profile, &self.session.profiles)
+                        {
                             out.push(format!("warning: {}", e));
                         }
                         let new_session_id = Uuid::new_v4();
-                        match build_agent(&self.session, new_session_id, self.project_dir.clone(), self.db.clone()) {
+                        match build_agent(
+                            &self.session,
+                            new_session_id,
+                            self.project_dir.clone(),
+                            self.db.clone(),
+                        ) {
                             Ok(new_agent) => {
                                 let db = self.db.clone();
                                 let pdir = self.project_dir.clone();
                                 let _ = db.insert_session(new_session_id, &pdir, true);
-                                self.agents = vec![AgentHandle { agent: Some(new_agent), session_id: new_session_id, is_interactive: true }];
-                                out.push(format!("switched to profile '{}'  provider={}  model={}", name, self.session.provider, self.session.model));
+                                self.agents = vec![AgentHandle {
+                                    agent: Some(new_agent),
+                                    session_id: new_session_id,
+                                    is_interactive: true,
+                                }];
+                                out.push(format!(
+                                    "switched to profile '{}'  provider={}  model={}",
+                                    name, self.session.provider, self.session.model
+                                ));
                             }
                             Err(e) => {
                                 out.push(format!("error building agent: {}", e));
                             }
                         }
                     } else {
-                        let mut names: Vec<String> = self.session.profiles.keys().cloned().collect();
+                        let mut names: Vec<String> =
+                            self.session.profiles.keys().cloned().collect();
                         names.sort();
-                        out.push(format!("unknown profile '{}'.  available: {}", name, names.join(", ")));
+                        out.push(format!(
+                            "unknown profile '{}'.  available: {}",
+                            name,
+                            names.join(", ")
+                        ));
                     }
                 }
                 ["profile", "set", kv] => {
                     if let Some((key, val)) = kv.split_once('=') {
                         match key {
                             "provider" => self.session.provider = val.to_string(),
-                            "model"    => self.session.model    = val.to_string(),
+                            "model" => self.session.model = val.to_string(),
                             "endpoint" => self.session.base_url = val.to_string(),
-                            "api_key"  => self.session.api_key  = Some(val.to_string()),
-                            _ => { out.push(format!("unknown key '{}'.  valid: provider, model, endpoint, api_key", key)); return out; }
+                            "api_key" => self.session.api_key = Some(val.to_string()),
+                            _ => {
+                                out.push(format!(
+                                    "unknown key '{}'.  valid: provider, model, endpoint, api_key",
+                                    key
+                                ));
+                                return out;
+                            }
                         }
-                        self.session.profiles.insert(self.session.active_profile.clone(), ProfileConfig {
-                            provider: Some(self.session.provider.clone()),
-                            base_url: Some(self.session.base_url.clone()),
-                            model:    Some(self.session.model.clone()),
-                            api_key:  self.session.api_key.clone(),
-                        });
-                        if let Err(e) = save_profiles(&self.session.active_profile, &self.session.profiles) {
+                        self.session.profiles.insert(
+                            self.session.active_profile.clone(),
+                            ProfileConfig {
+                                provider: Some(self.session.provider.clone()),
+                                base_url: Some(self.session.base_url.clone()),
+                                model: Some(self.session.model.clone()),
+                                api_key: self.session.api_key.clone(),
+                            },
+                        );
+                        if let Err(e) =
+                            save_profiles(&self.session.active_profile, &self.session.profiles)
+                        {
                             out.push(format!("warning: {}", e));
                         }
-                        out.push(format!("{}={} saved", key, if key == "api_key" { "(set)" } else { val }));
+                        out.push(format!(
+                            "{}={} saved",
+                            key,
+                            if key == "api_key" { "(set)" } else { val }
+                        ));
                     } else {
                         out.push("usage: /config profile set key=value".to_string());
                     }
                 }
                 _ => {
                     out.push("commands:".to_string());
-                    out.push("  /config                          show current settings".to_string());
+                    out.push(
+                        "  /config                          show current settings".to_string(),
+                    );
                     out.push("  /config profile [list]           list profiles".to_string());
                     out.push("  /config profile show             show active profile".to_string());
-                    out.push("  /config profile create <name>    create from current settings".to_string());
+                    out.push(
+                        "  /config profile create <name>    create from current settings"
+                            .to_string(),
+                    );
                     out.push("  /config profile use <name>       switch profile".to_string());
-                    out.push("  /config profile set key=value    set provider/model/endpoint/api_key".to_string());
+                    out.push(
+                        "  /config profile set key=value    set provider/model/endpoint/api_key"
+                            .to_string(),
+                    );
                 }
             }
             return out;
@@ -411,7 +591,8 @@ impl<'a> App<'a> {
 
         self.push(Entry::User(text.clone()));
         self.agent_busy = true;
-        self.pending = Some(self.thinking_str());
+        self.reset_stream_counters();
+        self.set_busy_phase(BusyPhase::PreparingRequest);
 
         let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let app_tx_relay = app_tx.clone();
@@ -422,7 +603,11 @@ impl<'a> App<'a> {
             }
         });
 
-        let handle = self.agents.iter_mut().find(|h| h.is_interactive).expect("interactive agent");
+        let handle = self
+            .agents
+            .iter_mut()
+            .find(|h| h.is_interactive)
+            .expect("interactive agent");
         let mut agent = handle.agent.take().expect("agent available when not busy");
         let handle_session_id = handle.session_id;
         agent.set_event_tx(event_tx);
@@ -430,16 +615,52 @@ impl<'a> App<'a> {
         let app_tx_done = app_tx.clone();
         tokio::spawn(async move {
             if let Err(e) = agent.run_loop(&text).await {
-                let _ = app_tx_done.send(AppEvent::Agent(AgentEvent::AssistantText(
-                    format!("error: {e}"),
-                )));
+                let _ = app_tx_done.send(AppEvent::Agent(AgentEvent::AssistantText(format!(
+                    "error: {e}"
+                ))));
             }
             let _ = app_tx_done.send(AppEvent::AgentReady(Box::new(agent), handle_session_id));
         });
     }
 }
 
-fn build_agent(session: &Session, session_id: Uuid, project_dir: PathBuf, db: Arc<DbHandle>) -> anyhow::Result<Agent> {
+async fn fetch_codex_status(session: &Session) -> anyhow::Result<RateLimitSnapshot> {
+    let auth = crate::auth_store::load()?
+        .ok_or_else(|| anyhow::anyhow!("no codex auth; run /login codex first"))?;
+    let client = CodexClient::new(
+        session.base_url.clone(),
+        auth,
+        Box::new(|a: &themion_core::CodexAuth| crate::auth_store::save(a)),
+    );
+    client.get_rate_limits().await
+}
+
+fn format_limit_line(label: &str, window: Option<&RateLimitWindow>) -> String {
+    match window {
+        Some(window) => {
+            let left = (100.0 - window.used_percent).clamp(0.0, 100.0);
+            match window.resets_at {
+                Some(ts) => format!("{}: {:.0}% left (resets at unix {})", label, left, ts),
+                None => format!("{}: {:.0}% left", label, left),
+            }
+        }
+        None => format!("{}: unavailable", label),
+    }
+}
+
+fn build_status_lines(snapshot: &RateLimitSnapshot) -> Vec<String> {
+    vec![
+        format_limit_line("five-hour-limit", snapshot.primary.as_ref()),
+        format_limit_line("weekly-limit", snapshot.secondary.as_ref()),
+    ]
+}
+
+fn build_agent(
+    session: &Session,
+    session_id: Uuid,
+    project_dir: PathBuf,
+    db: Arc<DbHandle>,
+) -> anyhow::Result<Agent> {
     use themion_core::ChatBackend;
     let client: Box<dyn ChatBackend + Send + Sync> = match session.provider.as_str() {
         "openai-codex" => {
@@ -455,16 +676,29 @@ fn build_agent(session: &Session, session_id: Uuid, project_dir: PathBuf, db: Ar
             let mut c = ChatClient::new(session.base_url.clone(), session.api_key.clone());
             if session.provider == "openrouter" {
                 c = c.with_headers([
-                    ("HTTP-Referer".to_string(), "https://github.com/tasanakorn".to_string()),
+                    (
+                        "HTTP-Referer".to_string(),
+                        "https://github.com/tasanakorn".to_string(),
+                    ),
                     ("X-Title".to_string(), "themion".to_string()),
                     ("X-OpenRouter-Title".to_string(), "themion".to_string()),
-                    ("X-OpenRouter-Categories".to_string(), "developer-tools".to_string()),
+                    (
+                        "X-OpenRouter-Categories".to_string(),
+                        "developer-tools".to_string(),
+                    ),
                 ]);
             }
             Box::new(c)
         }
     };
-    Ok(Agent::new_with_db(client, session.model.clone(), session.system_prompt.clone(), session_id, project_dir, db))
+    Ok(Agent::new_with_db(
+        client,
+        session.model.clone(),
+        session.system_prompt.clone(),
+        session_id,
+        project_dir,
+        db,
+    ))
 }
 
 fn set_input_text(input: &mut TextArea, text: &str) {
@@ -480,15 +714,18 @@ fn make_input<'a>() -> TextArea<'a> {
         Block::default()
             .borders(Borders::TOP)
             .border_style(Style::default().fg(Color::DarkGray))
-            .title(Span::styled("▸ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+            .title(Span::styled(
+                "▸ ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ))
             .padding(Padding::left(2)),
     );
     ta.set_cursor_line_style(Style::default());
     ta.set_placeholder_text("message…  (Enter send | Ctrl-C quit)");
     ta
 }
-
-// ── Rendering ─────────────────────────────────────────────────────────────────
 
 fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Line<'a>> {
     let mut lines: Vec<Line> = Vec::new();
@@ -499,11 +736,22 @@ fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Lin
                 lines.push(Line::default());
                 for (i, part) in text.lines().enumerate() {
                     let prefix = if i == 0 {
-                        Span::styled("▸ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                        Span::styled(
+                            "▸ ",
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        )
                     } else {
                         Span::raw("  ")
                     };
-                    lines.push(Line::from(vec![prefix, Span::styled(part.to_string(), Style::default().add_modifier(Modifier::BOLD))]));
+                    lines.push(Line::from(vec![
+                        prefix,
+                        Span::styled(
+                            part.to_string(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
                 }
             }
             Entry::Assistant(text) => {
@@ -516,21 +764,21 @@ fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Lin
             }
             Entry::Banner(text) => {
                 for part in text.lines() {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("  {}", part),
-                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                        ),
-                    ]));
+                    lines.push(Line::from(vec![Span::styled(
+                        format!("  {}", part),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )]));
                 }
             }
             Entry::ToolCall(detail) => {
-                lines.push(Line::from(vec![
-                    Span::styled(format!("  ↳ {}", detail), Style::default().fg(Color::Yellow)),
-                ]));
+                lines.push(Line::from(vec![Span::styled(
+                    format!("  ↳ {}", detail),
+                    Style::default().fg(Color::Yellow),
+                )]));
             }
             Entry::ToolDone => {
-                // merge with previous ToolCall line visually — just show checkmark
                 if let Some(last) = lines.last_mut() {
                     let mut spans = last.spans.clone();
                     spans.push(Span::styled("  ✓", Style::default().fg(Color::Green)));
@@ -538,9 +786,10 @@ fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Lin
                 }
             }
             Entry::Stats(s) => {
-                lines.push(Line::from(vec![
-                    Span::styled(format!("  {}", s), Style::default().fg(Color::DarkGray)),
-                ]));
+                lines.push(Line::from(vec![Span::styled(
+                    format!("  {}", s),
+                    Style::default().fg(Color::DarkGray),
+                )]));
             }
             Entry::Blank => {
                 lines.push(Line::default());
@@ -549,9 +798,10 @@ fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Lin
     }
 
     if let Some(p) = pending {
-        lines.push(Line::from(vec![
-            Span::styled(p.as_str(), Style::default().fg(Color::Yellow)),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            p.as_str(),
+            Style::default().fg(Color::Yellow),
+        )]));
     }
 
     lines
@@ -563,19 +813,16 @@ fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),      // conversation
-            Constraint::Length(3),   // input
-            Constraint::Length(1),   // status bar
+            Constraint::Min(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
         ])
         .split(area);
 
-    // ── Conversation ─────────────────────────────────────────────────────────
     let lines = build_lines(&app.entries, &app.pending);
     let height = chunks[0].height as usize;
     let width = chunks[0].width;
 
-    // Use ratatui's own line_count() to get the exact visual row count after
-    // word-wrap, then compute a scroll that pins the newest content to the bottom.
     let conv_base = Paragraph::new(lines)
         .wrap(ratatui::widgets::Wrap { trim: false })
         .block(Block::default());
@@ -584,12 +831,10 @@ fn draw(f: &mut Frame, app: &App) {
     let scroll = max_scroll.saturating_sub(app.scroll_offset) as u16;
 
     f.render_widget(conv_base.scroll((scroll, 0)), chunks[0]);
-
-    // ── Input ─────────────────────────────────────────────────────────────────
     f.render_widget(&app.input, chunks[1]);
 
-    // ── Status bar ───────────────────────────────────────────────────────────
-    let project_leaf = app.project_dir
+    let project_leaf = app
+        .project_dir
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("?");
@@ -597,16 +842,24 @@ fn draw(f: &mut Frame, app: &App) {
         let s = n.to_string();
         let mut out = String::new();
         for (i, ch) in s.chars().rev().enumerate() {
-            if i > 0 && i % 3 == 0 { out.push(','); }
+            if i > 0 && i % 3 == 0 {
+                out.push(',');
+            }
             out.push(ch);
         }
         out.chars().rev().collect()
     };
+    let phase = app
+        .busy_phase
+        .as_ref()
+        .map(|p| p.status_bar(app.stream_chunks, app.stream_chars))
+        .unwrap_or_else(|| "phase: idle".to_string());
     let bar = format!(
-        "  {}  |  {}  |  {}  |  in:{} out:{} cached:{}  |  ctx:{}",
+        "  {}  |  {}  |  {}  |  {}  |  in:{} out:{} cached:{}  |  ctx:{}",
         project_leaf,
         app.session.active_profile,
         app.session.model,
+        phase,
         fmt(app.session_tokens.tokens_in),
         fmt(app.session_tokens.tokens_out),
         fmt(app.session_tokens.tokens_cached),
@@ -618,30 +871,33 @@ fn draw(f: &mut Frame, app: &App) {
     );
 }
 
-// ── Entry point ───────────────────────────────────────────────────────────────
-
 pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Restore terminal on panic
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), crossterm::event::DisableMouseCapture, LeaveAlternateScreen);
+        let _ = execute!(
+            io::stdout(),
+            crossterm::event::DisableMouseCapture,
+            LeaveAlternateScreen
+        );
         original_hook(info);
     }));
 
-    // Resolve project_dir
     let project_dir = dir_override
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
         .canonicalize()
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    // Open DB
     let db = match dirs::data_dir() {
         Some(d) => {
             let db_path = d.join("themion").join("history.db");
@@ -656,7 +912,6 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
         }
     };
 
-    // Create session
     let session_id = Uuid::new_v4();
     let _ = db.insert_session(session_id, &project_dir, true);
 
@@ -668,8 +923,12 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
         let mut stream = EventStream::new();
         while let Some(Ok(ev)) = stream.next().await {
             match ev {
-                Event::Key(key) => { let _ = app_tx_input.send(AppEvent::Key(key)); }
-                Event::Mouse(m) => { let _ = app_tx_input.send(AppEvent::Mouse(m)); }
+                Event::Key(key) => {
+                    let _ = app_tx_input.send(AppEvent::Key(key));
+                }
+                Event::Mouse(m) => {
+                    let _ = app_tx_input.send(AppEvent::Mouse(m));
+                }
                 _ => {}
             }
         }
@@ -680,7 +939,9 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
         let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(150));
         loop {
             interval.tick().await;
-            if app_tx_tick.send(AppEvent::Tick).is_err() { break; }
+            if app_tx_tick.send(AppEvent::Tick).is_err() {
+                break;
+            }
         }
     });
 
@@ -704,7 +965,9 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 (KeyCode::PageDown, _) | (KeyCode::Down, KeyModifiers::ALT) => app.scroll_down(),
                 (KeyCode::Up, KeyModifiers::NONE) => app.history_up(),
                 (KeyCode::Down, KeyModifiers::NONE) => app.history_down(),
-                _ => { app.input.input(key); }
+                _ => {
+                    app.input.input(key);
+                }
             },
             Some(AppEvent::Tick) => app.on_tick(),
             Some(AppEvent::Agent(ev)) => app.handle_agent_event(ev),
@@ -712,43 +975,90 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 if let Some(h) = app.agents.iter_mut().find(|h| h.session_id == sid) {
                     h.agent = Some(*agent);
                 }
-                // Clear busy in case TurnDone was never emitted (e.g. error path)
                 app.agent_busy = false;
             }
-            Some(AppEvent::LoginPrompt { user_code, verification_uri }) => {
-                app.push(Entry::Assistant(format!("open {} and enter code {}", verification_uri, user_code)));
+            Some(AppEvent::LoginPrompt {
+                user_code,
+                verification_uri,
+            }) => {
+                app.set_busy_phase(BusyPhase::WaitingForLoginBrowser);
+                app.push(Entry::Assistant(format!(
+                    "open {} and enter code {}",
+                    verification_uri, user_code
+                )));
             }
             Some(AppEvent::LoginComplete(Ok(auth))) => {
+                app.clear_busy_phase();
                 if let Err(e) = crate::auth_store::save(&auth) {
-                    app.push(Entry::Assistant(format!("warning: failed to save auth: {}", e)));
+                    app.push(Entry::Assistant(format!(
+                        "warning: failed to save auth: {}",
+                        e
+                    )));
                 }
-                // Upsert codex profile
                 use crate::config::ProfileConfig;
-                app.session.profiles.entry("codex".to_string()).or_insert_with(|| ProfileConfig {
-                    provider: Some("openai-codex".to_string()),
-                    model: Some("gpt-5.4".to_string()),
-                    base_url: None,
-                    api_key: None,
-                });
+                app.session
+                    .profiles
+                    .entry("codex".to_string())
+                    .or_insert_with(|| ProfileConfig {
+                        provider: Some("openai-codex".to_string()),
+                        model: Some("gpt-5.4".to_string()),
+                        base_url: None,
+                        api_key: None,
+                    });
                 app.session.switch_profile("codex");
                 if let Err(e) = save_profiles(&app.session.active_profile, &app.session.profiles) {
-                    app.push(Entry::Assistant(format!("warning: failed to save config: {}", e)));
+                    app.push(Entry::Assistant(format!(
+                        "warning: failed to save config: {}",
+                        e
+                    )));
                 }
                 let new_session_id = Uuid::new_v4();
-                match build_agent(&app.session, new_session_id, app.project_dir.clone(), app.db.clone()) {
+                match build_agent(
+                    &app.session,
+                    new_session_id,
+                    app.project_dir.clone(),
+                    app.db.clone(),
+                ) {
                     Ok(new_agent) => {
-                        let _ = app.db.insert_session(new_session_id, &app.project_dir, true);
-                        app.agents = vec![AgentHandle { agent: Some(new_agent), session_id: new_session_id, is_interactive: true }];
-                        app.push(Entry::Assistant(format!("logged in as {} — switched to codex profile (gpt-5.4)", auth.account_id)));
+                        let _ = app
+                            .db
+                            .insert_session(new_session_id, &app.project_dir, true);
+                        app.agents = vec![AgentHandle {
+                            agent: Some(new_agent),
+                            session_id: new_session_id,
+                            is_interactive: true,
+                        }];
+                        app.push(Entry::Assistant(format!(
+                            "logged in as {} — switched to codex profile (gpt-5.4)",
+                            auth.account_id
+                        )));
                     }
                     Err(e) => {
-                        app.push(Entry::Assistant(format!("login succeeded but agent build failed: {}", e)));
+                        app.push(Entry::Assistant(format!(
+                            "login succeeded but agent build failed: {}",
+                            e
+                        )));
                     }
                 }
                 app.agent_busy = false;
             }
             Some(AppEvent::LoginComplete(Err(e))) => {
+                app.clear_busy_phase();
                 app.push(Entry::Assistant(format!("login failed: {}", e)));
+                app.agent_busy = false;
+            }
+            Some(AppEvent::StatusResult(Ok(snapshot))) => {
+                app.clear_busy_phase();
+                for line in build_status_lines(&snapshot) {
+                    app.push(Entry::Assistant(line));
+                }
+                app.push(Entry::Blank);
+                app.agent_busy = false;
+            }
+            Some(AppEvent::StatusResult(Err(e))) => {
+                app.clear_busy_phase();
+                app.push(Entry::Assistant(format!("status failed: {}", e)));
+                app.push(Entry::Blank);
                 app.agent_busy = false;
             }
             None => {}
@@ -756,7 +1066,11 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
     }
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), crossterm::event::DisableMouseCapture, LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        crossterm::event::DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
