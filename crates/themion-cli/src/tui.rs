@@ -326,7 +326,15 @@ impl<'a> App<'a> {
 }
 
 fn build_agent(session: &Session) -> Agent {
-    let client = ChatClient::new(session.base_url.clone(), session.api_key.clone());
+    let mut client = ChatClient::new(session.base_url.clone(), session.api_key.clone());
+    if session.provider == "openrouter" {
+        client = client.with_headers([
+            ("HTTP-Referer".into(),           "https://github.com/tasanakorn".into()),
+            ("X-Title".into(),                "themion".into()),
+            ("X-OpenRouter-Title".into(),     "themion".into()),
+            ("X-OpenRouter-Categories".into(), "developer-tools".into()),
+        ]);
+    }
     Agent::new(client, session.model.clone(), session.system_prompt.clone())
 }
 

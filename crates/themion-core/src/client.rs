@@ -100,6 +100,7 @@ pub struct ChatClient {
     client: Client,
     api_key: Option<String>,
     base_url: String,
+    extra_headers: Vec<(String, String)>,
 }
 
 pub type OpenRouterClient = ChatClient;
@@ -110,7 +111,27 @@ impl ChatClient {
             client: Client::new(),
             api_key,
             base_url,
+            extra_headers: Vec::new(),
         }
+    }
+
+    pub fn with_headers(mut self, headers: impl IntoIterator<Item = (String, String)>) -> Self {
+        self.extra_headers.extend(headers);
+        self
+    }
+
+    fn build_request(&self, body: &Value) -> reqwest::RequestBuilder {
+        let mut req = self.client
+            .post(format!("{}/chat/completions", self.base_url))
+            .header("Content-Type", "application/json")
+            .json(body);
+        if let Some(key) = &self.api_key {
+            req = req.header("Authorization", format!("Bearer {}", key));
+        }
+        for (name, value) in &self.extra_headers {
+            req = req.header(name.as_str(), value.as_str());
+        }
+        req
     }
 
     pub fn new_openrouter(api_key: String) -> Self {
@@ -129,16 +150,7 @@ impl ChatClient {
             "tools": tools,
         });
 
-        let mut request = self.client
-            .post(format!("{}/chat/completions", self.base_url))
-            .header("Content-Type", "application/json")
-            .json(&body);
-
-        if let Some(key) = &self.api_key {
-            request = request.header("Authorization", format!("Bearer {}", key));
-        }
-
-        let response = request.send().await?;
+        let response = self.build_request(&body).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -175,16 +187,7 @@ impl ChatClient {
             "stream_options": { "include_usage": true },
         });
 
-        let mut request = self.client
-            .post(format!("{}/chat/completions", self.base_url))
-            .header("Content-Type", "application/json")
-            .json(&body);
-
-        if let Some(key) = &self.api_key {
-            request = request.header("Authorization", format!("Bearer {}", key));
-        }
-
-        let mut response = request.send().await?;
+        let mut response = self.build_request(&body).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();
