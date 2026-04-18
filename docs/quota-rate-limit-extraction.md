@@ -35,6 +35,16 @@ So:
 - `five-hour-limit` comes from `codex.primary.used_percent`
 - `weekly-limit` comes from `codex.secondary.used_percent`
 
+## How `5h limit` gets displayed
+
+The label shown in the Codex UI follows this flow:
+
+1. HTTP headers provide the primary window duration via `x-codex-primary-window-minutes`.
+2. Any streamed rate-limit event may also carry `rate_limits.primary.window_minutes`.
+3. The UI copies `window_minutes` into its display model.
+4. The duration is rendered as a short string such as `5h`, with a fallback of `5h` if the window is unavailable.
+5. The label is formatted as `<duration> limit`, producing values like `5h limit`.
+
 ## Per-call extraction
 
 ### `POST /responses`

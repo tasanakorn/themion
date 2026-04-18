@@ -3,6 +3,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::client_codex::ApiCallRateLimitReport;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Message {
     pub role: String,
@@ -104,7 +106,11 @@ pub trait ChatBackend: Send + Sync {
         messages: &[Message],
         tools: &Value,
         on_chunk: Box<dyn FnMut(String) + Send + 'static>,
-    ) -> Result<(ResponseMessage, Option<Usage>)>;
+    ) -> Result<(
+        ResponseMessage,
+        Option<Usage>,
+        Option<ApiCallRateLimitReport>,
+    )>;
 }
 
 // ── Client ────────────────────────────────────────────────────────────────────
@@ -192,7 +198,11 @@ impl ChatClient {
         messages: &[Message],
         tools: &Value,
         mut on_chunk: impl FnMut(String),
-    ) -> Result<(ResponseMessage, Option<Usage>)> {
+    ) -> Result<(
+        ResponseMessage,
+        Option<Usage>,
+        Option<ApiCallRateLimitReport>,
+    )> {
         let body = serde_json::json!({
             "model": model,
             "messages": messages,
@@ -320,7 +330,7 @@ impl ChatClient {
             tool_calls,
         };
 
-        Ok((message, usage))
+        Ok((message, usage, None))
     }
 }
 
@@ -332,7 +342,11 @@ impl ChatBackend for ChatClient {
         messages: &[Message],
         tools: &Value,
         on_chunk: Box<dyn FnMut(String) + Send + 'static>,
-    ) -> Result<(ResponseMessage, Option<Usage>)> {
+    ) -> Result<(
+        ResponseMessage,
+        Option<Usage>,
+        Option<ApiCallRateLimitReport>,
+    )> {
         self.chat_completion_stream(model, messages, tools, on_chunk)
             .await
     }

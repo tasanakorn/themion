@@ -25,6 +25,7 @@ pub enum AgentEvent {
     ToolEnd,
     AssistantChunk(String),
     AssistantText(String),
+    Stats(String),
     TurnDone(TurnStats),
 }
 
@@ -230,7 +231,7 @@ impl Agent {
 
             self.emit(AgentEvent::LlmStart);
             let event_tx = self.event_tx.clone();
-            let (response, usage) = self
+            let (response, usage, rate_limit_report) = self
                 .client
                 .chat_completion_stream(
                     &self.model,
@@ -243,6 +244,12 @@ impl Agent {
                     }),
                 )
                 .await?;
+
+            if let Some(report) = rate_limit_report {
+                if let Ok(text) = serde_json::to_string(&report) {
+                    self.emit(AgentEvent::Stats(format!("[rate-limit] {}", text)));
+                }
+            }
 
             llm_rounds += 1;
             if let Some(u) = usage {

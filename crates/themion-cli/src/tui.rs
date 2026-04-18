@@ -1,11 +1,11 @@
 use crate::config::{save_profiles, Config, ProfileConfig};
 use crate::{format_stats, Session};
 use crossterm::{
-    event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
     event::{
         self, DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode,
         KeyModifiers, MouseEventKind,
     },
+    event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use themion_core::agent::{Agent, AgentEvent, TurnStats};
 use themion_core::client::ChatClient;
-use themion_core::client_codex::{CodexClient, RateLimitSnapshot, RateLimitWindow};
+use themion_core::client_codex::{ApiCallRateLimitReport, CodexClient};
 use themion_core::db::DbHandle;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -45,7 +45,6 @@ enum AppEvent {
         verification_uri: String,
     },
     LoginComplete(anyhow::Result<themion_core::CodexAuth>),
-    StatusResult(anyhow::Result<RateLimitSnapshot>),
 }
 
 enum Entry {
@@ -71,7 +70,6 @@ enum BusyPhase {
     StreamingResponse,
     RunningTool(String),
     WaitingAfterTool,
-    FetchingStatus,
     LoginStarting,
     WaitingForLoginBrowser,
     Finishing,
@@ -88,7 +86,6 @@ impl BusyPhase {
             ),
             BusyPhase::RunningTool(detail) => format!("running tool… {}", detail),
             BusyPhase::WaitingAfterTool => "tool finished, waiting for model…".to_string(),
-            BusyPhase::FetchingStatus => "fetching status…".to_string(),
             BusyPhase::LoginStarting => "starting login…".to_string(),
             BusyPhase::WaitingForLoginBrowser => "waiting for login confirmation…".to_string(),
             BusyPhase::Finishing => "finalizing…".to_string(),
@@ -104,7 +101,6 @@ impl BusyPhase {
             }
             BusyPhase::RunningTool(_) => "phase: running-tool".to_string(),
             BusyPhase::WaitingAfterTool => "phase: waiting-after-tool".to_string(),
-            BusyPhase::FetchingStatus => "phase: status".to_string(),
             BusyPhase::LoginStarting => "phase: login-start".to_string(),
             BusyPhase::WaitingForLoginBrowser => "phase: login-wait".to_string(),
             BusyPhase::Finishing => "phase: finalizing".to_string(),
@@ -134,8 +130,7 @@ pub struct App<'a> {
     busy_phase: Option<BusyPhase>,
     stream_chunks: u64,
     stream_chars: u64,
-    status_rate_limits: Option<RateLimitSnapshot>,
-    debug_key: Option<String>,
+    status_rate_limits: Option<ApiCallRateLimitReport>,
 }
 
 impl<'a> App<'a> {
@@ -206,7 +201,6 @@ impl<'a> App<'a> {
             stream_chunks: 0,
             stream_chars: 0,
             status_rate_limits: None,
-            debug_key: None,
         }
     }
 
@@ -321,6 +315,15 @@ impl<'a> App<'a> {
                 self.push(Entry::ToolDone);
                 self.set_busy_phase(BusyPhase::WaitingAfterTool);
             }
+            AgentEvent::Stats(text) => {
+                if let Some(json) = text.strip_prefix("[rate-limit] ") {
+                    if let Ok(report) = serde_json::from_str::<ApiCallRateLimitReport>(json) {
+                        self.status_rate_limits = Some(report);
+                    }
+                    return;
+                }
+                self.push(Entry::Stats(text));
+            }
             AgentEvent::TurnDone(stats) => {
                 self.streaming_idx = None;
                 self.set_busy_phase(BusyPhase::Finishing);
@@ -370,26 +373,6 @@ impl<'a> App<'a> {
                         tx.send(AppEvent::LoginComplete(result)).ok();
                     }
                 }
-            });
-            return out;
-        }
-
-        if input == "/status" {
-            if self.session.provider != "openai-codex" {
-                out.push("/status is only available for provider=openai-codex".to_string());
-                return out;
-            }
-            if self.agent_busy {
-                out.push("busy, please wait".to_string());
-                return out;
-            }
-            self.agent_busy = true;
-            self.set_busy_phase(BusyPhase::FetchingStatus);
-            let tx = app_tx.clone();
-            let session = self.session.clone();
-            tokio::spawn(async move {
-                let result = fetch_codex_status(&session).await;
-                let _ = tx.send(AppEvent::StatusResult(result));
             });
             return out;
         }
@@ -641,35 +624,58 @@ impl<'a> App<'a> {
     }
 }
 
-async fn fetch_codex_status(session: &Session) -> anyhow::Result<RateLimitSnapshot> {
-    let auth = crate::auth_store::load()?
-        .ok_or_else(|| anyhow::anyhow!("no codex auth; run /login codex first"))?;
-    let client = CodexClient::new(
-        session.base_url.clone(),
-        auth,
-        Box::new(|a: &themion_core::CodexAuth| crate::auth_store::save(a)),
-    );
-    client.get_rate_limits().await
-}
-
-fn format_status_limit_segment(label: &str, window: Option<&RateLimitWindow>) -> Option<String> {
-    let window = window?;
-    let left = (100.0 - window.used_percent).clamp(0.0, 100.0);
-    Some(format!("{}:{:.0}%", label, left))
-}
-
-fn build_rate_limit_statusline(snapshot: Option<&RateLimitSnapshot>) -> String {
-    let Some(snapshot) = snapshot else {
+fn build_rate_limit_statusline(report: Option<&ApiCallRateLimitReport>) -> String {
+    let Some(report) = report else {
+        return "--".to_string();
+    };
+    let Some(snapshot) = report
+        .snapshots
+        .iter()
+        .find(|s| {
+            s.limit_id
+                .as_deref()
+                .map(|id| id.eq_ignore_ascii_case("codex"))
+                .unwrap_or(false)
+        })
+        .or_else(|| report.snapshots.first())
+    else {
         return "--".to_string();
     };
 
-    let mut parts = Vec::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
 
-    if let Some(seg) = format_status_limit_segment("7d", snapshot.primary.as_ref()) {
-        parts.push(seg);
+    let fmt = |key: &str, fallback: &str| -> Option<String> {
+        let limit = snapshot
+            .limits
+            .iter()
+            .find(|l| l.status_line_key.as_deref() == Some(key))
+            .or_else(|| snapshot.limits.iter().find(|l| l.kind == fallback))?;
+
+        let elapsed_percent = match (limit.window_minutes, limit.resets_at) {
+            (Some(window_minutes), Some(resets_at)) if window_minutes > 0 => {
+                let window_secs = window_minutes.saturating_mul(60);
+                let remaining_secs = (resets_at - now).clamp(0, window_secs);
+                let elapsed_secs = window_secs.saturating_sub(remaining_secs);
+                (elapsed_secs as f64 / window_secs as f64 * 100.0).clamp(0.0, 100.0)
+            }
+            _ => 0.0,
+        };
+
+        Some(format!(
+            "{}:{:.0}%/{:.0}%",
+            limit.label, limit.used_percent, elapsed_percent
+        ))
+    };
+
+    let mut parts = Vec::new();
+    if let Some(s) = fmt("five-hour-limit", "primary") {
+        parts.push(s);
     }
-    if let Some(seg) = format_status_limit_segment("1w", snapshot.secondary.as_ref()) {
-        parts.push(seg);
+    if let Some(s) = fmt("weekly-limit", "secondary") {
+        parts.push(s);
     }
 
     if parts.is_empty() {
@@ -818,7 +824,9 @@ fn make_input<'a>() -> TextArea<'a> {
             .padding(Padding::left(2)),
     );
     ta.set_cursor_line_style(Style::default());
-    ta.set_placeholder_text("message…  (Enter/Ctrl-S send | Shift-Enter/Ctrl-J newline | Ctrl-C quit)");
+    ta.set_placeholder_text(
+        "message…  (Enter/Ctrl-S send | Shift-Enter/Ctrl-J newline | Ctrl-C quit)",
+    );
     ta
 }
 
@@ -927,8 +935,8 @@ fn draw(f: &mut Frame, app: &App) {
             .split('\n')
             .map(|line: &str| {
                 let len = line.chars().count() as u16;
-                let wrapped = (len.saturating_add(input_inner_width).saturating_sub(1))
-                    / input_inner_width;
+                let wrapped =
+                    (len.saturating_add(input_inner_width).saturating_sub(1)) / input_inner_width;
                 wrapped.max(1)
             })
             .sum::<u16>()
@@ -997,24 +1005,17 @@ fn draw(f: &mut Frame, app: &App) {
         .map(|p| p.status_bar(app.stream_chunks, app.stream_chars))
         .unwrap_or_else(|| "phase: idle".to_string());
     let bar_top = format!(
-        "  {}  |  {}  |  {}  |  {}",
-        project_leaf,
-        app.session.active_profile,
-        app.session.model,
-        phase,
+        " {} | {} | {} | {}",
+        project_leaf, app.session.active_profile, app.session.model, phase,
     );
-    let mut bar_bottom = format!(
-        "  {}  |  in:{} out:{} cached:{}  |  ctx:{}",
+    let bar_bottom = format!(
+        " {} | in:{} out:{} cached:{} | ctx:{}",
         build_rate_limit_statusline(app.status_rate_limits.as_ref()),
         fmt(app.session_tokens.tokens_in),
         fmt(app.session_tokens.tokens_out),
         fmt(app.session_tokens.tokens_cached),
         fmt(app.last_ctx_tokens),
     );
-    if let Some(d) = &app.debug_key {
-        bar_bottom.push_str("  |  ");
-        bar_bottom.push_str(d);
-    }
     f.render_widget(Clear, chunks[2]);
     f.render_widget(
         Paragraph::new(format!("{}\n{}", bar_top, bar_bottom))
@@ -1113,7 +1114,6 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
 
     let mut app = App::new(session, db, session_id, project_dir);
 
-
     while app.running {
         terminal.draw(|f| draw(f, &app))?;
         match app_rx.recv().await {
@@ -1126,10 +1126,6 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 handle_paste(&mut app, text);
             }
             Some(AppEvent::Key(key)) => {
-                app.debug_key = Some(format!(
-                    "key={:?} mods={:?} kind={:?} state={:?}",
-                    key.code, key.modifiers, key.kind, key.state
-                ));
                 if key.kind != event::KeyEventKind::Press {
                     continue;
                 }
@@ -1167,12 +1163,21 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                                     let (text, byte_pos) = input_text_and_cursor_byte(&app.input);
                                     let safe_cursor = clamp_to_char_boundary(&text, byte_pos);
                                     let before = &text[..safe_cursor];
-                                    if let Some(grab) = app
-                                        .paste_burst
-                                        .decide_begin_buffer(now, before, retro_chars as usize)
-                                    {
-                                        let kept = format!("{}{}", &text[..grab.start_byte], &text[safe_cursor..]);
-                                        set_input_text_and_cursor(&mut app.input, &kept, grab.start_byte);
+                                    if let Some(grab) = app.paste_burst.decide_begin_buffer(
+                                        now,
+                                        before,
+                                        retro_chars as usize,
+                                    ) {
+                                        let kept = format!(
+                                            "{}{}",
+                                            &text[..grab.start_byte],
+                                            &text[safe_cursor..]
+                                        );
+                                        set_input_text_and_cursor(
+                                            &mut app.input,
+                                            &kept,
+                                            grab.start_byte,
+                                        );
                                         app.paste_burst.append_char_to_buffer(ch, now);
                                         continue;
                                     }
@@ -1215,7 +1220,9 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                         app.input.insert_newline();
                     }
                     (KeyCode::PageUp, _) | (KeyCode::Up, KeyModifiers::ALT) => app.scroll_up(),
-                    (KeyCode::PageDown, _) | (KeyCode::Down, KeyModifiers::ALT) => app.scroll_down(),
+                    (KeyCode::PageDown, _) | (KeyCode::Down, KeyModifiers::ALT) => {
+                        app.scroll_down()
+                    }
                     (KeyCode::Up, KeyModifiers::NONE) => app.history_up(),
                     (KeyCode::Down, KeyModifiers::NONE) => app.history_down(),
                     _ => {
@@ -1297,14 +1304,6 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                             "logged in as {} — switched to codex profile (gpt-5.4)",
                             auth.account_id
                         )));
-                        app.agent_busy = true;
-                        app.set_busy_phase(BusyPhase::FetchingStatus);
-                        let tx = app_tx.clone();
-                        let session = app.session.clone();
-                        tokio::spawn(async move {
-                            let result = fetch_codex_status(&session).await;
-                            let _ = tx.send(AppEvent::StatusResult(result));
-                        });
                     }
                     Err(e) => {
                         app.push(Entry::Assistant(format!(
@@ -1318,17 +1317,6 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
             Some(AppEvent::LoginComplete(Err(e))) => {
                 app.clear_busy_phase();
                 app.push(Entry::Assistant(format!("login failed: {}", e)));
-                app.agent_busy = false;
-            }
-            Some(AppEvent::StatusResult(Ok(snapshot))) => {
-                app.clear_busy_phase();
-                app.status_rate_limits = Some(snapshot);
-                app.agent_busy = false;
-            }
-            Some(AppEvent::StatusResult(Err(e))) => {
-                app.clear_busy_phase();
-                app.push(Entry::Assistant(format!("status failed: {}", e)));
-                app.push(Entry::Blank);
                 app.agent_busy = false;
             }
             None => {}

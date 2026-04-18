@@ -7,7 +7,5 @@ pub mod tools;
 
 pub use auth::CodexAuth;
 pub use client::ChatBackend;
-pub use client_codex::{
-    ApiCallRateLimitReport, ExtractedLimitWindow, ExtractedRateLimitSnapshot,
-};
+pub use client_codex::{ApiCallRateLimitReport, ExtractedLimitWindow, ExtractedRateLimitSnapshot};
 pub use db::DbHandle;

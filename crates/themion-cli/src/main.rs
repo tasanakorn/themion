@@ -1,8 +1,8 @@
 mod auth_store;
 mod config;
 mod login_codex;
-mod tui;
 mod paste_burst;
+mod tui;
 use config::{Config, ProfileConfig};
 use std::collections::HashMap;
 use themion_core::agent::TurnStats;

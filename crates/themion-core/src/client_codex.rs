@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use chrono::{Local, TimeZone};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -13,21 +13,21 @@ use crate::client::{
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitWindow {
     pub used_percent: f64,
     pub window_minutes: Option<i64>,
     pub resets_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreditsSnapshot {
     pub has_credits: bool,
     pub unlimited: bool,
     pub balance: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitSnapshot {
     pub limit_id: Option<String>,
     pub limit_name: Option<String>,
@@ -36,7 +36,7 @@ pub struct RateLimitSnapshot {
     pub credits: Option<CreditsSnapshot>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractedLimitWindow {
     pub kind: String,
     pub status_line_key: Option<String>,
@@ -49,7 +49,7 @@ pub struct ExtractedLimitWindow {
     pub status_line_display: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractedRateLimitSnapshot {
     pub limit_id: Option<String>,
     pub limit_name: Option<String>,
@@ -57,7 +57,7 @@ pub struct ExtractedRateLimitSnapshot {
     pub credits: Option<CreditsSnapshot>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiCallRateLimitReport {
     pub api_call: String,
     pub source: String,
@@ -163,7 +163,11 @@ impl CodexClient {
 
         for (name, value) in headers.iter() {
             let key = name.as_str().to_ascii_lowercase();
-            if key.contains("codex") || key.contains("limit") || key.contains("credit") || key.contains("usage") {
+            if key.contains("codex")
+                || key.contains("limit")
+                || key.contains("credit")
+                || key.contains("usage")
+            {
                 eprintln!(
                     "[codex usage] header {}: {}",
                     name,
@@ -174,7 +178,9 @@ impl CodexClient {
 
         if !status.is_success() {
             let text = response.text().await?;
-            return Err(anyhow!("Codex rate-limit header fetch error {status}: {text}"));
+            return Err(anyhow!(
+                "Codex rate-limit header fetch error {status}: {text}"
+            ));
         }
 
         if let Some((active_limit, snapshot)) = parse_active_rate_limit_from_headers(&headers) {
@@ -189,12 +195,17 @@ impl CodexClient {
 
         let all = parse_all_rate_limits_from_headers(&headers);
         eprintln!("[codex usage] parsed {} snapshots from headers", all.len());
-        if let Some(snapshot) = all.iter().find(|s| {
-            s.limit_id
-                .as_deref()
-                .map(|id| id.eq_ignore_ascii_case("codex"))
-                .unwrap_or(false)
-        }).cloned().or_else(|| all.into_iter().next()) {
+        if let Some(snapshot) = all
+            .iter()
+            .find(|s| {
+                s.limit_id
+                    .as_deref()
+                    .map(|id| id.eq_ignore_ascii_case("codex"))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .or_else(|| all.into_iter().next())
+        {
             eprintln!(
                 "[codex usage] using header snapshot primary={} secondary={} credits={}",
                 snapshot.primary.is_some(),
@@ -204,9 +215,10 @@ impl CodexClient {
             return Ok(snapshot);
         }
 
-        Err(anyhow!("no codex rate-limit headers found on /models response"))
+        Err(anyhow!(
+            "no codex rate-limit headers found on /models response"
+        ))
     }
-
 }
 
 fn parse_rate_limit_snapshot(json: &Value) -> RateLimitSnapshot {
@@ -300,7 +312,12 @@ fn parse_header_i64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<
 }
 
 fn parse_header_bool(headers: &reqwest::header::HeaderMap, name: &str) -> Option<bool> {
-    let v = headers.get(name)?.to_str().ok()?.trim().to_ascii_lowercase();
+    let v = headers
+        .get(name)?
+        .to_str()
+        .ok()?
+        .trim()
+        .to_ascii_lowercase();
     match v.as_str() {
         "true" | "1" => Some(true),
         "false" | "0" => Some(false),
@@ -332,14 +349,33 @@ fn parse_credits_from_headers(
     prefix: &str,
 ) -> Option<CreditsSnapshot> {
     let has_credits = parse_header_bool(headers, &format!("{prefix}-credits-has-credits"))?;
-    let unlimited = parse_header_bool(headers, &format!("{prefix}-credits-unlimited"))
-        .unwrap_or(false);
+    let unlimited =
+        parse_header_bool(headers, &format!("{prefix}-credits-unlimited")).unwrap_or(false);
     let balance = parse_header_string(headers, &format!("{prefix}-credits-balance"));
     Some(CreditsSnapshot {
         has_credits,
         unlimited,
         balance,
     })
+}
+
+fn parse_window_from_headers_any(
+    headers: &reqwest::header::HeaderMap,
+    prefixes: &[String],
+    kind: &str,
+) -> Option<RateLimitWindow> {
+    prefixes
+        .iter()
+        .find_map(|prefix| parse_window_from_headers(headers, prefix, kind))
+}
+
+fn parse_credits_from_headers_any(
+    headers: &reqwest::header::HeaderMap,
+    prefixes: &[String],
+) -> Option<CreditsSnapshot> {
+    prefixes
+        .iter()
+        .find_map(|prefix| parse_credits_from_headers(headers, prefix))
 }
 
 fn collect_limit_ids_from_headers(headers: &reqwest::header::HeaderMap) -> Vec<String> {
@@ -350,9 +386,22 @@ fn collect_limit_ids_from_headers(headers: &reqwest::header::HeaderMap) -> Vec<S
 
     for name in headers.keys() {
         let name = name.as_str().to_ascii_lowercase();
-        if let Some(prefix) = name.strip_suffix("-primary-used-percent") {
-            if let Some(limit) = prefix.strip_prefix("x-") {
-                ids.insert(normalize_limit_id(limit));
+        for suffix in [
+            "-primary-used-percent",
+            "-primary-window-minutes",
+            "-primary-reset-at",
+            "-secondary-used-percent",
+            "-secondary-window-minutes",
+            "-secondary-reset-at",
+            "-credits-has-credits",
+            "-credits-unlimited",
+            "-credits-balance",
+            "-limit-name",
+        ] {
+            if let Some(prefix) = name.strip_suffix(suffix) {
+                if let Some(limit) = prefix.strip_prefix("x-") {
+                    ids.insert(normalize_limit_id(limit));
+                }
             }
         }
     }
@@ -365,12 +414,18 @@ fn parse_rate_limit_for_limit_from_headers(
     limit_id: &str,
 ) -> Option<RateLimitSnapshot> {
     let header_limit = limit_id.replace('_', "-");
-    let prefix = format!("x-{header_limit}");
+    let prefixes = vec![
+        format!("x-{header_limit}"),
+        format!("x-ratelimit-{header_limit}"),
+        format!("x-ratelimit-{limit_id}"),
+    ];
 
-    let primary = parse_window_from_headers(headers, &prefix, "primary");
-    let secondary = parse_window_from_headers(headers, &prefix, "secondary");
-    let credits = parse_credits_from_headers(headers, &prefix);
-    let limit_name = parse_header_string(headers, &format!("{prefix}-limit-name"));
+    let primary = parse_window_from_headers_any(headers, &prefixes, "primary");
+    let secondary = parse_window_from_headers_any(headers, &prefixes, "secondary");
+    let credits = parse_credits_from_headers_any(headers, &prefixes);
+    let limit_name = prefixes
+        .iter()
+        .find_map(|prefix| parse_header_string(headers, &format!("{prefix}-limit-name")));
 
     if primary.is_none() && secondary.is_none() && credits.is_none() {
         return None;
@@ -414,13 +469,17 @@ fn get_limits_duration(window_minutes: i64) -> String {
         let rounded_hours = (window_minutes + 30) / 60;
         return format!("{}h", rounded_hours.max(1));
     }
+
+    let rounded_days = (window_minutes + (12 * 60)) / (24 * 60);
     if window_minutes <= 7 * 24 * 60 + DAY_WINDOW_GRACE_MINUTES {
-        return "weekly".to_string();
+        return format!("{}d", rounded_days.max(1));
     }
     if window_minutes <= 30 * 24 * 60 + DAY_WINDOW_GRACE_MINUTES {
-        return "monthly".to_string();
+        return format!("{}d", rounded_days.max(1));
     }
-    "annual".to_string()
+
+    let rounded_days = (window_minutes + (12 * 60)) / (24 * 60);
+    format!("{}d", rounded_days.max(1))
 }
 
 fn display_window_label(window: &RateLimitWindow, fallback: &str) -> String {
@@ -466,7 +525,7 @@ pub fn extract_snapshot(snapshot: &RateLimitSnapshot) -> ExtractedRateLimitSnaps
             percent_left: left,
             resets_at: primary.resets_at,
             display: format_limit_display(left, primary.resets_at),
-            status_line_display: format!("{} {:.0}%", label, left),
+            status_line_display: format!("{} limit {:.0}%", label, left),
         });
     }
 
@@ -482,7 +541,7 @@ pub fn extract_snapshot(snapshot: &RateLimitSnapshot) -> ExtractedRateLimitSnaps
             percent_left: left,
             resets_at: secondary.resets_at,
             display: format_limit_display(left, secondary.resets_at),
-            status_line_display: format!("{} {:.0}%", label, left),
+            status_line_display: format!("{} limit {:.0}%", label, left),
         });
     }
 
@@ -639,7 +698,11 @@ impl ChatBackend for CodexClient {
         messages: &[Message],
         tools: &Value,
         mut on_chunk: Box<dyn FnMut(String) + Send + 'static>,
-    ) -> Result<(ResponseMessage, Option<Usage>)> {
+    ) -> Result<(
+        ResponseMessage,
+        Option<Usage>,
+        Option<ApiCallRateLimitReport>,
+    )> {
         self.ensure_fresh_token().await?;
 
         let (access_token, account_id) = {
@@ -673,16 +736,15 @@ impl ChatBackend for CodexClient {
             .send()
             .await?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let headers = response.headers().clone();
+        let response_headers = response.headers().clone();
+        let response_status = response.status();
+        if !response_status.is_success() {
             let text = response.text().await?;
-            if status.as_u16() == 429 {
-                let _ = parse_active_rate_limit_from_headers(&headers);
+            if response_status.as_u16() == 429 {
+                let _ = parse_active_rate_limit_from_headers(&response_headers);
             }
-            return Err(anyhow!("Codex API error {status}: {text}"));
+            return Err(anyhow!("Codex API error {response_status}: {text}"));
         }
-
 
         let mut buf: Vec<u8> = Vec::new();
         let mut content = String::new();
@@ -693,6 +755,16 @@ impl ChatBackend for CodexClient {
 
         let mut current_event: Option<String> = None;
         let mut current_data: Option<String> = None;
+
+        let active_limit = parse_header_string(&response_headers, "x-codex-active-limit");
+        let header_snapshots = parse_all_rate_limits_from_headers(&response_headers);
+        let rate_limit_report = Some(report_for_api_call(
+            "responses",
+            "response_headers",
+            Some(response_status.as_u16()),
+            active_limit,
+            header_snapshots,
+        ));
 
         let mut response = response;
 
@@ -833,6 +905,6 @@ impl ChatBackend for CodexClient {
             tool_calls,
         };
 
-        Ok((message, usage))
+        Ok((message, usage, rate_limit_report))
     }
 }

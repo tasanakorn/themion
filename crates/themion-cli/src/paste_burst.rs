@@ -60,7 +60,8 @@ impl PasteBurst {
     fn note_plain_char(&mut self, now: Instant) {
         match self.last_plain_char_time {
             Some(prev) if now.duration_since(prev) <= PASTE_BURST_CHAR_INTERVAL => {
-                self.consecutive_plain_char_burst = self.consecutive_plain_char_burst.saturating_add(1)
+                self.consecutive_plain_char_burst =
+                    self.consecutive_plain_char_burst.saturating_add(1)
             }
             _ => self.consecutive_plain_char_burst = 1,
         }
@@ -131,7 +132,8 @@ impl PasteBurst {
     ) -> Option<RetroGrab> {
         let start_byte = retro_start_index(before, retro_chars);
         let grabbed = before[start_byte..].to_string();
-        let looks_pastey = grabbed.chars().any(char::is_whitespace) || grabbed.chars().count() >= 16;
+        let looks_pastey =
+            grabbed.chars().any(char::is_whitespace) || grabbed.chars().count() >= 16;
         if looks_pastey {
             self.begin_with_retro_grabbed(grabbed, now);
             Some(RetroGrab { start_byte })
