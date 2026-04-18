@@ -27,8 +27,6 @@ pub(crate) struct PasteBurst {
 pub(crate) enum CharDecision {
     BeginBuffer { retro_chars: u16 },
     BufferAppend,
-    RetainFirstChar,
-    BeginBufferFromPending,
 }
 
 pub(crate) struct RetroGrab {
@@ -42,43 +40,6 @@ pub(crate) enum FlushResult {
 }
 
 impl PasteBurst {
-    pub(crate) fn on_plain_char(&mut self, ch: char, now: Instant) -> CharDecision {
-        if let Some((held, held_at)) = self.pending_first_char {
-            if now.duration_since(held_at) > PASTE_BURST_CHAR_INTERVAL {
-                self.pending_first_char = Some((ch, now));
-                self.last_plain_char_time = Some(now);
-                self.consecutive_plain_char_burst = 1;
-                return CharDecision::RetainFirstChar;
-            }
-        }
-
-        self.note_plain_char(now);
-
-        if self.active {
-            self.burst_window_until = Some(now + PASTE_ENTER_SUPPRESS_WINDOW);
-            return CharDecision::BufferAppend;
-        }
-
-        if let Some((held, held_at)) = self.pending_first_char {
-            if now.duration_since(held_at) <= PASTE_BURST_CHAR_INTERVAL {
-                self.active = true;
-                let _ = self.pending_first_char.take();
-                self.buffer.push(held);
-                self.burst_window_until = Some(now + PASTE_ENTER_SUPPRESS_WINDOW);
-                return CharDecision::BeginBufferFromPending;
-            }
-        }
-
-        if self.consecutive_plain_char_burst >= PASTE_BURST_MIN_CHARS {
-            return CharDecision::BeginBuffer {
-                retro_chars: self.consecutive_plain_char_burst.saturating_sub(1),
-            };
-        }
-
-        self.pending_first_char = Some((ch, now));
-        CharDecision::RetainFirstChar
-    }
-
     pub(crate) fn on_plain_char_no_hold(&mut self, now: Instant) -> Option<CharDecision> {
         self.note_plain_char(now);
 
@@ -160,15 +121,6 @@ impl PasteBurst {
     pub(crate) fn append_char_to_buffer(&mut self, ch: char, now: Instant) {
         self.buffer.push(ch);
         self.burst_window_until = Some(now + PASTE_ENTER_SUPPRESS_WINDOW);
-    }
-
-    pub(crate) fn try_append_char_if_active(&mut self, ch: char, now: Instant) -> bool {
-        if self.active || !self.buffer.is_empty() {
-            self.append_char_to_buffer(ch, now);
-            true
-        } else {
-            false
-        }
     }
 
     pub(crate) fn decide_begin_buffer(

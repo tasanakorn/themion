@@ -1177,7 +1177,6 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                                         continue;
                                     }
                                 }
-                                CharDecision::RetainFirstChar | CharDecision::BeginBufferFromPending => {}
                             }
                         }
                     }
