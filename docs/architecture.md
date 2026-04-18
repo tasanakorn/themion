@@ -15,13 +15,13 @@ Themion is a Rust AI agent with a Ratatui TUI, streaming token output, persisten
 main.rs
   └─ loads Config, resolves project_dir, opens DbHandle
        ├─ print mode  ──► Agent::new_with_db → run_loop(prompt) → print → exit
-       └─ TUI mode    ──► tui::run(cfg)
+       └─ TUI mode    ──► tui::run(cfg, dir_override)
 
 tui::run  (tui.rs)
   ├─ opens DbHandle at $XDG_DATA_HOME/themion/history.db
   ├─ generates session_id (UUID v4), inserts agent_sessions row
   ├─ builds App { agents: Vec<AgentHandle>, db, project_dir, session_tokens, … }
-  └─ event loop: keyboard / mouse / AgentEvent / AgentReady
+  └─ event loop: keyboard / mouse / AgentEvent / AgentReady / Tick (150 ms)
 
 Agent  (agent.rs)
   ├─ owns: Vec<Message> (full in-memory history)
@@ -59,7 +59,7 @@ Each call to `run_loop(user_input)`:
 4. Stream tokens to TUI via `AgentEvent::AssistantChunk`; accumulate full response.
 5. Push `role="assistant"` response to history; persist to `agent_messages`.
 6. If response has no `tool_calls` → break.
-7. For each tool call: emit `ToolStart`, execute via `call_tool`, push `role="tool"` result; persist each.
+7. For each tool call: emit `ToolStart` (detail truncated to 60 chars), execute via `call_tool`, push `role="tool"` result; persist each.
 8. Repeat from step 3, up to 10 iterations.
 9. Finalize the DB turn row with token stats; emit `TurnDone`.
 
@@ -87,15 +87,15 @@ The full `messages` Vec is never trimmed — the in-memory copy is always comple
 
 ## Tools (tools.rs)
 
-All tools receive a `&ToolCtx` carrying the DB handle and session identity. Filesystem tools ignore it; history tools use it.
+All tools receive a `&ToolCtx` carrying the DB handle and session identity. Filesystem tools ignore it; history tools use it. Tool call display labels are truncated to 60 chars to keep TUI lines readable.
 
-| Tool             | Underlying call                       | Returns                          |
-| ---------------- | ------------------------------------- | -------------------------------- |
-| `read_file`      | `fs::read_to_string`                  | file contents                    |
-| `write_file`     | `fs::write`                           | confirmation line                |
-| `list_directory` | `fs::read_dir`                        | newline-joined names             |
-| `bash`           | `tokio::process::Command` via `sh -c` | stdout + stderr                  |
-| `recall_history` | `DbHandle::recall`                    | JSON array of past messages      |
+| Tool             | Underlying call                       | Returns                           |
+| ---------------- | ------------------------------------- | --------------------------------- |
+| `read_file`      | `fs::read_to_string`                  | file contents                     |
+| `write_file`     | `fs::write`                           | confirmation line                 |
+| `list_directory` | `fs::read_dir`                        | newline-joined names              |
+| `bash`           | `tokio::process::Command` via `sh -c` | stdout + stderr                   |
+| `recall_history` | `DbHandle::recall`                    | JSON array of past messages       |
 | `search_history` | `DbHandle::search` (FTS5)             | JSON array of snippets + turn_seq |
 
 Tool errors are caught in `call_tool` and returned as `"Error: <message>"` strings — the model sees the error as a tool result and can react.
@@ -106,42 +106,58 @@ Database path: `$XDG_DATA_HOME/themion/history.db` (default `~/.local/share/them
 
 Schema:
 
-| Table                | Key columns                                           |
-| -------------------- | ----------------------------------------------------- |
-| `agent_sessions`     | `session_id` (UUID), `project_dir`, `is_interactive`  |
-| `agent_turns`        | `turn_id`, `session_id`, `turn_seq`, token stats      |
-| `agent_messages`     | `message_id`, `turn_id`, `role`, `content`, `tool_calls_json` |
-| `agent_messages_fts` | FTS5 virtual table over `agent_messages.content`      |
+| Table                | Key columns                                                    |
+| -------------------- | -------------------------------------------------------------- |
+| `agent_sessions`     | `session_id` (UUID), `project_dir`, `is_interactive`           |
+| `agent_turns`        | `turn_id`, `session_id`, `turn_seq`, token stats               |
+| `agent_messages`     | `message_id`, `turn_id`, `role`, `content`, `tool_calls_json`  |
+| `agent_messages_fts` | FTS5 virtual table over `agent_messages.content`               |
 
-Every process start generates a new `session_id`. Multiple concurrent processes share the same file; each writes to its own session rows. The `AUTOINCREMENT` primary key on `agent_turns` and `agent_messages` ensures no collision.
+Every process start generates a new `session_id`. Multiple concurrent processes share the same file; each writes to its own session rows.
 
 ## TUI (tui.rs)
 
 The TUI uses Ratatui + Crossterm and runs in the alternate screen buffer.
 
-Layout (top to bottom, `Constraint::Length`):
+Layout (top to bottom):
 
 ```
-┌─ status bar (1 row) ──────────────────────────────────────────────┐
-│  <project_leaf>  ·  <profile>  ·  <model>  ·  in/out/cached  ·  ctx:~Ntok
-├─ conversation pane (Min 1) ───────────────────────────────────────┤
+┌─ conversation pane (Min 1) ───────────────────────────────────────┐
+│  startup banner (block ASCII art + version / profile / model)     │
 │  word-wrapped entries; bottom-pinned via ratatui line_count()     │
+│  pending line: braille spinner ⠋⠙⠹… animated at 150 ms tick      │
 ├─ input box (3 rows) ──────────────────────────────────────────────┤
 │  ▸ ────────────────────────────────────────────────────────────── │
 │    <typed text>                                                    │
+├─ status bar (1 row) ──────────────────────────────────────────────┤
+│  <project>  |  <profile>  |  <model>  |  in:N out:N cached:N  |  ctx:N
 └───────────────────────────────────────────────────────────────────┘
 ```
 
+Token counts in the status bar are formatted with thousands separators. `ctx` shows `tokens_in` from the last completed turn (actual context sent to the API).
+
 Key bindings:
 
-| Key             | Action                              |
-| --------------- | ----------------------------------- |
-| `Enter`         | Submit message                      |
-| `↑` / `↓`       | Navigate input history              |
-| `Alt+↑` / `Alt+↓` | Scroll conversation pane          |
-| `PageUp` / `PageDown` | Scroll conversation pane      |
-| Mouse scroll    | Scroll conversation pane            |
-| `Ctrl+C`        | Quit                                |
+| Key                   | Action                    |
+| --------------------- | ------------------------- |
+| `Enter`               | Submit message            |
+| `↑` / `↓`             | Navigate input history    |
+| `Alt+↑` / `Alt+↓`     | Scroll conversation pane  |
+| `PageUp` / `PageDown` | Scroll conversation pane  |
+| Mouse scroll          | Scroll conversation pane  |
+| `Ctrl+C`              | Quit                      |
+
+### Entry types
+
+| Variant        | Colour  | Description                              |
+| -------------- | ------- | ---------------------------------------- |
+| `User`         | bold    | User message with `▸` prefix            |
+| `Assistant`    | default | Model response, word-wrapped             |
+| `Banner`       | cyan    | Startup ASCII art and info lines         |
+| `ToolCall`     | yellow  | `↳ <tool>: <args>` (args ≤ 60 chars)    |
+| `ToolDone`     | green   | Appends ` ✓` to the matching ToolCall   |
+| `Stats`        | dim     | Turn summary (tokens, time)              |
+| `Blank`        | —       | Vertical spacing                         |
 
 ## Multi-Agent Shape
 
@@ -155,22 +171,22 @@ Configuration is resolved in priority order: **env var > config file > built-in 
 
 Config file path: `$XDG_CONFIG_HOME/themion/config.toml` (default `~/.config/themion/config.toml`). A commented template is written on first run.
 
-| Field           | Env var               | Default                                   |
-| --------------- | --------------------- | ----------------------------------------- |
-| `api_key`       | `OPENROUTER_API_KEY`  | — (required for openrouter provider)      |
-| `model`         | `OPENROUTER_MODEL`    | `minimax/minimax-m2.7`                    |
-| `base_url`      | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1`            |
-| `system_prompt` | `SYSTEM_PROMPT`       | `"You are a helpful AI assistant…"`       |
-| `provider`      | `THEMION_PROVIDER`    | `openrouter`                              |
+| Field           | Env var               | Default                             |
+| --------------- | --------------------- | ----------------------------------- |
+| `api_key`       | `OPENROUTER_API_KEY`  | — (required for openrouter)         |
+| `model`         | `OPENROUTER_MODEL`    | `minimax/minimax-m2.7`              |
+| `base_url`      | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1`      |
+| `system_prompt` | `SYSTEM_PROMPT`       | `"You are a helpful AI assistant…"` |
+| `provider`      | `THEMION_PROVIDER`    | `openrouter`                        |
 
-For `provider=llamacpp`: `LLAMACPP_BASE_URL`, `LLAMACPP_MODEL` override the llamacpp defaults. Multiple named profiles are stored under `[profile.<name>]` in the config file and switchable at runtime via `/config profile use <name>`.
+Multiple named profiles are stored under `[profile.<name>]` in the config file and switchable at runtime via `/config profile use <name>`.
 
 ## Build Profiles
 
-| Profile   | Debug symbols | LTO  | opt-level | Strip |
-| --------- | ------------- | ---- | --------- | ----- |
-| `dev`     | off           | off  | default   | no    |
-| `release` | off           | full | `z` (size)| yes   |
+| Profile   | Debug symbols | LTO  | opt-level  | Strip |
+| --------- | ------------- | ---- | ---------- | ----- |
+| `dev`     | off           | off  | default    | no    |
+| `release` | off           | full | `z` (size) | yes   |
 
 ## Known Limitations
 
@@ -178,4 +194,3 @@ For `provider=llamacpp`: `LLAMACPP_BASE_URL`, `LLAMACPP_MODEL` override the llam
 - **No path sandboxing** — tools accept any absolute or relative path.
 - **Max 10 tool-call iterations per turn** — hardcoded in `agent.rs`.
 - **No user-configurable `window_turns`** — default of 5 is hardcoded; requires a code change.
-- **Positional SQL params in `recall`/`search`** — extra bound params are silently ignored by SQLite when a filter is absent; fragile if the WHERE clause changes.
