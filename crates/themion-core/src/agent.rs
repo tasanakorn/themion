@@ -10,6 +10,17 @@ pub struct TurnStats {
     pub tokens_cached: u64,
 }
 
+fn tool_call_detail(name: &str, args_json: &str) -> String {
+    let args: serde_json::Value = serde_json::from_str(args_json).unwrap_or_default();
+    match name {
+        "bash" => format!("bash: {}", args["command"].as_str().unwrap_or("?")),
+        "read_file" => format!("read: {}", args["path"].as_str().unwrap_or("?")),
+        "write_file" => format!("write: {}", args["path"].as_str().unwrap_or("?")),
+        "list_directory" => format!("ls: {}", args["path"].as_str().unwrap_or("?")),
+        _ => name.to_string(),
+    }
+}
+
 pub struct Agent {
     client: OpenRouterClient,
     model: String,
@@ -66,7 +77,7 @@ impl Agent {
             }];
             msgs_with_system.extend_from_slice(&self.messages);
 
-            if self.verbose { println!("[thinking...]"); }
+            if self.verbose { println!("[calling llm]"); }
             let (response, usage) = self.client
                 .chat_completion(&self.model, &msgs_with_system, &tool_defs)
                 .await?;
@@ -105,9 +116,12 @@ impl Agent {
 
             // Execute each tool call and push results
             for tc in &tool_calls_vec {
-                if self.verbose { println!("[calling tool: {}]", tc.function.name); }
+                if self.verbose {
+                    let detail = tool_call_detail(&tc.function.name, &tc.function.arguments);
+                    println!("[tool: {}]", detail);
+                }
                 let result = tools::call_tool(&tc.function.name, &tc.function.arguments).await;
-                if self.verbose { println!("[tool result received]"); }
+                if self.verbose { println!("[tool done]"); }
                 tool_calls += 1;
                 self.messages.push(Message {
                     role: "tool".to_string(),
