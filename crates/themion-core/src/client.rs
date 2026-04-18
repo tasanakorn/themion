@@ -94,6 +94,19 @@ struct ToolCallAccum {
     arguments: String,
 }
 
+// ── ChatBackend trait ─────────────────────────────────────────────────────────
+
+#[async_trait::async_trait]
+pub trait ChatBackend: Send + Sync {
+    async fn chat_completion_stream(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &Value,
+        on_chunk: Box<dyn FnMut(String) + Send + 'static>,
+    ) -> Result<(ResponseMessage, Option<Usage>)>;
+}
+
 // ── Client ────────────────────────────────────────────────────────────────────
 
 pub struct ChatClient {
@@ -287,5 +300,18 @@ impl ChatClient {
         };
 
         Ok((message, usage))
+    }
+}
+
+#[async_trait::async_trait]
+impl ChatBackend for ChatClient {
+    async fn chat_completion_stream(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &Value,
+        on_chunk: Box<dyn FnMut(String) + Send + 'static>,
+    ) -> Result<(ResponseMessage, Option<Usage>)> {
+        self.chat_completion_stream(model, messages, tools, on_chunk).await
     }
 }

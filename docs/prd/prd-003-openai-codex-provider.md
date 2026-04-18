@@ -18,7 +18,7 @@
 
 - No support for the standard OpenAI platform API key flow (`api.openai.com/v1/chat/completions`). The Responses-API endpoint and the subscription auth path are the only OpenAI integration this PRD covers.
 - No WebSocket transport. The Responses API supports a websocket variant; this PRD is SSE-only, matching the existing `chat_completion_stream` model.
-- No headless / device-code OAuth flow. The login flow opens a browser and listens on a fixed loopback port; users on remote shells fall back to copying the URL by hand.
+- No interactive prompt during the Device Code polling loop; the TUI shows a single entry with the `verification_uri` and `user_code` and blocks `agent_busy` until the poll resolves or times out.
 - No central credential rotation, multi-account switching, or per-profile auth files. One global `auth.json` shared across all profiles that name `provider = "openai-codex"`.
 - No migration of existing OpenRouter or llamacpp profiles; both continue working unchanged.
 
@@ -160,7 +160,7 @@ pub struct CodexClient {
 
 System-prompt handling: `Agent` currently prepends a `role="system"` `Message` to the slice it sends. `CodexClient` extracts that first system message into the Responses-API `instructions` field and drops it from `input`; subsequent system-role messages (the windowing hint from PRD-002) are translated as `{"type": "message", "role": "developer", "content": [...]}` items inside `input`, since `instructions` accepts only one string.
 
-**Implementer note:** the hardcoded OAuth `client_id` (`app_EMoamEEZ73f0CkXaXp7hrann` per §4.7), the `originator: pi` header value, and the `OpenAI-Beta: responses=experimental` header are all transcribed from the public Codex CLI behavior and were not independently re-verified for this PRD. Cross-check against the upstream Codex CLI source before merging.
+**Constants verified against `badlogic/pi-mono` source** (`packages/ai/src/providers/openai-codex-responses.ts` and `packages/ai/src/utils/oauth/openai-codex.ts`): `client_id = app_EMoamEEZ73f0CkXaXp7hrann`, `originator: pi`, `OpenAI-Beta: responses=experimental` (SSE path), `chatgpt-account-id` (lowercase key), JWT namespace `https://api.openai.com/auth` → field `chatgpt_account_id`. No further cross-check required.
 
 **Alternative considered:** keep the Chat Completions wire shape and translate at the HTTP boundary inside `chatgpt.com/backend-api`. Rejected: that endpoint does not accept Chat Completions input; the `/responses` path is the only one the subscription auth permits.
 
@@ -200,10 +200,14 @@ A new module `crates/themion-cli/src/login_codex.rs` exposes:
 pub async fn run_login_flow() -> Result<CodexAuth>;
 ```
 
-Implementation steps when invoked:
+`run_login_flow` tries the **local-listen flow** (§4.7.1) first. If the loopback port bind fails it automatically falls back to the **device-code flow** (§4.7.2). No user intervention is needed to trigger the fallback; the TUI entry text changes to announce the mode.
+
+`CLIENT_ID` is hardcoded as `app_EMoamEEZ73f0CkXaXp7hrann` (the public Codex CLI client id; not a secret). It lives in a `const` in `login_codex.rs`. See the implementer note in §4.4 about cross-checking this value against upstream Codex CLI source.
+
+#### 4.7.1 Local-listen flow
 
 1. Generate a 32-byte random `code_verifier` (URL-safe base64), derive `code_challenge = base64url(sha256(code_verifier))`.
-2. Bind a `tokio::net::TcpListener` on `127.0.0.1:1455`. If the bind fails (port in use), surface a clear error mentioning the port; do not retry on a different port — the OAuth client registration pins this exact `redirect_uri`.
+2. Bind a `tokio::net::TcpListener` on `127.0.0.1:1455`. If the bind fails (port in use), return `Err(LoginError::PortInUse)` so the caller can fall through to §4.7.2.
 3. Construct the auth URL `https://auth.openai.com/authorize?response_type=code&client_id={CLIENT_ID}&redirect_uri=http://localhost:1455/auth/callback&scope=openid%20profile%20email%20offline_access&code_challenge={challenge}&code_challenge_method=S256&state={random}`.
 4. Open it in the user's browser via the `open` crate. If the open call fails, print the URL to the TUI as a fallback (the listener still works).
 5. Accept exactly one HTTP request. Parse `code` and `state` from the query string; reject if `state` mismatches. Respond with a static HTML page reading "Login complete, you may close this tab."
@@ -211,13 +215,23 @@ Implementation steps when invoked:
 7. Decode the `id_token` JWT (split on `.`, base64url-decode the middle segment) and read the `https://api.openai.com/auth.chatgpt_account_id` claim into `account_id`.
 8. Build `CodexAuth { access_token, refresh_token, expires_at: now() + expires_in, account_id }` and return it.
 
-`CLIENT_ID` is hardcoded as `app_EMoamEEZ73f0CkXaXp7hrann` (the public Codex CLI client id; not a secret). It lives in a `const` in `login_codex.rs`. See the implementer note in §4.4 about cross-checking this value against upstream Codex CLI source.
-
 The HTTP "server" is a hand-rolled read of one request from one accepted socket — `tokio::io::AsyncReadExt::read_buf` until the request line and headers are complete, parse the request line for the path/query, write a fixed 200 response. No HTTP framework dependency.
 
 **Alternative considered:** spawn a real HTTP server (`axum`, `hyper`). Rejected: `axum` would add ~80 transitive crates for a single-request lifetime; the hand-rolled reader is ~60 lines.
 
 **Alternative considered:** request a system-assigned ephemeral port and use it in `redirect_uri`. Rejected: OpenAI's OAuth client registration for the Codex CLI fixes the redirect URI to `http://localhost:1455/auth/callback`; an ephemeral port would be rejected by the authorize endpoint.
+
+#### 4.7.2 Device-code flow (RFC 8628)
+
+Used automatically when §4.7.1 fails to bind port 1455, or when the environment is headless (the `open` call fails and no loopback listener is available). This flow never requires an open port on the user's machine.
+
+1. POST to `https://auth.openai.com/api/accounts/deviceauth/usercode` with body `client_id={CLIENT_ID}&scope=openid%20profile%20email%20offline_access` (`application/x-www-form-urlencoded`). Parse response `{device_code, user_code, verification_uri, expires_in, interval}`. (This is OpenAI's proprietary device-auth endpoint, not the RFC 8628 `/oauth/device/code` path.)
+2. Push a TUI entry: `"open {verification_uri} and enter code {user_code}"`. The user performs this step on any browser — including one on a different machine.
+3. Begin polling: POST to `https://auth.openai.com/oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={device_code}&client_id={CLIENT_ID}`. Honor `interval` (default 5 s) between polls. Respect `slow_down` responses by doubling the interval. Treat `authorization_pending` as continue; any other error terminates the poll with `Err`.
+4. On success, parse `{access_token, refresh_token, expires_in, id_token}` identically to step 6–8 of §4.7.1.
+5. `agent_busy` remains set throughout; the user cannot send chat messages while the poll is running. A 15-minute hard timeout (`expires_in` from the device-code response) terminates polling with an appropriate error.
+
+**Alternative considered:** require the user to pass a `--device-code` flag explicitly. Rejected: users on headless systems who encounter a port-bind failure would see a confusing error; automatic fallback produces a smoother experience with no extra syntax to learn.
 
 ### 4.8 TUI `/login codex` command
 
@@ -289,7 +303,7 @@ Print mode (`main.rs` non-TUI branch) does **not** trigger the login flow; if a 
 | `crates/themion-core/src/agent.rs`                    | Change `client: OpenRouterClient` to `client: Box<dyn ChatBackend + Send + Sync>`; update all four constructors (`new`, `new_verbose`, `new_with_events`, `new_with_db`) to take the boxed trait object. The `chat_completion_stream` call site (lines 214–218) wraps its closure in `Box::new(...)` to satisfy the trait's `Box<dyn FnMut(String) + Send + 'static>`.   |
 | `crates/themion-cli/Cargo.toml`                       | Pull in `sha2`, `base64`, `open`; existing `tokio`, `reqwest`, `serde_json`, `dirs`, `uuid` cover the rest.                                                                                                                                                                                                                                                             |
 | `crates/themion-cli/src/auth_store.rs` (new)          | `auth_path()`, `load() -> Result<Option<CodexAuth>>`, `save(&CodexAuth) -> Result<()>` (atomic write + 0600 chmod on Unix). Re-exports the `CodexAuth` from `themion-core` for convenience.                                                                                                                                                                              |
-| `crates/themion-cli/src/login_codex.rs` (new)         | `run_login_flow() -> Result<CodexAuth>`: PKCE keygen, browser launch, loopback listener on 1455, code exchange, JWT account-id extraction.                                                                                                                                                                                                                              |
+| `crates/themion-cli/src/login_codex.rs` (new)         | `run_login_flow() -> Result<CodexAuth>`: tries local-listen flow (PKCE, browser launch, loopback listener on 1455, code exchange) first; on port-bind failure automatically falls back to device-code flow (RFC 8628 poll loop, `verification_uri`/`user_code` display). Both paths perform JWT account-id extraction from `id_token`.                               |
 | `crates/themion-cli/src/config.rs`                    | Add `"openai-codex"` arm to `resolve_profile`; widen the `api_key`-required guard to skip when `provider == "openai-codex"`; add codex constants and the commented example to `CONFIG_TEMPLATE`.                                                                                                                                                                        |
 | `crates/themion-cli/src/tui.rs`                       | Add `/login codex` arm in `handle_command`; add `AppEvent::LoginStarted` and `AppEvent::LoginComplete` variants; wire `build_agent` to choose between `ChatClient` and `CodexClient`; rebuild the interactive agent on `LoginComplete(Ok)` when the active profile is codex.                                                                                            |
 | `crates/themion-cli/src/main.rs`                      | Update print-mode `Agent::new_with_db` call to pass `Box::new(ChatClient::…)`; if `cfg.provider == "openai-codex"`, load `CodexAuth` (or error out with the `/login codex` hint); same `Box::new` wrapping for `CodexClient`.                                                                                                                                           |
@@ -298,8 +312,11 @@ Print mode (`main.rs` non-TUI branch) does **not** trigger the login flow; if a 
 
 ## 6. Edge Cases
 
-- **Port 1455 already in use** (another themion login in flight, or another tool squatting): `run_login_flow` returns an error; `LoginComplete(Err)` shows a message naming the port. The user kills the offender and retries.
-- **Browser fails to open** (no DISPLAY, headless server): `open` returns an error; the URL is printed to the TUI so the user can paste it into a browser on another machine. The loopback listener will not see the callback in that case — the user needs to forward port 1455 themselves; this case is documented but not specially supported.
+- **Port 1455 already in use** (another themion login in flight, or another tool squatting): `run_login_flow` catches the bind error, silently falls through to the device-code flow (§4.7.2), and posts a TUI entry announcing the `verification_uri` and `user_code`. The user does not need to kill anything.
+- **Browser fails to open** (no DISPLAY, headless server): local-listen flow proceeds — `open` fails, the loopback URL is printed as a fallback, and the listener still waits. If the port bind also failed, the device-code flow is active and the TUI entry with `verification_uri`/`user_code` is sufficient for a remote browser.
+- **Device-code poll times out** (user does not complete browser auth within `expires_in`): polling loop terminates; `LoginComplete(Err)` shows "login timed out — run /login codex to try again". `auth.json` is untouched.
+- **Device-code `slow_down` response**: the poll interval is doubled and polling continues. The TUI entry is updated to "waiting… (throttled)".
+- **Device-code endpoint returns an unknown error**: poll loop terminates immediately; error body is surfaced in `LoginComplete(Err)`.
 - **OAuth callback returns `error=…`** (user denies consent, expired authorize URL): the listener parses the `error` query parameter and propagates it as the `LoginComplete(Err)` payload.
 - **`state` mismatch**: the listener returns 400 to the browser and bails; `LoginComplete(Err)` shows "state mismatch". Prevents a CSRF attacker from feeding a foreign `code` into our listener.
 - **`auth.json` missing when a Codex profile is selected at startup**: `build_agent` fails fast; `App::new` prints a clear message including the `/login codex` hint and exits. (TUI startup already exits cleanly on `?` errors today.)
@@ -338,7 +355,11 @@ First-time Codex users follow this path:
 | Manually edit `auth.json` to set `expires_at` to one second in the past, then send a chat                            | Token refresh fires before the request; `auth.json` `access_token` and `expires_at` are rewritten on disk; chat completes normally.                                                  |
 | Manually corrupt `auth.json` (write `not json`), restart themion targeting the codex profile                        | Startup prints a clear error naming `auth.json` and the `/login codex` hint; process exits non-zero; no panic.                                                                      |
 | Delete `auth.json` entirely and run `cargo run -p themion-cli -- "hello"` (print mode) against the codex profile     | Print mode exits non-zero with a stderr line "no codex auth; run /login codex first"; nothing is written to stdout.                                                                  |
-| Bind port 1455 from another process, then run `/login codex`                                                         | Login fails with "port 1455 in use"; `auth.json` is untouched.                                                                                                                       |
+| Bind port 1455 from another process, then run `/login codex`                                                         | Login automatically falls through to device-code flow; TUI entry shows `verification_uri` and `user_code`; completing the browser auth writes `auth.json` and switches profile.     |
+| Run `/login codex` in a headless environment where both port 1455 binds and `open` fail                               | Device-code flow activates; TUI entry shows `verification_uri` and `user_code`; completing auth on any machine resolves the poll and finalises login.                                |
+| Unit test: device-code poll loop fed synthetic `authorization_pending` × 3 then `success` responses                  | Exactly 4 POSTs to `/oauth/token`; returned `CodexAuth` matches the success payload; no sleep longer than `interval`.                                                               |
+| Unit test: device-code poll loop fed a `slow_down` response mid-poll                                                 | Subsequent poll interval is doubled; loop continues and succeeds on next `success` response.                                                                                         |
+| Unit test: device-code poll loop fed `expires_in = 1` with no success within that window                             | Loop terminates with `Err` containing "login timed out"; no panic.                                                                                                                   |
 | Send a chat that triggers a tool call (e.g. "list files in this dir") through the Codex client                       | TUI shows `↳ list_directory: …  ✓`; the assistant continues with a coherent reply citing the tool output.                                                                            |
 | Unit test: SSE parser fed a synthetic byte stream containing `response.output_text.delta` × 3, `response.completed`  | `chat_completion_stream` returns content equal to the concatenated deltas, `Usage` populated from the completed event.                                                              |
 | Unit test: SSE parser fed a `response.failed` event mid-stream                                                       | Function returns `Err`; error string contains the event's `error.message`.                                                                                                          |

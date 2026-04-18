@@ -36,6 +36,14 @@ Requires an API key from [openrouter.ai](https://openrouter.ai). Supports any mo
 
 No API key needed. Point `endpoint` at any OpenAI-compatible local server (llama.cpp, Ollama, LM Studio).
 
+### Provider: openai-codex (ChatGPT subscription)
+
+```
+/login codex
+```
+
+Authenticates via OAuth device-code flow. No API key needed — uses your existing ChatGPT Plus/Pro subscription. Tokens are stored in `~/.config/themion/auth.json`. Automatically creates and switches to a `codex` profile on first login.
+
 ### Environment Variables (optional overrides)
 
 | Var                   | Overrides          | Default                        |

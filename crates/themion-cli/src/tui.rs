@@ -21,6 +21,7 @@ use uuid::Uuid;
 use crate::config::{Config, ProfileConfig, save_profiles};
 use themion_core::agent::{Agent, AgentEvent, TurnStats};
 use themion_core::client::ChatClient;
+use themion_core::client_codex::CodexClient;
 use themion_core::db::DbHandle;
 use crate::{Session, format_stats};
 
@@ -32,6 +33,8 @@ enum AppEvent {
     Agent(AgentEvent),
     AgentReady(Box<Agent>, Uuid),
     Tick,
+    LoginPrompt { user_code: String, verification_uri: String },
+    LoginComplete(anyhow::Result<themion_core::CodexAuth>),
 }
 
 // ── Chat entries ──────────────────────────────────────────────────────────────
@@ -76,7 +79,8 @@ pub struct App<'a> {
 
 impl<'a> App<'a> {
     pub fn new(session: Session, db: Arc<DbHandle>, session_id: Uuid, project_dir: PathBuf) -> Self {
-        let agent = build_agent(&session, session_id, project_dir.clone(), db.clone());
+        let agent = build_agent(&session, session_id, project_dir.clone(), db.clone())
+            .expect("failed to build agent");
         let handle = AgentHandle { agent: Some(agent), session_id, is_interactive: true };
 
         let art = concat!(
@@ -230,8 +234,31 @@ impl<'a> App<'a> {
         }
     }
 
-    fn handle_command(&mut self, input: &str) -> Vec<String> {
+    fn handle_command(&mut self, input: &str, app_tx: &mpsc::UnboundedSender<AppEvent>) -> Vec<String> {
         let mut out = Vec::new();
+
+        if input == "/login codex" {
+            if self.agent_busy {
+                return vec!["busy, please wait".to_string()];
+            }
+            self.agent_busy = true;
+            self.push(Entry::Assistant("logging in to OpenAI Codex…".to_string()));
+            let tx = app_tx.clone();
+            tokio::spawn(async move {
+                match crate::login_codex::start_device_flow().await {
+                    Err(e) => { tx.send(AppEvent::LoginComplete(Err(e))).ok(); }
+                    Ok((info, poll)) => {
+                        tx.send(AppEvent::LoginPrompt {
+                            user_code: info.user_code,
+                            verification_uri: info.verification_uri,
+                        }).ok();
+                        let result = poll.await;
+                        tx.send(AppEvent::LoginComplete(result)).ok();
+                    }
+                }
+            });
+            return out;
+        }
 
         if input == "/config" {
             let key_display = match &self.session.api_key {
@@ -290,12 +317,18 @@ impl<'a> App<'a> {
                             out.push(format!("warning: {}", e));
                         }
                         let new_session_id = Uuid::new_v4();
-                        let new_agent = build_agent(&self.session, new_session_id, self.project_dir.clone(), self.db.clone());
-                        let db = self.db.clone();
-                        let pdir = self.project_dir.clone();
-                        let _ = db.insert_session(new_session_id, &pdir, true);
-                        self.agents = vec![AgentHandle { agent: Some(new_agent), session_id: new_session_id, is_interactive: true }];
-                        out.push(format!("switched to profile '{}'  provider={}  model={}", name, self.session.provider, self.session.model));
+                        match build_agent(&self.session, new_session_id, self.project_dir.clone(), self.db.clone()) {
+                            Ok(new_agent) => {
+                                let db = self.db.clone();
+                                let pdir = self.project_dir.clone();
+                                let _ = db.insert_session(new_session_id, &pdir, true);
+                                self.agents = vec![AgentHandle { agent: Some(new_agent), session_id: new_session_id, is_interactive: true }];
+                                out.push(format!("switched to profile '{}'  provider={}  model={}", name, self.session.provider, self.session.model));
+                            }
+                            Err(e) => {
+                                out.push(format!("error building agent: {}", e));
+                            }
+                        }
                     } else {
                         let mut names: Vec<String> = self.session.profiles.keys().cloned().collect();
                         names.sort();
@@ -369,7 +402,7 @@ impl<'a> App<'a> {
         }
 
         if text.starts_with('/') {
-            let output = self.handle_command(&text);
+            let output = self.handle_command(&text, app_tx);
             self.push(Entry::User(text));
             for line in output {
                 self.push(Entry::Assistant(line));
@@ -404,17 +437,32 @@ impl<'a> App<'a> {
     }
 }
 
-fn build_agent(session: &Session, session_id: Uuid, project_dir: PathBuf, db: Arc<DbHandle>) -> Agent {
-    let mut client = ChatClient::new(session.base_url.clone(), session.api_key.clone());
-    if session.provider == "openrouter" {
-        client = client.with_headers([
-            ("HTTP-Referer".into(),            "https://github.com/tasanakorn".into()),
-            ("X-Title".into(),                 "themion".into()),
-            ("X-OpenRouter-Title".into(),      "themion".into()),
-            ("X-OpenRouter-Categories".into(), "developer-tools".into()),
-        ]);
-    }
-    Agent::new_with_db(client, session.model.clone(), session.system_prompt.clone(), session_id, project_dir, db)
+fn build_agent(session: &Session, session_id: Uuid, project_dir: PathBuf, db: Arc<DbHandle>) -> anyhow::Result<Agent> {
+    use themion_core::ChatBackend;
+    let client: Box<dyn ChatBackend + Send + Sync> = match session.provider.as_str() {
+        "openai-codex" => {
+            let auth = crate::auth_store::load()?
+                .ok_or_else(|| anyhow::anyhow!("no codex auth; run /login codex first"))?;
+            Box::new(CodexClient::new(
+                session.base_url.clone(),
+                auth,
+                Box::new(|a: &themion_core::CodexAuth| crate::auth_store::save(a)),
+            ))
+        }
+        _ => {
+            let mut c = ChatClient::new(session.base_url.clone(), session.api_key.clone());
+            if session.provider == "openrouter" {
+                c = c.with_headers([
+                    ("HTTP-Referer".to_string(), "https://github.com/tasanakorn".to_string()),
+                    ("X-Title".to_string(), "themion".to_string()),
+                    ("X-OpenRouter-Title".to_string(), "themion".to_string()),
+                    ("X-OpenRouter-Categories".to_string(), "developer-tools".to_string()),
+                ]);
+            }
+            Box::new(c)
+        }
+    };
+    Ok(Agent::new_with_db(client, session.model.clone(), session.system_prompt.clone(), session_id, project_dir, db))
 }
 
 fn set_input_text(input: &mut TextArea, text: &str) {
@@ -662,6 +710,42 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 if let Some(h) = app.agents.iter_mut().find(|h| h.session_id == sid) {
                     h.agent = Some(*agent);
                 }
+            }
+            Some(AppEvent::LoginPrompt { user_code, verification_uri }) => {
+                app.push(Entry::Assistant(format!("open {} and enter code {}", verification_uri, user_code)));
+            }
+            Some(AppEvent::LoginComplete(Ok(auth))) => {
+                if let Err(e) = crate::auth_store::save(&auth) {
+                    app.push(Entry::Assistant(format!("warning: failed to save auth: {}", e)));
+                }
+                // Upsert codex profile
+                use crate::config::ProfileConfig;
+                app.session.profiles.entry("codex".to_string()).or_insert_with(|| ProfileConfig {
+                    provider: Some("openai-codex".to_string()),
+                    model: Some("gpt-5.4".to_string()),
+                    base_url: None,
+                    api_key: None,
+                });
+                if let Err(e) = save_profiles(&app.session.active_profile, &app.session.profiles) {
+                    app.push(Entry::Assistant(format!("warning: failed to save config: {}", e)));
+                }
+                app.session.switch_profile("codex");
+                let new_session_id = Uuid::new_v4();
+                match build_agent(&app.session, new_session_id, app.project_dir.clone(), app.db.clone()) {
+                    Ok(new_agent) => {
+                        let _ = app.db.insert_session(new_session_id, &app.project_dir, true);
+                        app.agents = vec![AgentHandle { agent: Some(new_agent), session_id: new_session_id, is_interactive: true }];
+                        app.push(Entry::Assistant(format!("logged in as {} — switched to codex profile (gpt-5.4)", auth.account_id)));
+                    }
+                    Err(e) => {
+                        app.push(Entry::Assistant(format!("login succeeded but agent build failed: {}", e)));
+                    }
+                }
+                app.agent_busy = false;
+            }
+            Some(AppEvent::LoginComplete(Err(e))) => {
+                app.push(Entry::Assistant(format!("login failed: {}", e)));
+                app.agent_busy = false;
             }
             None => {}
         }

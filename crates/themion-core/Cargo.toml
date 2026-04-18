@@ -11,3 +11,4 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 rusqlite = { workspace = true }
 uuid = { workspace = true }
+async-trait = { workspace = true }

@@ -165,6 +165,20 @@ Key bindings:
 
 On each submit, the interactive agent is moved out of its handle into a spawned task. When `run_loop` returns, the agent is sent back via `AppEvent::AgentReady(Box<Agent>, Uuid)` and restored to the handle.
 
+## Providers
+
+Themion abstracts the LLM backend behind a `ChatBackend` trait (`crates/themion-core/src/client.rs`). Each provider implements the `async fn chat_completion_stream(...)` method. `Agent.client` is a `Box<dyn ChatBackend + Send + Sync>`, allowing swappable backends at runtime.
+
+| Provider       | Config value       | Auth              | Wire format                            |
+| -------------- | ------------------ | ----------------- | -------------------------------------- |
+| OpenRouter     | `openrouter`       | API key           | OpenAI Chat Completions SSE            |
+| llama.cpp      | `llamacpp`         | none              | OpenAI Chat Completions SSE            |
+| OpenAI Codex   | `openai-codex`     | OAuth (device code) | OpenAI Responses API SSE             |
+
+**Codex authentication** — device-code flow (no browser popup required). Tokens are persisted to `~/.config/themion/auth.json` (chmod 0600). Login via `/login codex` in the TUI. Token refresh happens transparently before each request.
+
+**SSE format divergence** — OpenRouter and llama.cpp both use Chat Completions with unnamed `data:` frames. Codex uses named-event frames (`event: response.output_text.delta`, etc.) from the Responses API at `https://chatgpt.com/backend-api/codex/responses`.
+
 ## Configuration
 
 Configuration is resolved in priority order: **env var > config file > built-in default**.

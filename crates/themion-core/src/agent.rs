@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use uuid::Uuid;
-use crate::client::{Message, OpenRouterClient};
+use crate::client::{ChatBackend, Message};
 use crate::db::DbHandle;
 use crate::tools;
 
@@ -52,7 +52,7 @@ fn tool_call_detail(name: &str, args_json: &str) -> String {
 }
 
 pub struct Agent {
-    client: OpenRouterClient,
+    client: Box<dyn ChatBackend + Send + Sync>,
     model: String,
     system_prompt: String,
     messages: Vec<Message>,
@@ -65,7 +65,7 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(client: OpenRouterClient, model: String, system_prompt: String) -> Self {
+    pub fn new(client: Box<dyn ChatBackend + Send + Sync>, model: String, system_prompt: String) -> Self {
         Self {
             client,
             model,
@@ -80,7 +80,7 @@ impl Agent {
         }
     }
 
-    pub fn new_verbose(client: OpenRouterClient, model: String, system_prompt: String) -> Self {
+    pub fn new_verbose(client: Box<dyn ChatBackend + Send + Sync>, model: String, system_prompt: String) -> Self {
         Self {
             client,
             model,
@@ -96,7 +96,7 @@ impl Agent {
     }
 
     pub fn new_with_events(
-        client: OpenRouterClient,
+        client: Box<dyn ChatBackend + Send + Sync>,
         model: String,
         system_prompt: String,
         tx: mpsc::UnboundedSender<AgentEvent>,
@@ -116,7 +116,7 @@ impl Agent {
     }
 
     pub fn new_with_db(
-        client: OpenRouterClient,
+        client: Box<dyn ChatBackend + Send + Sync>,
         model: String,
         system_prompt: String,
         session_id: Uuid,
@@ -211,11 +211,11 @@ impl Agent {
                     &self.model,
                     &msgs_with_system,
                     &tool_defs,
-                    move |chunk| {
+                    Box::new(move |chunk| {
                         if let Some(ref tx) = event_tx {
                             let _ = tx.send(AgentEvent::AssistantChunk(chunk));
                         }
-                    },
+                    }),
                 )
                 .await?;
 
