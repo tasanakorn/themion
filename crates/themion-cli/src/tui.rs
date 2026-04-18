@@ -26,6 +26,7 @@ enum AppEvent {
     Key(event::KeyEvent),
     Mouse(event::MouseEvent),
     Agent(AgentEvent),
+    AgentReady(Box<Agent>),
 }
 
 // ── Chat entries ──────────────────────────────────────────────────────────────
@@ -53,10 +54,12 @@ pub struct App<'a> {
     history_pos: Option<usize>,    // None = not navigating; Some(i) = showing history[i]
     history_draft: String,         // input saved before starting history navigation
     streaming_idx: Option<usize>,  // index into entries of the live assistant entry
+    agent: Option<Agent>,          // None only while a task is running
 }
 
 impl<'a> App<'a> {
     pub fn new(session: Session) -> Self {
+        let agent = build_agent(&session);
         Self {
             session,
             entries: Vec::new(),
@@ -69,6 +72,7 @@ impl<'a> App<'a> {
             history_pos: None,
             history_draft: String::new(),
             streaming_idx: None,
+            agent: Some(agent),
         }
     }
 
@@ -213,6 +217,7 @@ impl<'a> App<'a> {
                         if let Err(e) = save_profiles(&self.session.active_profile, &self.session.profiles) {
                             out.push(format!("warning: {}", e));
                         }
+                        self.agent = Some(build_agent(&self.session));
                         out.push(format!("switched to profile '{}'  provider={}  model={}", name, self.session.provider, self.session.model));
                     } else {
                         let mut names: Vec<String> = self.session.profiles.keys().cloned().collect();
@@ -309,17 +314,20 @@ impl<'a> App<'a> {
             }
         });
 
-        let client = ChatClient::new(self.session.base_url.clone(), self.session.api_key.clone());
-        let mut agent = Agent::new_with_events(
-            client,
-            self.session.model.clone(),
-            self.session.system_prompt.clone(),
-            event_tx,
-        );
+        let mut agent = self.agent.take().expect("agent available when not busy");
+        agent.set_event_tx(event_tx);
+
+        let app_tx_done = app_tx.clone();
         tokio::spawn(async move {
             let _ = agent.run_loop(&text).await;
+            let _ = app_tx_done.send(AppEvent::AgentReady(Box::new(agent)));
         });
     }
+}
+
+fn build_agent(session: &Session) -> Agent {
+    let client = ChatClient::new(session.base_url.clone(), session.api_key.clone());
+    Agent::new(client, session.model.clone(), session.system_prompt.clone())
 }
 
 fn set_input_text(input: &mut TextArea, text: &str) {
@@ -499,6 +507,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 _ => { app.input.input(key); }
             },
             Some(AppEvent::Agent(ev)) => app.handle_agent_event(ev),
+            Some(AppEvent::AgentReady(agent)) => { app.agent = Some(*agent); }
             None => {}
         }
     }

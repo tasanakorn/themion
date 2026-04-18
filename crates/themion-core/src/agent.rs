@@ -79,6 +79,10 @@ impl Agent {
         }
     }
 
+    pub fn set_event_tx(&mut self, tx: mpsc::UnboundedSender<AgentEvent>) {
+        self.event_tx = Some(tx);
+    }
+
     fn emit(&self, event: AgentEvent) {
         if let Some(tx) = &self.event_tx {
             let _ = tx.send(event);
