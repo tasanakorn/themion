@@ -31,6 +31,7 @@ enum AppEvent {
     Mouse(event::MouseEvent),
     Agent(AgentEvent),
     AgentReady(Box<Agent>, Uuid),
+    Tick,
 }
 
 // ── Chat entries ──────────────────────────────────────────────────────────────
@@ -38,6 +39,7 @@ enum AppEvent {
 enum Entry {
     User(String),
     Assistant(String),
+    Banner(String),
     ToolCall(String),   // detail, e.g. "bash: ls -la"
     ToolDone,
     Stats(String),
@@ -64,6 +66,7 @@ pub struct App<'a> {
     history_pos: Option<usize>,    // None = not navigating; Some(i) = showing history[i]
     history_draft: String,         // input saved before starting history navigation
     streaming_idx: Option<usize>,  // index into entries of the live assistant entry
+    anim_frame: u8,
     agents: Vec<AgentHandle>,
     db: Arc<DbHandle>,
     project_dir: PathBuf,
@@ -75,9 +78,33 @@ impl<'a> App<'a> {
     pub fn new(session: Session, db: Arc<DbHandle>, session_id: Uuid, project_dir: PathBuf) -> Self {
         let agent = build_agent(&session, session_id, project_dir.clone(), db.clone());
         let handle = AgentHandle { agent: Some(agent), session_id, is_interactive: true };
+
+        let art = concat!(
+            "█████  █   █  █████  █   █  ███   ███   █   █\n",
+            "  █    █   █  █      ██ ██   █   █   █  ██  █\n",
+            "  █    █████  ████   █ █ █   █   █   █  █ █ █\n",
+            "  █    █   █  █      █   █   █   █   █  █  ██\n",
+            "  █    █   █  █████  █   █  ███   ███   █   █",
+        );
+        let project_display = project_dir.display().to_string();
+        let initial_entries = vec![
+            Entry::Blank,
+            Entry::Banner(art.to_string()),
+            Entry::Blank,
+            Entry::Assistant(format!(
+                "v{}  |  {}  |  {}",
+                env!("CARGO_PKG_VERSION"),
+                session.active_profile,
+                session.model,
+            )),
+            Entry::Assistant(format!("dir  |  {}", project_display)),
+            Entry::Assistant("/config to configure  |  /exit to quit".to_string()),
+            Entry::Blank,
+        ];
+
         Self {
             session,
-            entries: Vec::new(),
+            entries: initial_entries,
             pending: None,
             input: make_input(),
             running: true,
@@ -87,6 +114,7 @@ impl<'a> App<'a> {
             history_pos: None,
             history_draft: String::new(),
             streaming_idx: None,
+            anim_frame: 0,
             agents: vec![handle],
             db,
             project_dir,
@@ -132,6 +160,19 @@ impl<'a> App<'a> {
         }
     }
 
+    fn thinking_str(&self) -> String {
+        const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let ch = SPINNER[self.anim_frame as usize % SPINNER.len()];
+        format!("  {} thinking…", ch)
+    }
+
+    fn on_tick(&mut self) {
+        self.anim_frame = self.anim_frame.wrapping_add(1);
+        if self.agent_busy && self.pending.is_some() {
+            self.pending = Some(self.thinking_str());
+        }
+    }
+
     fn push(&mut self, entry: Entry) {
         self.entries.push(entry);
     }
@@ -139,7 +180,7 @@ impl<'a> App<'a> {
     fn handle_agent_event(&mut self, ev: AgentEvent) {
         match ev {
             AgentEvent::LlmStart => {
-                self.pending = Some("  ⋯ thinking…".to_string());
+                self.pending = Some(self.thinking_str());
                 self.streaming_idx = None;
             }
             AgentEvent::AssistantChunk(chunk) => {
@@ -170,7 +211,7 @@ impl<'a> App<'a> {
             }
             AgentEvent::ToolEnd => {
                 self.push(Entry::ToolDone);
-                self.pending = Some("  ⋯ thinking…".to_string());
+                self.pending = Some(self.thinking_str());
             }
             AgentEvent::TurnDone(stats) => {
                 self.streaming_idx = None;
@@ -339,7 +380,7 @@ impl<'a> App<'a> {
 
         self.push(Entry::User(text.clone()));
         self.agent_busy = true;
-        self.pending = Some("  ⋯ thinking…".to_string());
+        self.pending = Some(self.thinking_str());
 
         let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let app_tx_relay = app_tx.clone();
@@ -393,7 +434,7 @@ fn make_input<'a>() -> TextArea<'a> {
             .padding(Padding::left(2)),
     );
     ta.set_cursor_line_style(Style::default());
-    ta.set_placeholder_text("message…  (Enter send · Ctrl-C quit)");
+    ta.set_placeholder_text("message…  (Enter send | Ctrl-C quit)");
     ta
 }
 
@@ -420,6 +461,16 @@ fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Lin
                     lines.push(Line::from(vec![
                         Span::raw("  "),
                         Span::raw(part.to_string()),
+                    ]));
+                }
+            }
+            Entry::Banner(text) => {
+                for part in text.lines() {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("  {}", part),
+                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        ),
                     ]));
                 }
             }
@@ -493,7 +544,7 @@ fn draw(f: &mut Frame, app: &App) {
         .and_then(|n| n.to_str())
         .unwrap_or("?");
     let bar = format!(
-        "  {}  ·  {}  ·  {}  ·  in:{} out:{} cached:{}  ·  ctx:~{}tok",
+        "  {}  |  {}  |  {}  |  in:{} out:{} cached:{}  |  ctx:~{}tok",
         project_leaf,
         app.session.active_profile,
         app.session.model,
@@ -565,6 +616,15 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
         }
     });
 
+    let app_tx_tick = app_tx.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(150));
+        loop {
+            interval.tick().await;
+            if app_tx_tick.send(AppEvent::Tick).is_err() { break; }
+        }
+    });
+
     let mut app = App::new(session, db, session_id, project_dir);
 
     while app.running {
@@ -587,6 +647,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 (KeyCode::Down, KeyModifiers::NONE) => app.history_down(),
                 _ => { app.input.input(key); }
             },
+            Some(AppEvent::Tick) => app.on_tick(),
             Some(AppEvent::Agent(ev)) => app.handle_agent_event(ev),
             Some(AppEvent::AgentReady(agent, sid)) => {
                 if let Some(h) = app.agents.iter_mut().find(|h| h.session_id == sid) {

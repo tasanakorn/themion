@@ -28,16 +28,26 @@ pub enum AgentEvent {
     TurnDone(TurnStats),
 }
 
+fn truncate(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        s.to_string()
+    } else {
+        chars[..max].iter().collect::<String>() + "…"
+    }
+}
+
 fn tool_call_detail(name: &str, args_json: &str) -> String {
     let args: serde_json::Value = serde_json::from_str(args_json).unwrap_or_default();
+    let t = |key: &str| truncate(args[key].as_str().unwrap_or("?"), 60);
     match name {
-        "bash" => format!("bash: {}", args["command"].as_str().unwrap_or("?")),
-        "read_file" => format!("read: {}", args["path"].as_str().unwrap_or("?")),
-        "write_file" => format!("write: {}", args["path"].as_str().unwrap_or("?")),
-        "list_directory" => format!("ls: {}", args["path"].as_str().unwrap_or("?")),
-        "recall_history" => format!("recall_history: session={}", args["session_id"].as_str().unwrap_or("current")),
-        "search_history" => format!("search_history: {:?}", args["query"].as_str().unwrap_or("?")),
-        _ => name.to_string(),
+        "bash"          => format!("bash: {}", t("command")),
+        "read_file"     => format!("read: {}", t("path")),
+        "write_file"    => format!("write: {}", t("path")),
+        "list_directory"=> format!("ls: {}", t("path")),
+        "recall_history"=> format!("recall_history: session={}", truncate(args["session_id"].as_str().unwrap_or("current"), 60)),
+        "search_history"=> format!("search_history: {}", t("query")),
+        _               => name.to_string(),
     }
 }
 
