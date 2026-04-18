@@ -1,6 +1,6 @@
 use std::io;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers, EventStream},
+    event::{self, Event, KeyCode, KeyModifiers, EventStream, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -24,6 +24,7 @@ use crate::{Session, format_stats};
 
 enum AppEvent {
     Key(event::KeyEvent),
+    Mouse(event::MouseEvent),
     Agent(AgentEvent),
 }
 
@@ -402,18 +403,19 @@ fn draw(f: &mut Frame, app: &App) {
 
     // ── Conversation ─────────────────────────────────────────────────────────
     let lines = build_lines(&app.entries, &app.pending);
-    let total = lines.len() as u16;
-    let height = chunks[1].height;
+    let height = chunks[1].height as usize;
+    let width = chunks[1].width;
 
-    // scroll_offset=0 → pinned to bottom; scroll_offset>0 → scrolled up
-    let max_scroll = total.saturating_sub(height) as usize;
-    let scroll = max_scroll.saturating_sub(app.scroll_offset);
-
-    let conv = Paragraph::new(lines)
+    // Use ratatui's own line_count() to get the exact visual row count after
+    // word-wrap, then compute a scroll that pins the newest content to the bottom.
+    let conv_base = Paragraph::new(lines)
         .wrap(ratatui::widgets::Wrap { trim: false })
-        .scroll((scroll as u16, 0))
         .block(Block::default());
-    f.render_widget(conv, chunks[1]);
+    let total_visual = conv_base.line_count(width);
+    let max_scroll = total_visual.saturating_sub(height);
+    let scroll = max_scroll.saturating_sub(app.scroll_offset) as u16;
+
+    f.render_widget(conv_base.scroll((scroll, 0)), chunks[1]);
 
     // ── Input ─────────────────────────────────────────────────────────────────
     f.render_widget(&app.input, chunks[2]);
@@ -424,7 +426,7 @@ fn draw(f: &mut Frame, app: &App) {
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -432,7 +434,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), crossterm::event::DisableMouseCapture, LeaveAlternateScreen);
         original_hook(info);
     }));
 
@@ -443,8 +445,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     tokio::spawn(async move {
         let mut stream = EventStream::new();
         while let Some(Ok(ev)) = stream.next().await {
-            if let Event::Key(key) = ev {
-                let _ = app_tx_input.send(AppEvent::Key(key));
+            match ev {
+                Event::Key(key) => { let _ = app_tx_input.send(AppEvent::Key(key)); }
+                Event::Mouse(m) => { let _ = app_tx_input.send(AppEvent::Mouse(m)); }
+                _ => {}
             }
         }
     });
@@ -454,6 +458,11 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     while app.running {
         terminal.draw(|f| draw(f, &app))?;
         match app_rx.recv().await {
+            Some(AppEvent::Mouse(m)) => match m.kind {
+                MouseEventKind::ScrollUp => app.scroll_up(),
+                MouseEventKind::ScrollDown => app.scroll_down(),
+                _ => {}
+            },
             Some(AppEvent::Key(key)) => match (key.code, key.modifiers) {
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.running = false,
                 (KeyCode::Enter, KeyModifiers::NONE) => {
@@ -472,7 +481,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     }
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), crossterm::event::DisableMouseCapture, LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
 }
