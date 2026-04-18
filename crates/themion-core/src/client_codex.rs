@@ -209,6 +209,7 @@ impl ChatBackend for CodexClient {
 
         let mut body = serde_json::json!({
             "model": model,
+            "store": false,
             "input": input_items,
             "tools": translated_tools,
             "stream": true,
@@ -224,8 +225,7 @@ impl ChatBackend for CodexClient {
             .header("originator", "pi")
             .header("OpenAI-Beta", "responses=experimental")
             .header("accept", "text/event-stream")
-            .header("content-type", "application/json")
-            .json(&body)
+            .json(&body)  // sets content-type: application/json
             .send()
             .await?;
 

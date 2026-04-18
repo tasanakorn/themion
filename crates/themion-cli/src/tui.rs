@@ -202,11 +202,9 @@ impl<'a> App<'a> {
                 }
             }
             AgentEvent::AssistantText(text) => {
-                // Fallback for non-streaming path; ignored if streaming already populated the entry.
-                if self.streaming_idx.is_none() {
-                    self.pending = None;
-                    self.push(Entry::Assistant(text));
-                }
+                self.streaming_idx = None;
+                self.pending = None;
+                self.push(Entry::Assistant(text));
             }
             AgentEvent::ToolStart { detail } => {
                 self.streaming_idx = None;
@@ -431,7 +429,11 @@ impl<'a> App<'a> {
 
         let app_tx_done = app_tx.clone();
         tokio::spawn(async move {
-            let _ = agent.run_loop(&text).await;
+            if let Err(e) = agent.run_loop(&text).await {
+                let _ = app_tx_done.send(AppEvent::Agent(AgentEvent::AssistantText(
+                    format!("error: {e}"),
+                )));
+            }
             let _ = app_tx_done.send(AppEvent::AgentReady(Box::new(agent), handle_session_id));
         });
     }
@@ -710,6 +712,8 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 if let Some(h) = app.agents.iter_mut().find(|h| h.session_id == sid) {
                     h.agent = Some(*agent);
                 }
+                // Clear busy in case TurnDone was never emitted (e.g. error path)
+                app.agent_busy = false;
             }
             Some(AppEvent::LoginPrompt { user_code, verification_uri }) => {
                 app.push(Entry::Assistant(format!("open {} and enter code {}", verification_uri, user_code)));
@@ -726,10 +730,10 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     base_url: None,
                     api_key: None,
                 });
+                app.session.switch_profile("codex");
                 if let Err(e) = save_profiles(&app.session.active_profile, &app.session.profiles) {
                     app.push(Entry::Assistant(format!("warning: failed to save config: {}", e)));
                 }
-                app.session.switch_profile("codex");
                 let new_session_id = Uuid::new_v4();
                 match build_agent(&app.session, new_session_id, app.project_dir.clone(), app.db.clone()) {
                     Ok(new_agent) => {
