@@ -1,8 +1,23 @@
 mod config;
 use config::Config;
-use themion_core::agent::Agent;
+use themion_core::agent::{Agent, TurnStats};
 use themion_core::client::OpenRouterClient;
 use std::io::{self, BufRead, Write};
+
+fn format_duration(ms: u128) -> String {
+    if ms < 1000 {
+        format!("{}ms", ms)
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        format!("{}m{}s", ms / 60_000, (ms % 60_000) / 1000)
+    }
+}
+
+fn format_stats(s: &TurnStats) -> String {
+    format!("[stats: rounds={} tools={} in={} out={} cached={} time={}]",
+        s.llm_rounds, s.tool_calls, s.tokens_in, s.tokens_out, s.tokens_cached, format_duration(s.elapsed_ms))
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -17,8 +32,7 @@ async fn main() -> anyhow::Result<()> {
         let mut agent = Agent::new(client, cfg.model, cfg.system_prompt);
         let (result, stats) = agent.run_loop(&prompt).await?;
         println!("{result}");
-        eprintln!("[rounds={} tools={} in={} out={} cached={}]",
-                  stats.llm_rounds, stats.tool_calls, stats.tokens_in, stats.tokens_out, stats.tokens_cached);
+        eprintln!("{}", format_stats(&stats));
     } else {
         // REPL mode
         let stdin = io::stdin();
@@ -57,8 +71,7 @@ async fn main() -> anyhow::Result<()> {
             match agent.run_loop(input).await {
                 Ok((response, stats)) => {
                     println!("{response}");
-                    println!("[rounds={} tools={} in={} out={} cached={}]",
-                             stats.llm_rounds, stats.tool_calls, stats.tokens_in, stats.tokens_out, stats.tokens_cached);
+                    println!("{}", format_stats(&stats));
                 }
                 Err(e) => eprintln!("Error: {e}"),
             }

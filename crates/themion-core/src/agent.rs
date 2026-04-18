@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::time::Instant;
 use crate::client::{Message, OpenRouterClient};
 use crate::tools;
 
@@ -8,6 +9,7 @@ pub struct TurnStats {
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub tokens_cached: u64,
+    pub elapsed_ms: u128,
 }
 
 fn tool_call_detail(name: &str, args_json: &str) -> String {
@@ -58,6 +60,7 @@ impl Agent {
             tool_call_id: None,
         });
 
+        let turn_start = Instant::now();
         let tool_defs = tools::tool_definitions();
         let mut final_response = String::new();
 
@@ -77,7 +80,7 @@ impl Agent {
             }];
             msgs_with_system.extend_from_slice(&self.messages);
 
-            if self.verbose { println!("[calling llm]"); }
+            if self.verbose { println!("[llm: calling]"); }
             let (response, usage) = self.client
                 .chat_completion(&self.model, &msgs_with_system, &tool_defs)
                 .await?;
@@ -121,7 +124,7 @@ impl Agent {
                     println!("[tool: {}]", detail);
                 }
                 let result = tools::call_tool(&tc.function.name, &tc.function.arguments).await;
-                if self.verbose { println!("[tool done]"); }
+                if self.verbose { println!("[tool: done]"); }
                 tool_calls += 1;
                 self.messages.push(Message {
                     role: "tool".to_string(),
@@ -132,6 +135,6 @@ impl Agent {
             }
         }
 
-        Ok((final_response, TurnStats { llm_rounds, tool_calls, tokens_in, tokens_out, tokens_cached }))
+        Ok((final_response, TurnStats { llm_rounds, tool_calls, tokens_in, tokens_out, tokens_cached, elapsed_ms: turn_start.elapsed().as_millis() }))
     }
 }
