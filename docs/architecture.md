@@ -2,6 +2,19 @@
 
 Themion is a Rust AI agent with a Ratatui TUI, streaming token output, persistent SQLite history, and a tool-calling loop compatible with multiple OpenAI-style backends.
 
+## Workspace Layout
+
+- `crates/themion-core/`
+  - shared agent/runtime logic, provider backends, tool handling, and SQLite-backed history
+  - look here first for prompt assembly, streaming, backend-specific request/response translation, and tool execution
+- `crates/themion-cli/`
+  - terminal UI, config loading, login flows, startup wiring, and other user-facing local behavior
+  - look here first for file IO, TUI event handling, app/session orchestration, and local profile/auth flows
+- `docs/`
+  - project docs and behavior notes; keep this aligned with real behavior when flows or semantics change
+
+This separation is intentional: reusable runtime and provider behavior belongs in `themion-core`, while terminal/UI/config/filesystem-driven user flows belong in `themion-cli`.
+
 ## Design Philosophy
 
 - **No framework dependencies** — the agent loop, HTTP client, tool dispatch, and TUI are all hand-rolled.
@@ -9,6 +22,7 @@ Themion is a Rust AI agent with a Ratatui TUI, streaming token output, persisten
 - **OpenAI-style tool calling** — tools are described as JSON function schemas; compatible providers can invoke them and return structured tool calls.
 - **Event-driven TUI** — `Agent` emits `AgentEvent` variants over an `mpsc` channel; the TUI renders each event as it arrives, giving streaming token display without blocking the input loop.
 - **Provider abstraction** — the core agent speaks through a `ChatBackend` trait so different transports and wire formats can be swapped at runtime.
+- **Separated prompt inputs** — the base system prompt and contextual instruction files such as `AGENTS.md` are treated as distinct prompt inputs rather than merged into a single message.
 
 ## Component Map
 
@@ -79,6 +93,7 @@ Each call to `run_loop(user_input)`:
 
 ```text
 [system_prompt]
+[injected contextual instructions such as AGENTS.md, when available]
 [recall hint — only when turn_boundaries.len() > window_turns]
 [messages from turn (current − window_turns) … now]
 ```
