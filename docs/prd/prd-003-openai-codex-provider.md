@@ -237,7 +237,7 @@ AppEvent::LoginComplete(Result<CodexAuth>),
 Handler in the main loop:
 
 - `LoginStarted` → no-op today; reserved for animating a spinner if needed.
-- `LoginComplete(Ok(auth))` → push `Entry::Assistant("logged in as account {auth.account_id}; codex profile is now usable")`; clear `agent_busy`; if the active profile is already `provider == "openai-codex"`, rebuild the agent so the new token is picked up immediately (the existing pattern from `/config profile use`).
+- `LoginComplete(Ok(auth))` → atomically: (1) upsert a `codex` profile in `session.profiles` with `provider = "openai-codex"`, `model = "gpt-5.4"` if it does not already exist; (2) call `save_profiles("codex", &profiles)` to persist; (3) call `session.switch_profile("codex")`; (4) rebuild the interactive agent via `build_agent`; (5) push `Entry::Assistant("logged in as {auth.account_id} — switched to codex profile (gpt-5.4)")`. Clear `agent_busy`. The user is ready to chat immediately with no further commands required.
 - `LoginComplete(Err(e))` → push `Entry::Assistant(format!("login failed: {e}"))`; clear `agent_busy`.
 
 The `agent_busy` guard prevents a user from triggering a second login or sending a chat message while the OAuth flow is in flight.
@@ -321,9 +321,9 @@ The agent's `client` field type changes from concrete `OpenRouterClient` to `Box
 First-time Codex users follow this path:
 
 1. Run themion (any version after upgrade) — the OpenRouter or llamacpp default still works.
-2. Edit `~/.config/themion/config.toml`, uncomment the `[profile.codex]` block (now present in the regenerated template; existing files are not auto-edited).
-3. In TUI, run `/login codex`, complete the browser flow.
-4. Run `/config profile use codex`. Subsequent turns hit the Codex Responses API.
+2. In TUI, run `/login codex` and complete the browser flow.
+
+`/login codex` creates the `codex` profile automatically, switches to it, and rebuilds the agent in one step. No manual config editing or `/config profile use` required for first-time setup. `/config profile use codex` still works normally to switch back to the Codex profile in later sessions.
 
 `auth.json` survives across themion versions; the schema is intentionally minimal so future additions can be `Option<…>` with `serde(default)`.
 
@@ -332,7 +332,7 @@ First-time Codex users follow this path:
 | Step                                                                                                                | Verify                                                                                                                                                                              |
 | ------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Run `cargo build` after the trait refactor with no Codex profile configured                                         | OpenRouter and llamacpp profiles still build and run; one-turn REPL against OpenRouter returns an answer; no compile warnings about unused trait imports.                            |
-| In TUI with no `auth.json`, run `/login codex`                                                                      | Browser opens to `auth.openai.com/authorize?…`; loopback listener accepts the callback; entry shows "logged in as account …"; `~/.config/themion/auth.json` exists with mode `0600`. |
+| In TUI with no `auth.json`, run `/login codex`                                                                      | Browser opens to `auth.openai.com/authorize?…`; loopback listener accepts the callback; entry shows "logged in as {account_id} — switched to codex profile (gpt-5.4)"; `auth.json` written; status bar switches to `codex` profile immediately; no `/config profile use` needed. |
 | Re-run `/login codex` while a previous login is still in flight                                                     | Second invocation is rejected by the `agent_busy` guard with "wait for current operation"; only one browser tab opens.                                                               |
 | With a valid `auth.json`, set `[profile.codex] provider = "openai-codex"` and run `/config profile use codex`        | Status bar shows `codex` profile and `gpt-5.4` model; one-turn chat completes and stats line shows non-zero `in:` / `out:` token counts.                                  |
 | Manually edit `auth.json` to set `expires_at` to one second in the past, then send a chat                            | Token refresh fires before the request; `auth.json` `access_token` and `expires_at` are rewritten on disk; chat completes normally.                                                  |
