@@ -1,0 +1,13 @@
+[package]
+name = "themion-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "themion"
+path = "src/main.rs"
+
+[dependencies]
+themion-core = { path = "../themion-core" }
+tokio = { workspace = true }
+anyhow = { workspace = true }

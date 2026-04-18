@@ -865,7 +865,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "themion"
+name = "themion-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "themion-core",
+ "tokio",
+]
+
+[[package]]
+name = "themion-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",

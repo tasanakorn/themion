@@ -1,9 +1,5 @@
-mod agent;
-mod client;
-mod tools;
-
-use agent::Agent;
-use client::OpenRouterClient;
+use themion_core::agent::Agent;
+use themion_core::client::OpenRouterClient;
 use std::io::{self, BufRead, Write};
 
 #[tokio::main]
