@@ -14,3 +14,7 @@ anyhow = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 toml = { workspace = true }
 dirs = "5"
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+tui-textarea = { workspace = true }
+tokio-stream = { workspace = true }

@@ -56,19 +56,25 @@ pub struct ResponseMessage {
     pub tool_calls: Option<Vec<ToolCall>>,
 }
 
-pub struct OpenRouterClient {
+pub struct ChatClient {
     client: Client,
-    api_key: String,
+    api_key: Option<String>,
     base_url: String,
 }
 
-impl OpenRouterClient {
-    pub fn new(api_key: String) -> Self {
+pub type OpenRouterClient = ChatClient;
+
+impl ChatClient {
+    pub fn new(base_url: String, api_key: Option<String>) -> Self {
         Self {
             client: Client::new(),
             api_key,
-            base_url: "https://openrouter.ai/api/v1".to_string(),
+            base_url,
         }
+    }
+
+    pub fn new_openrouter(api_key: String) -> Self {
+        Self::new("https://openrouter.ai/api/v1".to_string(), Some(api_key))
     }
 
     pub async fn chat_completion(
@@ -83,13 +89,16 @@ impl OpenRouterClient {
             "tools": tools,
         });
 
-        let response = self.client
+        let mut request = self.client
             .post(format!("{}/chat/completions", self.base_url))
-            .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+            .json(&body);
+
+        if let Some(key) = &self.api_key {
+            request = request.header("Authorization", format!("Bearer {}", key));
+        }
+
+        let response = request.send().await?;
 
         if !response.status().is_success() {
             let status = response.status();

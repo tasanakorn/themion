@@ -1,8 +1,10 @@
 use anyhow::Result;
 use std::time::Instant;
+use tokio::sync::mpsc;
 use crate::client::{Message, OpenRouterClient};
 use crate::tools;
 
+#[derive(Debug, Clone)]
 pub struct TurnStats {
     pub llm_rounds: u32,
     pub tool_calls: u32,
@@ -10,6 +12,15 @@ pub struct TurnStats {
     pub tokens_out: u64,
     pub tokens_cached: u64,
     pub elapsed_ms: u128,
+}
+
+#[derive(Debug, Clone)]
+pub enum AgentEvent {
+    LlmStart,
+    ToolStart { detail: String },
+    ToolEnd,
+    AssistantText(String),
+    TurnDone(TurnStats),
 }
 
 fn tool_call_detail(name: &str, args_json: &str) -> String {
@@ -28,7 +39,7 @@ pub struct Agent {
     model: String,
     system_prompt: String,
     messages: Vec<Message>,
-    verbose: bool,
+    event_tx: Option<mpsc::UnboundedSender<AgentEvent>>,
 }
 
 impl Agent {
@@ -38,7 +49,7 @@ impl Agent {
             model,
             system_prompt,
             messages: Vec::new(),
-            verbose: false,
+            event_tx: None,
         }
     }
 
@@ -48,7 +59,28 @@ impl Agent {
             model,
             system_prompt,
             messages: Vec::new(),
-            verbose: true,
+            event_tx: None,
+        }
+    }
+
+    pub fn new_with_events(
+        client: OpenRouterClient,
+        model: String,
+        system_prompt: String,
+        tx: mpsc::UnboundedSender<AgentEvent>,
+    ) -> Self {
+        Self {
+            client,
+            model,
+            system_prompt,
+            messages: Vec::new(),
+            event_tx: Some(tx),
+        }
+    }
+
+    fn emit(&self, event: AgentEvent) {
+        if let Some(tx) = &self.event_tx {
+            let _ = tx.send(event);
         }
     }
 
@@ -80,7 +112,7 @@ impl Agent {
             }];
             msgs_with_system.extend_from_slice(&self.messages);
 
-            if self.verbose { println!("[llm: calling]"); }
+            self.emit(AgentEvent::LlmStart);
             let (response, usage) = self.client
                 .chat_completion(&self.model, &msgs_with_system, &tool_defs)
                 .await?;
@@ -110,6 +142,7 @@ impl Agent {
 
             if let Some(ref content) = response.content {
                 final_response = content.clone();
+                self.emit(AgentEvent::AssistantText(content.clone()));
             }
 
             let tool_calls_vec = match response.tool_calls {
@@ -119,12 +152,10 @@ impl Agent {
 
             // Execute each tool call and push results
             for tc in &tool_calls_vec {
-                if self.verbose {
-                    let detail = tool_call_detail(&tc.function.name, &tc.function.arguments);
-                    println!("[tool: {}]", detail);
-                }
+                let detail = tool_call_detail(&tc.function.name, &tc.function.arguments);
+                self.emit(AgentEvent::ToolStart { detail });
                 let result = tools::call_tool(&tc.function.name, &tc.function.arguments).await;
-                if self.verbose { println!("[tool: done]"); }
+                self.emit(AgentEvent::ToolEnd);
                 tool_calls += 1;
                 self.messages.push(Message {
                     role: "tool".to_string(),
@@ -135,6 +166,8 @@ impl Agent {
             }
         }
 
-        Ok((final_response, TurnStats { llm_rounds, tool_calls, tokens_in, tokens_out, tokens_cached, elapsed_ms: turn_start.elapsed().as_millis() }))
+        let stats = TurnStats { llm_rounds, tool_calls, tokens_in, tokens_out, tokens_cached, elapsed_ms: turn_start.elapsed().as_millis() };
+        self.emit(AgentEvent::TurnDone(stats.clone()));
+        Ok((final_response, stats))
     }
 }
