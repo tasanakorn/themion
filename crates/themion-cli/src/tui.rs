@@ -410,6 +410,7 @@ fn draw(f: &mut Frame, app: &App) {
     let scroll = max_scroll.saturating_sub(app.scroll_offset);
 
     let conv = Paragraph::new(lines)
+        .wrap(ratatui::widgets::Wrap { trim: false })
         .scroll((scroll as u16, 0))
         .block(Block::default());
     f.render_widget(conv, chunks[1]);

@@ -74,7 +74,7 @@ pub fn resolve_profile(profile: &ProfileConfig) -> (String, String, Option<Strin
                 .filter(|s| !s.is_empty())
                 .or_else(|| profile.base_url.clone().filter(|s| !s.is_empty()))
                 .unwrap_or_else(|| LLAMACPP_DEFAULT_BASE_URL.to_string());
-            let model = std::env::var("OPENROUTER_MODEL")
+            let model = std::env::var("LLAMACPP_MODEL")
                 .ok()
                 .filter(|s| !s.is_empty())
                 .or_else(|| profile.model.clone().filter(|s| !s.is_empty()))
@@ -140,11 +140,12 @@ impl Config {
         let (provider, base_url, api_key, model) = resolve_profile(&profile);
 
         // Always ensure the active profile exists in the map so it appears in listings.
+        // Use only file-level values here — never bake env-override values into the saved map.
         profiles.entry(active_profile.clone()).or_insert_with(|| ProfileConfig {
-            provider: Some(provider.clone()),
-            base_url: Some(base_url.clone()),
-            model: Some(model.clone()),
-            api_key: api_key.clone(),
+            provider: profile.provider.clone(),
+            base_url: profile.base_url.clone(),
+            model: profile.model.clone(),
+            api_key: profile.api_key.clone(),
         });
 
         let system_prompt = std::env::var("SYSTEM_PROMPT")
