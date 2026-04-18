@@ -1,34 +1,34 @@
+mod config;
+use config::Config;
 use themion_core::agent::Agent;
 use themion_core::client::OpenRouterClient;
 use std::io::{self, BufRead, Write};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let api_key = std::env::var("OPENROUTER_API_KEY")
-        .expect("OPENROUTER_API_KEY env var is required");
-    let model = std::env::var("OPENROUTER_MODEL")
-        .unwrap_or_else(|_| "minimax/minimax-m2.7".to_string());
-    let system_prompt = std::env::var("SYSTEM_PROMPT")
-        .unwrap_or_else(|_| "You are a helpful AI assistant with access to tools.".to_string());
+    let cfg = Config::load()?;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if !args.is_empty() {
         // Print mode: send args as prompt, run agent loop, print result, exit
         let prompt = args.join(" ");
-        let client = OpenRouterClient::new(api_key);
-        let mut agent = Agent::new(client, model, system_prompt);
-        let result = agent.run_loop(&prompt).await?;
+        let client = OpenRouterClient::new(cfg.api_key);
+        let mut agent = Agent::new(client, cfg.model, cfg.system_prompt);
+        let (result, stats) = agent.run_loop(&prompt).await?;
         println!("{result}");
+        eprintln!("[rounds={} tools={} in={} out={} cached={}]",
+                  stats.llm_rounds, stats.tool_calls, stats.tokens_in, stats.tokens_out, stats.tokens_cached);
     } else {
         // REPL mode
         let stdin = io::stdin();
-        let client = OpenRouterClient::new(api_key);
-        let mut agent = Agent::new(client, model.clone(), system_prompt);
+        let client = OpenRouterClient::new(cfg.api_key);
+        let mut agent = Agent::new_verbose(client, cfg.model.clone(), cfg.system_prompt);
 
         println!(
-            "themion v{} | OpenRouter | {model}",
-            env!("CARGO_PKG_VERSION")
+            "themion v{} | OpenRouter | {}",
+            env!("CARGO_PKG_VERSION"),
+            cfg.model
         );
         println!("Type '/exit' or '/quit' to quit.\n");
 
@@ -55,7 +55,11 @@ async fn main() -> anyhow::Result<()> {
             }
 
             match agent.run_loop(input).await {
-                Ok(response) => println!("{response}"),
+                Ok((response, stats)) => {
+                    println!("{response}");
+                    println!("[rounds={} tools={} in={} out={} cached={}]",
+                             stats.llm_rounds, stats.tool_calls, stats.tokens_in, stats.tokens_out, stats.tokens_cached);
+                }
                 Err(e) => eprintln!("Error: {e}"),
             }
         }

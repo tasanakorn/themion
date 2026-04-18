@@ -26,9 +26,22 @@ pub struct FunctionCall {
     pub arguments: String,
 }
 
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct UsageDetails {
+    pub cached_tokens: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct Usage {
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub prompt_tokens_details: Option<UsageDetails>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ChatResponse {
     pub choices: Vec<Choice>,
+    pub usage: Option<Usage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,7 +76,7 @@ impl OpenRouterClient {
         model: &str,
         messages: &[Message],
         tools: &Value,
-    ) -> Result<ResponseMessage> {
+    ) -> Result<(ResponseMessage, Option<Usage>)> {
         let body = serde_json::json!({
             "model": model,
             "messages": messages,
@@ -92,6 +105,6 @@ impl OpenRouterClient {
             .ok_or_else(|| anyhow::anyhow!("no choices in response"))?
             .message;
 
-        Ok(message)
+        Ok((message, chat_response.usage))
     }
 }

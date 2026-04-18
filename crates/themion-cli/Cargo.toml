@@ -11,3 +11,6 @@ path = "src/main.rs"
 themion-core = { path = "../themion-core" }
 tokio = { workspace = true }
 anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+toml = { workspace = true }
+dirs = "5"

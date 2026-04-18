@@ -96,13 +96,29 @@ Agent::run_loop
 
 ## Configuration
 
-All configuration is via environment variables at startup — no config file.
+Configuration is resolved in priority order: **env var > config file > built-in default**.
 
-| Variable             | Effect                                         |
-| -------------------- | ---------------------------------------------- |
-| `OPENROUTER_API_KEY` | Bearer token for OpenRouter (required)         |
-| `OPENROUTER_MODEL`   | Model slug passed in every request             |
-| `SYSTEM_PROMPT`      | Overrides the default assistant system prompt  |
+### Config file
+
+Path: `$XDG_CONFIG_HOME/themion/config.toml` (fallback: `~/.config/themion/config.toml`)
+
+On first run, if the file does not exist, a commented template is written automatically so the user can fill it in.
+
+Example config file:
+
+```toml
+# api_key = "sk-or-v1-..."
+# model = "minimax/minimax-m2.7"
+# system_prompt = "You are a helpful AI assistant with access to tools."
+```
+
+### Fields
+
+| Field           | Env var override     | Built-in default                                       |
+| --------------- | -------------------- | ------------------------------------------------------ |
+| `api_key`       | `OPENROUTER_API_KEY` | — (required; error if absent from both sources)        |
+| `model`         | `OPENROUTER_MODEL`   | `minimax/minimax-m2.7`                                 |
+| `system_prompt` | `SYSTEM_PROMPT`      | `"You are a helpful AI assistant with access to tools."` |
 
 ## Build Profiles
 
