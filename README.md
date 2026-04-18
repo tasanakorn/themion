@@ -1,54 +1,94 @@
 # themion
 
-A CLI AI agent built in Rust. Give it tasks and watch it use tools to get things done.
+> A terminal AI agent that thinks, uses tools, and gets things done — built in Rust.
+
+```
+█████  █   █  █████  █   █  ███   ███   █   █
+  █    █   █  █      ██ ██   █   █   █  ██  █
+  █    █████  ████   █ █ █   █   █   █  █ █ █
+  █    █   █  █      █   █   █   █   █  █  ██
+  █    █   █  █████  █   █  ███   ███   █   █
+```
+
+themion is a Rust-powered AI agent with a full-featured TUI. Give it a task in plain English and watch it reason, call tools, and produce results — all from your terminal.
 
 ## Features
 
-- **Function Calling** — The agent can read files, write files, list directories, and execute shell commands
-- **REPL Mode** — Interactive conversation with persistent history across turns
-- **Multi-Model Support** — Works with any OpenRouter-compatible model ( Anthropic, OpenAI, Meta, Google, etc.)
-- **Print Mode** — Pipe a prompt and get a result; great for scripting
-- **Rust-Powered** — Fast, memory-safe, and ships as a single static binary
+- **Full TUI** — Ratatui-powered interface with streaming output, scroll, mouse support, and a braille spinner while thinking
+- **Agentic tool use** — Reads files, writes files, lists directories, runs shell commands; loops until done
+- **Persistent session history** — SQLite-backed conversation history with windowed context and keyword search
+- **Multi-profile support** — Switch between providers and models on the fly with `/config profile use`
+- **Multi-model** — Works with any OpenRouter model: Claude, GPT-4o, Gemini, Mistral, and more
+- **Print mode** — Pipe a single prompt and get a result; perfect for scripting
+- **Single binary** — Ships as one statically-linked executable with no runtime dependencies
 
 ## Quick Start
 
 ```bash
-# Build
+# Build a release binary
 cargo build --release
 
-# Run with a single prompt (print mode)
-OPENROUTER_API_KEY=sk-... cargo run -- "list the files in the current directory"
+# Set your API key (uses OpenRouter)
+export OPENROUTER_API_KEY=sk-or-...
 
-# Run interactive REPL
-OPENROUTER_API_KEY=sk-... cargo run
+# Launch the TUI
+./target/release/themion
+
+# Or fire a one-shot prompt (print mode)
+./target/release/themion "summarise the files in this directory"
 ```
 
 ## Configuration
 
-| Environment Variable | Required | Default |
-|---------------------|----------|---------|
-| `OPENROUTER_API_KEY` | Yes | — |
-| `OPENROUTER_MODEL` | No | `minimax/minimax-m2.7` |
-| `SYSTEM_PROMPT` | No | Generic assistant |
+| Variable             | Required | Default                  |
+| -------------------- | -------- | ------------------------ |
+| `OPENROUTER_API_KEY` | yes      | —                        |
+| `OPENROUTER_MODEL`   | no       | `minimax/minimax-m2.7`   |
+| `SYSTEM_PROMPT`      | no       | generic assistant prompt |
+
+You can also manage profiles interactively inside the TUI:
+
+```
+/config profile list
+/config profile create work
+/config profile set model=anthropic/claude-3.5-sonnet
+/config profile use work
+```
+
+## TUI Key Bindings
+
+| Key           | Action                  |
+| ------------- | ----------------------- |
+| `Enter`       | Send message            |
+| `↑ / ↓`       | Navigate input history  |
+| `Alt+↑ / ↓`   | Scroll conversation     |
+| `Page Up/Down`| Scroll conversation     |
+| `Ctrl-C`      | Quit                    |
 
 ## Architecture
 
 ```
-src/
-├── client.rs   # OpenRouter API client (reqwest + serde)
-├── agent.rs    # Core loop: call LLM → execute tools → repeat
-├── tools.rs    # Tool definitions and implementations
-└── main.rs     # Entry point (REPL vs print mode)
+crates/
+├── themion-core/
+│   ├── agent.rs    # Agent loop: LLM → tools → repeat (windowed context, SQLite history)
+│   ├── client.rs   # OpenRouter API client (streaming + non-streaming)
+│   └── tools.rs    # Tool registry: bash, read_file, write_file, list_directory, recall/search history
+└── themion-cli/
+    ├── main.rs     # Entry point — TUI mode or print mode
+    ├── tui.rs      # Ratatui TUI: layout, events, spinner animation
+    └── config.rs   # XDG config file, profile management
 ```
 
-The agent loops up to 10 iterations: call LLM → if tool calls present, execute them and feed results back → repeat until done.
+The agent loop runs up to 10 iterations per turn: push user message → call LLM → execute any tool calls → feed results back → repeat until no more tool calls → return final response.
 
-## Adding Tools
+Context is managed via a sliding window of the last 5 turns. Earlier turns are persisted to SQLite and retrievable via `recall_history` and `search_history` tools that the model can call itself.
 
-1. Add the OpenAI function schema to `tool_definitions()` in `src/tools.rs`
+## Adding a Tool
+
+1. Add the OpenAI function schema to the `json!([...])` array in `tool_definitions()` (`crates/themion-core/src/tools.rs`)
 2. Add a match arm in `call_tool()` in the same file
-3. That's it — the agent loop picks it up automatically
+3. Nothing else — the agent loop passes `tool_definitions()` to the LLM on every request automatically
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE)
