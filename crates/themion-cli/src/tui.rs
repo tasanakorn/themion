@@ -92,13 +92,13 @@ impl<'a> App<'a> {
             Entry::Banner(art.to_string()),
             Entry::Blank,
             Entry::Assistant(format!(
-                "v{}  |  {}  |  {}",
+                "version: {}  |  profile: {}  |  model: {}",
                 env!("CARGO_PKG_VERSION"),
                 session.active_profile,
                 session.model,
             )),
-            Entry::Assistant(format!("dir  |  {}", project_display)),
-            Entry::Assistant("/config to configure  |  /exit to quit".to_string()),
+            Entry::Assistant(format!("project directory: {}", project_display)),
+            Entry::Assistant("type /config to change settings, /exit to quit".to_string()),
             Entry::Blank,
         ];
 
