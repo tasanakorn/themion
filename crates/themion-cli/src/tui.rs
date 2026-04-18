@@ -1,7 +1,11 @@
 use crate::config::{save_profiles, Config, ProfileConfig};
 use crate::{format_stats, Session};
 use crossterm::{
-    event::{self, Event, EventStream, KeyCode, KeyModifiers, MouseEventKind},
+    event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode,
+        KeyModifiers, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -10,24 +14,29 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Padding, Paragraph},
+    widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
     Frame, Terminal,
 };
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 use themion_core::agent::{Agent, AgentEvent, TurnStats};
 use themion_core::client::ChatClient;
 use themion_core::client_codex::{CodexClient, RateLimitSnapshot, RateLimitWindow};
 use themion_core::db::DbHandle;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
+use tui_textarea::CursorMove;
 use tui_textarea::TextArea;
+
+use crate::paste_burst::{CharDecision, FlushResult, PasteBurst};
 use uuid::Uuid;
 
 enum AppEvent {
     Key(event::KeyEvent),
     Mouse(event::MouseEvent),
+    Paste(String),
     Agent(AgentEvent),
     AgentReady(Box<Agent>, Uuid),
     Tick,
@@ -108,6 +117,7 @@ pub struct App<'a> {
     entries: Vec<Entry>,
     pending: Option<String>,
     input: TextArea<'a>,
+    paste_burst: PasteBurst,
     running: bool,
     agent_busy: bool,
     scroll_offset: usize,
@@ -124,6 +134,8 @@ pub struct App<'a> {
     busy_phase: Option<BusyPhase>,
     stream_chunks: u64,
     stream_chars: u64,
+    status_rate_limits: Option<RateLimitSnapshot>,
+    debug_key: Option<String>,
 }
 
 impl<'a> App<'a> {
@@ -169,6 +181,7 @@ impl<'a> App<'a> {
             entries: initial_entries,
             pending: None,
             input: make_input(),
+            paste_burst: PasteBurst::default(),
             running: true,
             agent_busy: false,
             scroll_offset: 0,
@@ -192,6 +205,8 @@ impl<'a> App<'a> {
             busy_phase: None,
             stream_chunks: 0,
             stream_chars: 0,
+            status_rate_limits: None,
+            debug_key: None,
         }
     }
 
@@ -568,7 +583,9 @@ impl<'a> App<'a> {
             return;
         }
 
-        self.history.push(text.clone());
+        if self.history.last() != Some(&text) {
+            self.history.push(text.clone());
+        }
         self.history_pos = None;
         self.history_draft = String::new();
         self.input = make_input();
@@ -635,24 +652,31 @@ async fn fetch_codex_status(session: &Session) -> anyhow::Result<RateLimitSnapsh
     client.get_rate_limits().await
 }
 
-fn format_limit_line(label: &str, window: Option<&RateLimitWindow>) -> String {
-    match window {
-        Some(window) => {
-            let left = (100.0 - window.used_percent).clamp(0.0, 100.0);
-            match window.resets_at {
-                Some(ts) => format!("{}: {:.0}% left (resets at unix {})", label, left, ts),
-                None => format!("{}: {:.0}% left", label, left),
-            }
-        }
-        None => format!("{}: unavailable", label),
-    }
+fn format_status_limit_segment(label: &str, window: Option<&RateLimitWindow>) -> Option<String> {
+    let window = window?;
+    let left = (100.0 - window.used_percent).clamp(0.0, 100.0);
+    Some(format!("{}:{:.0}%", label, left))
 }
 
-fn build_status_lines(snapshot: &RateLimitSnapshot) -> Vec<String> {
-    vec![
-        format_limit_line("five-hour-limit", snapshot.primary.as_ref()),
-        format_limit_line("weekly-limit", snapshot.secondary.as_ref()),
-    ]
+fn build_rate_limit_statusline(snapshot: Option<&RateLimitSnapshot>) -> String {
+    let Some(snapshot) = snapshot else {
+        return "--".to_string();
+    };
+
+    let mut parts = Vec::new();
+
+    if let Some(seg) = format_status_limit_segment("7d", snapshot.primary.as_ref()) {
+        parts.push(seg);
+    }
+    if let Some(seg) = format_status_limit_segment("1w", snapshot.secondary.as_ref()) {
+        parts.push(seg);
+    }
+
+    if parts.is_empty() {
+        "--".to_string()
+    } else {
+        parts.join(" | ")
+    }
 }
 
 fn build_agent(
@@ -708,6 +732,77 @@ fn set_input_text(input: &mut TextArea, text: &str) {
     }
 }
 
+fn set_input_text_and_cursor(input: &mut TextArea, text: &str, cursor_byte: usize) {
+    set_input_text(input, text);
+    let cursor_byte = clamp_to_char_boundary(text, cursor_byte);
+    let mut row = 0usize;
+    let mut col = 0usize;
+    let mut remaining = cursor_byte;
+    for line in text.split('\n') {
+        if remaining <= line.len() {
+            col = line[..remaining].chars().count();
+            break;
+        }
+        remaining = remaining.saturating_sub(line.len() + 1);
+        row += 1;
+    }
+    input.move_cursor(CursorMove::Jump(row as u16, col as u16));
+}
+
+fn input_text_and_cursor_byte(input: &TextArea) -> (String, usize) {
+    let lines = input.lines();
+    let text = lines.join("\n");
+    let (row, col) = input.cursor();
+    let mut byte_pos = 0usize;
+    for (idx, line) in lines.iter().enumerate() {
+        if idx == row {
+            let safe_col = col.min(line.chars().count());
+            byte_pos += line
+                .char_indices()
+                .nth(safe_col)
+                .map(|(i, _)| i)
+                .unwrap_or(line.len());
+            break;
+        }
+        byte_pos += line.len() + 1;
+    }
+    (text, byte_pos)
+}
+
+fn handle_paste(app: &mut App<'_>, pasted: String) {
+    insert_pasted_text(&mut app.input, &pasted);
+    app.paste_burst.clear_after_explicit_paste();
+}
+
+fn handle_non_ascii_char(app: &mut App<'_>, key: event::KeyEvent, _now: Instant) -> bool {
+    if let Some(pasted) = app.paste_burst.flush_before_modified_input() {
+        handle_paste(app, pasted);
+    }
+    app.input.input(key);
+    true
+}
+
+fn insert_pasted_text(input: &mut TextArea, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    input.insert_str(normalized);
+}
+
+fn clamp_to_char_boundary(text: &str, pos: usize) -> usize {
+    let mut p = pos.min(text.len());
+    if p < text.len() && !text.is_char_boundary(p) {
+        p = text
+            .char_indices()
+            .map(|(i, _)| i)
+            .take_while(|&i| i <= p)
+            .last()
+            .unwrap_or(0);
+    }
+    p
+}
+
 fn make_input<'a>() -> TextArea<'a> {
     let mut ta = TextArea::default();
     ta.set_block(
@@ -723,7 +818,7 @@ fn make_input<'a>() -> TextArea<'a> {
             .padding(Padding::left(2)),
     );
     ta.set_cursor_line_style(Style::default());
-    ta.set_placeholder_text("message…  (Enter send | Ctrl-C quit)");
+    ta.set_placeholder_text("message…  (Enter/Ctrl-S send | Shift-Enter/Ctrl-J newline | Ctrl-C quit)");
     ta
 }
 
@@ -809,13 +904,45 @@ fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Lin
 
 fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
+    let input_text = app.input.lines().join("\n");
+
+    let input_block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(Span::styled(
+            "▸ ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .padding(Padding::left(2));
+
+    let input_inner = input_block.inner(area);
+    let input_inner_width = input_inner.width.max(1);
+
+    let input_visual_lines = if input_text.is_empty() {
+        1
+    } else {
+        input_text
+            .split('\n')
+            .map(|line: &str| {
+                let len = line.chars().count() as u16;
+                let wrapped = (len.saturating_add(input_inner_width).saturating_sub(1))
+                    / input_inner_width;
+                wrapped.max(1)
+            })
+            .sum::<u16>()
+            .max(1)
+    };
+
+    let input_height = (input_visual_lines + 1).clamp(3, 8);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),
-            Constraint::Length(3),
-            Constraint::Length(1),
+            Constraint::Length(input_height),
+            Constraint::Length(2),
         ])
         .split(area);
 
@@ -824,14 +951,29 @@ fn draw(f: &mut Frame, app: &App) {
     let width = chunks[0].width;
 
     let conv_base = Paragraph::new(lines)
-        .wrap(ratatui::widgets::Wrap { trim: false })
+        .wrap(Wrap { trim: false })
         .block(Block::default());
     let total_visual = conv_base.line_count(width);
     let max_scroll = total_visual.saturating_sub(height);
     let scroll = max_scroll.saturating_sub(app.scroll_offset) as u16;
 
+    f.render_widget(Clear, chunks[0]);
     f.render_widget(conv_base.scroll((scroll, 0)), chunks[0]);
-    f.render_widget(&app.input, chunks[1]);
+
+    f.render_widget(Clear, chunks[1]);
+    let input_para = Paragraph::new(input_text.clone())
+        .wrap(Wrap { trim: false })
+        .block(input_block);
+    f.render_widget(input_para, chunks[1]);
+
+    let (cursor_row, cursor_col) = app.input.cursor();
+    let cursor_prefix_x = chunks[1].x + 2;
+    let cursor_prefix_y = chunks[1].y + 1;
+    let cursor_y = cursor_prefix_y.saturating_add(cursor_row as u16);
+    let cursor_x = cursor_prefix_x.saturating_add(cursor_col as u16);
+    if cursor_y < chunks[1].bottom() && cursor_x < chunks[1].right() {
+        f.set_cursor_position((cursor_x, cursor_y));
+    }
 
     let project_leaf = app
         .project_dir
@@ -854,19 +996,29 @@ fn draw(f: &mut Frame, app: &App) {
         .as_ref()
         .map(|p| p.status_bar(app.stream_chunks, app.stream_chars))
         .unwrap_or_else(|| "phase: idle".to_string());
-    let bar = format!(
-        "  {}  |  {}  |  {}  |  {}  |  in:{} out:{} cached:{}  |  ctx:{}",
+    let bar_top = format!(
+        "  {}  |  {}  |  {}  |  {}",
         project_leaf,
         app.session.active_profile,
         app.session.model,
         phase,
+    );
+    let mut bar_bottom = format!(
+        "  {}  |  in:{} out:{} cached:{}  |  ctx:{}",
+        build_rate_limit_statusline(app.status_rate_limits.as_ref()),
         fmt(app.session_tokens.tokens_in),
         fmt(app.session_tokens.tokens_out),
         fmt(app.session_tokens.tokens_cached),
         fmt(app.last_ctx_tokens),
     );
+    if let Some(d) = &app.debug_key {
+        bar_bottom.push_str("  |  ");
+        bar_bottom.push_str(d);
+    }
+    f.render_widget(Clear, chunks[2]);
     f.render_widget(
-        Paragraph::new(bar).style(Style::default().bg(Color::DarkGray).fg(Color::White)),
+        Paragraph::new(format!("{}\n{}", bar_top, bar_bottom))
+            .style(Style::default().bg(Color::DarkGray).fg(Color::White)),
         chunks[2],
     );
 }
@@ -877,8 +1029,17 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
     execute!(
         stdout,
         EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
+        crossterm::event::EnableMouseCapture,
+        EnableBracketedPaste
     )?;
+    let _ = execute!(
+        io::stdout(),
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+        )
+    );
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -888,6 +1049,8 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
         let _ = execute!(
             io::stdout(),
             crossterm::event::DisableMouseCapture,
+            DisableBracketedPaste,
+            PopKeyboardEnhancementFlags,
             LeaveAlternateScreen
         );
         original_hook(info);
@@ -929,6 +1092,9 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 Event::Mouse(m) => {
                     let _ = app_tx_input.send(AppEvent::Mouse(m));
                 }
+                Event::Paste(text) => {
+                    let _ = app_tx_input.send(AppEvent::Paste(text));
+                }
                 _ => {}
             }
         }
@@ -947,6 +1113,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
 
     let mut app = App::new(session, db, session_id, project_dir);
 
+
     while app.running {
         terminal.draw(|f| draw(f, &app))?;
         match app_rx.recv().await {
@@ -955,20 +1122,119 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 MouseEventKind::ScrollDown => app.scroll_down(),
                 _ => {}
             },
-            Some(AppEvent::Key(key)) => match (key.code, key.modifiers) {
-                (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.running = false,
-                (KeyCode::Enter, KeyModifiers::NONE) => {
-                    let tx = app_tx.clone();
-                    app.submit_input(&tx);
+            Some(AppEvent::Paste(text)) => {
+                handle_paste(&mut app, text);
+            }
+            Some(AppEvent::Key(key)) => {
+                app.debug_key = Some(format!(
+                    "key={:?} mods={:?} kind={:?} state={:?}",
+                    key.code, key.modifiers, key.kind, key.state
+                ));
+                if key.kind != event::KeyEventKind::Press {
+                    continue;
                 }
-                (KeyCode::PageUp, _) | (KeyCode::Up, KeyModifiers::ALT) => app.scroll_up(),
-                (KeyCode::PageDown, _) | (KeyCode::Down, KeyModifiers::ALT) => app.scroll_down(),
-                (KeyCode::Up, KeyModifiers::NONE) => app.history_up(),
-                (KeyCode::Down, KeyModifiers::NONE) => app.history_down(),
-                _ => {
-                    app.input.input(key);
+
+                let now = Instant::now();
+                match app.paste_burst.flush_if_due(now) {
+                    FlushResult::Paste(text) => handle_paste(&mut app, text),
+                    FlushResult::Typed(ch) => app.input.insert_char(ch),
+                    FlushResult::None => {}
                 }
-            },
+
+                if matches!(key.code, KeyCode::Enter)
+                    && app.paste_burst.is_active()
+                    && app.paste_burst.append_newline_if_active(now)
+                {
+                    continue;
+                }
+
+                if let KeyCode::Char(ch) = key.code {
+                    let has_ctrl_or_alt = key.modifiers.contains(KeyModifiers::CONTROL)
+                        || key.modifiers.contains(KeyModifiers::ALT);
+                    if !has_ctrl_or_alt {
+                        if !ch.is_ascii() {
+                            let _ = handle_non_ascii_char(&mut app, key, now);
+                            continue;
+                        }
+
+                        if let Some(decision) = app.paste_burst.on_plain_char_no_hold(now) {
+                            match decision {
+                                CharDecision::BufferAppend => {
+                                    app.paste_burst.append_char_to_buffer(ch, now);
+                                    continue;
+                                }
+                                CharDecision::BeginBuffer { retro_chars } => {
+                                    let (text, byte_pos) = input_text_and_cursor_byte(&app.input);
+                                    let safe_cursor = clamp_to_char_boundary(&text, byte_pos);
+                                    let before = &text[..safe_cursor];
+                                    if let Some(grab) = app
+                                        .paste_burst
+                                        .decide_begin_buffer(now, before, retro_chars as usize)
+                                    {
+                                        let kept = format!("{}{}", &text[..grab.start_byte], &text[safe_cursor..]);
+                                        set_input_text_and_cursor(&mut app.input, &kept, grab.start_byte);
+                                        app.paste_burst.append_char_to_buffer(ch, now);
+                                        continue;
+                                    }
+                                }
+                                CharDecision::RetainFirstChar | CharDecision::BeginBufferFromPending => {}
+                            }
+                        }
+                    }
+
+                    if let Some(pasted) = app.paste_burst.flush_before_modified_input() {
+                        handle_paste(&mut app, pasted);
+                    }
+                }
+
+                if !matches!(key.code, KeyCode::Char(_) | KeyCode::Enter) {
+                    if let Some(pasted) = app.paste_burst.flush_before_modified_input() {
+                        handle_paste(&mut app, pasted);
+                    }
+                }
+
+                match (key.code, key.modifiers) {
+                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.running = false,
+                    (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
+                        let tx = app_tx.clone();
+                        app.submit_input(&tx);
+                    }
+                    (KeyCode::Enter, KeyModifiers::NONE) => {
+                        if app.paste_burst.newline_should_insert_instead_of_submit(now) {
+                            app.input.insert_newline();
+                            app.paste_burst.extend_window(now);
+                        } else {
+                            let tx = app_tx.clone();
+                            app.submit_input(&tx);
+                        }
+                    }
+                    (KeyCode::Enter, KeyModifiers::SHIFT)
+                    | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+                        if let Some(pasted) = app.paste_burst.flush_before_modified_input() {
+                            handle_paste(&mut app, pasted);
+                        }
+                        app.input.insert_newline();
+                    }
+                    (KeyCode::PageUp, _) | (KeyCode::Up, KeyModifiers::ALT) => app.scroll_up(),
+                    (KeyCode::PageDown, _) | (KeyCode::Down, KeyModifiers::ALT) => app.scroll_down(),
+                    (KeyCode::Up, KeyModifiers::NONE) => app.history_up(),
+                    (KeyCode::Down, KeyModifiers::NONE) => app.history_down(),
+                    _ => {
+                        app.input.input(key);
+                        match key.code {
+                            KeyCode::Char(_) => {
+                                let has_ctrl_or_alt = key.modifiers.contains(KeyModifiers::CONTROL)
+                                    || key.modifiers.contains(KeyModifiers::ALT);
+                                if has_ctrl_or_alt {
+                                    app.paste_burst.clear_window_after_non_char();
+                                }
+                            }
+                            KeyCode::Enter => {}
+                            _ => app.paste_burst.clear_window_after_non_char(),
+                        }
+                    }
+                }
+            }
             Some(AppEvent::Tick) => app.on_tick(),
             Some(AppEvent::Agent(ev)) => app.handle_agent_event(ev),
             Some(AppEvent::AgentReady(agent, sid)) => {
@@ -1032,15 +1298,23 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                             "logged in as {} — switched to codex profile (gpt-5.4)",
                             auth.account_id
                         )));
+                        app.agent_busy = true;
+                        app.set_busy_phase(BusyPhase::FetchingStatus);
+                        let tx = app_tx.clone();
+                        let session = app.session.clone();
+                        tokio::spawn(async move {
+                            let result = fetch_codex_status(&session).await;
+                            let _ = tx.send(AppEvent::StatusResult(result));
+                        });
                     }
                     Err(e) => {
                         app.push(Entry::Assistant(format!(
                             "login succeeded but agent build failed: {}",
                             e
                         )));
+                        app.agent_busy = false;
                     }
                 }
-                app.agent_busy = false;
             }
             Some(AppEvent::LoginComplete(Err(e))) => {
                 app.clear_busy_phase();
@@ -1049,10 +1323,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
             }
             Some(AppEvent::StatusResult(Ok(snapshot))) => {
                 app.clear_busy_phase();
-                for line in build_status_lines(&snapshot) {
-                    app.push(Entry::Assistant(line));
-                }
-                app.push(Entry::Blank);
+                app.status_rate_limits = Some(snapshot);
                 app.agent_busy = false;
             }
             Some(AppEvent::StatusResult(Err(e))) => {
@@ -1069,6 +1340,8 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
     execute!(
         terminal.backend_mut(),
         crossterm::event::DisableMouseCapture,
+        DisableBracketedPaste,
+        PopKeyboardEnhancementFlags,
         LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;
