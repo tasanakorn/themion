@@ -64,11 +64,30 @@ async fn main() -> anyhow::Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if !args.is_empty() {
-        let prompt = args.join(" ");
+    // Parse --dir <path> flag
+    let (project_dir_override, remaining_args) = {
+        let mut dir: Option<std::path::PathBuf> = None;
+        let mut rest = Vec::new();
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--dir" {
+                i += 1;
+                if i < args.len() {
+                    dir = Some(std::path::PathBuf::from(&args[i]));
+                }
+            } else {
+                rest.push(args[i].clone());
+            }
+            i += 1;
+        }
+        (dir, rest)
+    };
 
-        let project_dir = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+    if !remaining_args.is_empty() {
+        let prompt = remaining_args.join(" ");
+
+        let project_dir = project_dir_override
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
             .canonicalize()
             .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
 
@@ -93,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
         println!("{result}");
         eprintln!("{}", format_stats(&stats));
     } else {
-        tui::run(cfg).await?;
+        tui::run(cfg, project_dir_override).await?;
     }
 
     Ok(())

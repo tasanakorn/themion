@@ -510,7 +510,7 @@ fn draw(f: &mut Frame, app: &App) {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-pub async fn run(cfg: Config) -> anyhow::Result<()> {
+pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;
@@ -526,8 +526,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     }));
 
     // Resolve project_dir
-    let project_dir = std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
+    let project_dir = dir_override
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
         .canonicalize()
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 

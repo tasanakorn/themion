@@ -121,17 +121,20 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
     match name {
         "read_file" => {
             let path = args["path"].as_str().ok_or_else(|| anyhow::anyhow!("missing path"))?;
+            let path = ctx.project_dir.join(path);
             let content = fs::read_to_string(path)?;
             Ok(content)
         }
         "write_file" => {
             let path = args["path"].as_str().ok_or_else(|| anyhow::anyhow!("missing path"))?;
+            let path = ctx.project_dir.join(path);
             let content = args["content"].as_str().ok_or_else(|| anyhow::anyhow!("missing content"))?;
             fs::write(path, content)?;
-            Ok(format!("Written to {path}"))
+            Ok(format!("Written"))
         }
         "list_directory" => {
             let path = args["path"].as_str().ok_or_else(|| anyhow::anyhow!("missing path"))?;
+            let path = ctx.project_dir.join(path);
             let entries: Vec<String> = fs::read_dir(path)?
                 .filter_map(|e| e.ok())
                 .map(|e| e.file_name().to_string_lossy().to_string())
@@ -144,6 +147,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             let output = tokio::process::Command::new("sh")
                 .arg("-c")
                 .arg(command)
+                .current_dir(&ctx.project_dir)
                 .output()
                 .await?;
             let stdout = String::from_utf8_lossy(&output.stdout);
