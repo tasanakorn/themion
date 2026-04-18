@@ -40,20 +40,46 @@ export OPENROUTER_API_KEY=sk-or-...
 
 ## Configuration
 
-| Variable             | Required | Default                  |
-| -------------------- | -------- | ------------------------ |
-| `OPENROUTER_API_KEY` | yes      | —                        |
-| `OPENROUTER_MODEL`   | no       | `minimax/minimax-m2.7`   |
-| `SYSTEM_PROMPT`      | no       | generic assistant prompt |
+No environment variables are required. All settings are managed with `/config` inside the TUI and saved to `~/.config/themion/config.toml`.
 
-You can also manage profiles interactively inside the TUI:
+### OpenRouter (default)
 
 ```
-/config profile list
-/config profile create work
+/config profile set api_key=sk-or-v1-...
 /config profile set model=anthropic/claude-3.5-sonnet
-/config profile use work
 ```
+
+Get a free API key at [openrouter.ai](https://openrouter.ai). Gives access to Claude, GPT-4o, Gemini, Mistral, and hundreds of other models.
+
+### Local (llama.cpp / Ollama / LM Studio)
+
+```
+/config profile create local
+/config profile set provider=llamacpp
+/config profile set endpoint=http://localhost:8080/v1
+/config profile use local
+```
+
+No API key needed — just point `endpoint` at any running OpenAI-compatible server.
+
+### Profile management
+
+```
+/config profile list              # show all profiles
+/config profile create <name>     # create from current settings
+/config profile use <name>        # switch profiles
+/config profile set key=value     # update a setting
+/config                           # show active settings
+```
+
+### Environment variables (optional overrides)
+
+| Variable              | Overrides          | Default                        |
+| --------------------- | ------------------ | ------------------------------ |
+| `OPENROUTER_API_KEY`  | profile `api_key`  | —                              |
+| `OPENROUTER_MODEL`    | profile `model`    | `minimax/minimax-m2.7`         |
+| `LLAMACPP_BASE_URL`   | profile `base_url` | `http://localhost:8080/v1`     |
+| `SYSTEM_PROMPT`       | system prompt      | generic assistant             |
 
 ## TUI Key Bindings
 

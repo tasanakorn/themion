@@ -169,17 +169,35 @@ On each submit, the interactive agent is moved out of its handle into a spawned 
 
 Configuration is resolved in priority order: **env var > config file > built-in default**.
 
-Config file path: `$XDG_CONFIG_HOME/themion/config.toml` (default `~/.config/themion/config.toml`). A commented template is written on first run.
-
-| Field           | Env var               | Default                             |
-| --------------- | --------------------- | ----------------------------------- |
-| `api_key`       | `OPENROUTER_API_KEY`  | — (required for openrouter)         |
-| `model`         | `OPENROUTER_MODEL`    | `minimax/minimax-m2.7`              |
-| `base_url`      | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1`      |
-| `system_prompt` | `SYSTEM_PROMPT`       | `"You are a helpful AI assistant…"` |
-| `provider`      | `THEMION_PROVIDER`    | `openrouter`                        |
+No environment variables are required. All settings can be managed with `/config` inside the TUI and are saved to `$XDG_CONFIG_HOME/themion/config.toml` (default `~/.config/themion/config.toml`). A commented template is written on first run. Environment variables are supported as a convenience override.
 
 Multiple named profiles are stored under `[profile.<name>]` in the config file and switchable at runtime via `/config profile use <name>`.
+
+### Provider: openrouter (default)
+
+Requires an API key from [openrouter.ai](https://openrouter.ai). Supports any model on the OpenRouter catalogue.
+
+| Field      | Env var               | Default                        |
+| ---------- | --------------------- | ------------------------------ |
+| `api_key`  | `OPENROUTER_API_KEY`  | —                              |
+| `model`    | `OPENROUTER_MODEL`    | `minimax/minimax-m2.7`         |
+| `base_url` | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` |
+
+### Provider: llamacpp (local)
+
+No API key needed. Compatible with any OpenAI-format local server (llama.cpp, Ollama, LM Studio).
+
+| Field      | Env var             | Default                    |
+| ---------- | ------------------- | -------------------------- |
+| `base_url` | `LLAMACPP_BASE_URL` | `http://localhost:8080/v1` |
+| `model`    | `LLAMACPP_MODEL`    | `local`                    |
+
+### Global
+
+| Field          | Env var           | Default                             |
+| -------------- | ----------------- | ----------------------------------- |
+| `system_prompt`| `SYSTEM_PROMPT`   | `"You are a helpful AI assistant…"` |
+| active profile | `THEMION_PROFILE` | `default`                           |
 
 ## Build Profiles
 

@@ -12,13 +12,41 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Never invoke `rustc` directly.** Always use `cargo build` to verify compilation. Direct `rustc` invocations drop stray `.rlib` artifacts in the working directory.
 
-## Environment Variables
+## Configuration
 
-| Var                  | Required | Default                  |
-| -------------------- | -------- | ------------------------ |
-| `OPENROUTER_API_KEY` | yes      | —                        |
-| `OPENROUTER_MODEL`   | no       | `minimax/minimax-m2.7`   |
-| `SYSTEM_PROMPT`      | no       | generic assistant prompt |
+All settings can be managed through the `/config` TUI commands — no environment variables are required. Config is persisted to `~/.config/themion/config.toml`. Environment variables are supported as a convenience override.
+
+### Provider: openrouter (default)
+
+```
+/config profile set api_key=sk-or-v1-...
+/config profile set model=anthropic/claude-3.5-sonnet
+```
+
+Requires an API key from [openrouter.ai](https://openrouter.ai). Supports any model on the OpenRouter catalogue.
+
+### Provider: llamacpp (local)
+
+```
+/config profile create local
+/config profile set provider=llamacpp
+/config profile set endpoint=http://localhost:8080/v1
+/config profile use local
+```
+
+No API key needed. Point `endpoint` at any OpenAI-compatible local server (llama.cpp, Ollama, LM Studio).
+
+### Environment Variables (optional overrides)
+
+| Var                   | Overrides          | Default                        |
+| --------------------- | ------------------ | ------------------------------ |
+| `OPENROUTER_API_KEY`  | profile `api_key`  | —                              |
+| `OPENROUTER_MODEL`    | profile `model`    | `minimax/minimax-m2.7`         |
+| `OPENROUTER_BASE_URL` | profile `base_url` | `https://openrouter.ai/api/v1` |
+| `LLAMACPP_BASE_URL`   | profile `base_url` | `http://localhost:8080/v1`     |
+| `LLAMACPP_MODEL`      | profile `model`    | `local`                        |
+| `SYSTEM_PROMPT`       | system prompt      | generic assistant prompt       |
+| `THEMION_PROFILE`     | active profile     | `default`                      |
 
 ## Architecture
 
