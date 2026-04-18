@@ -1,147 +1,181 @@
 # Architecture
 
-Themion is a minimal AI agent core: a Rust binary that connects an LLM (via OpenRouter) to a set of local tools in a loop, consuming user input from stdin and producing text output.
+Themion is a Rust AI agent with a Ratatui TUI, streaming token output, persistent SQLite history, and a tool-calling loop compatible with any OpenAI-format API.
 
 ## Design Philosophy
 
-- **No framework dependencies** — the agent loop, HTTP client, and tools are all hand-rolled. The entire agent core fits in four source files.
-- **Stateless tools, stateful conversation** — tools are pure functions; the `Agent` struct owns the only mutable state (conversation history).
-- **OpenAI tool-calling protocol** — tools are described as JSON function schemas and called by the LLM using the standard `tool_calls` response field, making the agent compatible with any OpenAI-compatible model.
+- **No framework dependencies** — the agent loop, HTTP client, tool dispatch, and TUI are all hand-rolled.
+- **Stateful conversation, context-windowed** — `Agent` owns the full in-memory history but sends only the last N turns to the API. Older turns persist in SQLite and are reachable via tools.
+- **OpenAI tool-calling protocol** — tools are described as JSON function schemas; the LLM calls them by name using the standard `tool_calls` response field.
+- **Event-driven TUI** — `Agent` emits `AgentEvent` variants over an `mpsc` channel; the TUI renders each event as it arrives, giving streaming token display without blocking the input loop.
 
 ## Component Map
 
 ```
 main.rs
-  └─ reads env vars, selects mode
-       ├─ print mode  ──► Agent::run_loop(prompt) → print → exit
-       └─ REPL mode   ──► loop { Agent::run_loop(line) → print }
+  └─ loads Config, resolves project_dir, opens DbHandle
+       ├─ print mode  ──► Agent::new_with_db → run_loop(prompt) → print → exit
+       └─ TUI mode    ──► tui::run(cfg)
 
-Agent (agent.rs)
-  ├─ owns: Vec<Message> (conversation history)
-  ├─ calls: OpenRouterClient::chat_completion()
-  └─ calls: tools::call_tool() for each tool_call in response
+tui::run  (tui.rs)
+  ├─ opens DbHandle at $XDG_DATA_HOME/themion/history.db
+  ├─ generates session_id (UUID v4), inserts agent_sessions row
+  ├─ builds App { agents: Vec<AgentHandle>, db, project_dir, session_tokens, … }
+  └─ event loop: keyboard / mouse / AgentEvent / AgentReady
 
-OpenRouterClient (client.rs)
-  └─ POST https://openrouter.ai/api/v1/chat/completions
+Agent  (agent.rs)
+  ├─ owns: Vec<Message> (full in-memory history)
+  ├─ owns: Arc<DbHandle>, session_id, project_dir, turn_boundaries
+  ├─ calls: ChatClient::chat_completion_stream() — SSE streaming
+  ├─ calls: tools::call_tool(name, args, &ToolCtx)
+  └─ emits: AgentEvent over mpsc channel
+
+ChatClient  (client.rs)
+  ├─ POST /chat/completions with stream=true
+  ├─ parses SSE line-by-line (byte-safe UTF-8 splitting)
+  └─ assembles ResponseMessage + Usage from stream chunks
 
 tools.rs
   ├─ tool_definitions() → JSON schema array (sent every request)
-  └─ call_tool(name, args_json) → String
-       ├─ read_file
-       ├─ write_file
-       ├─ list_directory
-       └─ bash
+  ├─ call_tool(name, args, ctx: &ToolCtx) → String
+  │    ├─ read_file, write_file, list_directory, bash  (ignore ctx)
+  │    ├─ recall_history  ──► ctx.db.recall(RecallArgs)
+  │    └─ search_history  ──► ctx.db.search(SearchArgs)
+  └─ ToolCtx { db: Arc<DbHandle>, session_id, project_dir }
+
+DbHandle  (db.rs)
+  ├─ Arc<Mutex<rusqlite::Connection>>  (WAL mode, busy_timeout 5s)
+  ├─ schema: agent_sessions, agent_turns, agent_messages + FTS5 vtable
+  └─ insert_session / begin_turn / append_message / finalize_turn / recall / search
 ```
 
 ## Agent Loop (agent.rs)
 
 Each call to `run_loop(user_input)`:
 
-1. Push `role: "user"` message to history.
-2. Prepend system prompt (not stored in history) and call `chat_completion`.
-3. Push `role: "assistant"` response to history.
-4. If response has no `tool_calls` → break, return `content`.
-5. For each tool call: execute, push `role: "tool"` result with matching `tool_call_id`.
-6. Repeat from step 2, up to 10 iterations.
+1. Record turn boundary (`turn_boundaries.push(messages.len())`); open a DB turn row via `begin_turn`.
+2. Push `role="user"` message to history; persist to `agent_messages`.
+3. Build windowed context (see §Context Windowing) and call `chat_completion_stream`.
+4. Stream tokens to TUI via `AgentEvent::AssistantChunk`; accumulate full response.
+5. Push `role="assistant"` response to history; persist to `agent_messages`.
+6. If response has no `tool_calls` → break.
+7. For each tool call: emit `ToolStart`, execute via `call_tool`, push `role="tool"` result; persist each.
+8. Repeat from step 3, up to 10 iterations.
+9. Finalize the DB turn row with token stats; emit `TurnDone`.
 
-The loop stops when the LLM returns a plain text response with no tool calls, or after 10 iterations (whichever comes first).
+## Context Windowing
 
-REPL mode keeps the `Agent` alive across turns, so conversation history accumulates. Print mode creates a fresh `Agent` per invocation.
-
-## Message Flow (client.rs)
-
-Every `chat_completion` call sends the full conversation as:
+`Agent.window_turns` (default 5) controls how much history is sent to the API. On each LLM round:
 
 ```
-[system_prompt, ...history]
+[system_prompt]
+[recall hint — only when turn_boundaries.len() > window_turns]
+[messages from turn (current − window_turns) … now]
 ```
 
-The system prompt is injected fresh each call. Optional fields (`tool_calls`, `tool_call_id`, `content`) are skipped in serialization when `None` via `#[serde(skip_serializing_if = "Option::is_none")]`.
+The recall hint is a synthetic `role="system"` message:
 
-Response is deserialized into `ResponseMessage { role, content, tool_calls }`. API errors (non-2xx) surface the raw response body in the error.
+> "Note: N earlier turn(s) (seq 1–N) are stored in history. Use recall_history to load a range or search_history to find a keyword."
+
+The full `messages` Vec is never trimmed — the in-memory copy is always complete. Windowing only affects what is sent over the wire.
+
+## Streaming (client.rs)
+
+`chat_completion_stream` sends `"stream": true` and reads the response body chunk-by-chunk via `Response::chunk()`. SSE lines are split on the `0x0A` byte (safe for UTF-8 multi-byte sequences) and decoded per line. Each `data:` line is parsed as a `StreamChunkData`; `delta.content` fragments are forwarded to the `on_chunk` callback immediately. Tool call argument fragments are accumulated by `index` and assembled after `[DONE]`.
+
+`"stream_options": {"include_usage": true}` is sent so the last chunk carries token counts.
 
 ## Tools (tools.rs)
 
-All four tools are synchronous filesystem/shell operations wrapped in async for compatibility with the tokio runtime:
+All tools receive a `&ToolCtx` carrying the DB handle and session identity. Filesystem tools ignore it; history tools use it.
 
-| Tool             | Underlying call                     | Returns           |
-| ---------------- | ----------------------------------- | ----------------- |
-| `read_file`      | `fs::read_to_string`                | file contents     |
-| `write_file`     | `fs::write`                         | confirmation line |
-| `list_directory` | `fs::read_dir`                      | newline-joined names |
-| `bash`           | `tokio::process::Command` via `sh -c` | stdout + stderr |
+| Tool             | Underlying call                       | Returns                          |
+| ---------------- | ------------------------------------- | -------------------------------- |
+| `read_file`      | `fs::read_to_string`                  | file contents                    |
+| `write_file`     | `fs::write`                           | confirmation line                |
+| `list_directory` | `fs::read_dir`                        | newline-joined names             |
+| `bash`           | `tokio::process::Command` via `sh -c` | stdout + stderr                  |
+| `recall_history` | `DbHandle::recall`                    | JSON array of past messages      |
+| `search_history` | `DbHandle::search` (FTS5)             | JSON array of snippets + turn_seq |
 
-Tool errors are caught in `call_tool` and returned as `"Error: <message>"` strings — the model sees the error as a tool result and can react rather than crashing the agent loop.
+Tool errors are caught in `call_tool` and returned as `"Error: <message>"` strings — the model sees the error as a tool result and can react.
 
-## Data Flow Diagram
+## Persistent History (db.rs)
+
+Database path: `$XDG_DATA_HOME/themion/history.db` (default `~/.local/share/themion/history.db`). Created on first run; WAL mode enabled on every open for safe multi-process access.
+
+Schema:
+
+| Table                | Key columns                                           |
+| -------------------- | ----------------------------------------------------- |
+| `agent_sessions`     | `session_id` (UUID), `project_dir`, `is_interactive`  |
+| `agent_turns`        | `turn_id`, `session_id`, `turn_seq`, token stats      |
+| `agent_messages`     | `message_id`, `turn_id`, `role`, `content`, `tool_calls_json` |
+| `agent_messages_fts` | FTS5 virtual table over `agent_messages.content`      |
+
+Every process start generates a new `session_id`. Multiple concurrent processes share the same file; each writes to its own session rows. The `AUTOINCREMENT` primary key on `agent_turns` and `agent_messages` ensures no collision.
+
+## TUI (tui.rs)
+
+The TUI uses Ratatui + Crossterm and runs in the alternate screen buffer.
+
+Layout (top to bottom, `Constraint::Length`):
 
 ```
-User input
-    │
-    ▼
-Agent::run_loop
-    │
-    ├──► OpenRouterClient::chat_completion ──► OpenRouter API
-    │         │
-    │    ResponseMessage
-    │         │
-    │    tool_calls?
-    │    ├── no  ──► return content string
-    │    └── yes ──►  tools::call_tool(name, args)
-    │                      │
-    │               tool result string
-    │                      │
-    └──────────────── push as role="tool" ──► repeat
+┌─ status bar (1 row) ──────────────────────────────────────────────┐
+│  <project_leaf>  ·  <profile>  ·  <model>  ·  in/out/cached  ·  ctx:~Ntok
+├─ conversation pane (Min 1) ───────────────────────────────────────┤
+│  word-wrapped entries; bottom-pinned via ratatui line_count()     │
+├─ input box (3 rows) ──────────────────────────────────────────────┤
+│  ▸ ────────────────────────────────────────────────────────────── │
+│    <typed text>                                                    │
+└───────────────────────────────────────────────────────────────────┘
 ```
+
+Key bindings:
+
+| Key             | Action                              |
+| --------------- | ----------------------------------- |
+| `Enter`         | Submit message                      |
+| `↑` / `↓`       | Navigate input history              |
+| `Alt+↑` / `Alt+↓` | Scroll conversation pane          |
+| `PageUp` / `PageDown` | Scroll conversation pane      |
+| Mouse scroll    | Scroll conversation pane            |
+| `Ctrl+C`        | Quit                                |
+
+## Multi-Agent Shape
+
+`App` holds `agents: Vec<AgentHandle>` where each handle owns an `Option<Agent>` (None while a task is running), a `session_id`, and an `is_interactive` flag. Exactly one handle is interactive today; the Vec shape is forward-compatible for background agents without another struct refactor.
+
+On each submit, the interactive agent is moved out of its handle into a spawned task. When `run_loop` returns, the agent is sent back via `AppEvent::AgentReady(Box<Agent>, Uuid)` and restored to the handle.
 
 ## Configuration
 
 Configuration is resolved in priority order: **env var > config file > built-in default**.
 
-### Config file
+Config file path: `$XDG_CONFIG_HOME/themion/config.toml` (default `~/.config/themion/config.toml`). A commented template is written on first run.
 
-Path: `$XDG_CONFIG_HOME/themion/config.toml` (fallback: `~/.config/themion/config.toml`)
+| Field           | Env var               | Default                                   |
+| --------------- | --------------------- | ----------------------------------------- |
+| `api_key`       | `OPENROUTER_API_KEY`  | — (required for openrouter provider)      |
+| `model`         | `OPENROUTER_MODEL`    | `minimax/minimax-m2.7`                    |
+| `base_url`      | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1`            |
+| `system_prompt` | `SYSTEM_PROMPT`       | `"You are a helpful AI assistant…"`       |
+| `provider`      | `THEMION_PROVIDER`    | `openrouter`                              |
 
-On first run, if the file does not exist, a commented template is written automatically so the user can fill it in.
-
-Example config file:
-
-```toml
-# api_key = "sk-or-v1-..."
-# model = "minimax/minimax-m2.7"
-# system_prompt = "You are a helpful AI assistant with access to tools."
-```
-
-### Fields
-
-| Field           | Env var override     | Built-in default                                       |
-| --------------- | -------------------- | ------------------------------------------------------ |
-| `api_key`       | `OPENROUTER_API_KEY` | — (required; error if absent from both sources)        |
-| `model`         | `OPENROUTER_MODEL`   | `minimax/minimax-m2.7`                                 |
-| `system_prompt` | `SYSTEM_PROMPT`      | `"You are a helpful AI assistant with access to tools."` |
+For `provider=llamacpp`: `LLAMACPP_BASE_URL`, `LLAMACPP_MODEL` override the llamacpp defaults. Multiple named profiles are stored under `[profile.<name>]` in the config file and switchable at runtime via `/config profile use <name>`.
 
 ## Build Profiles
 
-| Profile   | Debug symbols | LTO   | opt-level | Strip  |
-| --------- | ------------- | ----- | --------- | ------ |
-| `dev`     | off           | off   | default   | no     |
-| `release` | off           | thin  | `z` (size)| yes    |
-
-Dev profile disables debug symbols to reduce artifact size during iteration. Release uses `opt-level = "z"` for minimum binary size rather than maximum speed.
+| Profile   | Debug symbols | LTO  | opt-level | Strip |
+| --------- | ------------- | ---- | --------- | ----- |
+| `dev`     | off           | off  | default   | no    |
+| `release` | off           | full | `z` (size)| yes   |
 
 ## Known Limitations
 
 - **No timeout on `bash`** — a hung subprocess blocks the agent indefinitely.
 - **No path sandboxing** — tools accept any absolute or relative path.
-- **No context truncation** — if conversation history grows beyond the model's context window, the API call will fail.
-- **Max 10 tool-call iterations** — hardcoded in `agent.rs`.
-
-## Persistent History
-
-Chat history is persisted to `$XDG_DATA_HOME/themion/history.db` (default `~/.local/share/themion/history.db`). On each process start, `App::new` in `themion-cli` canonicalizes the working directory as `project_dir`, opens (or creates) the database, and inserts a row into `agent_sessions`.
-
-The database has three tables — `agent_sessions`, `agent_turns`, `agent_messages` — plus an `agent_messages_fts` FTS5 virtual table for full-text search. WAL mode is enabled on open for safe concurrent access across processes.
-
-`Agent` in `themion-core` holds a `window_turns` limit (default 5). On each `run_loop` call, only messages from the last `window_turns` complete turns are included in the API request. When older turns are omitted, a synthetic `role="system"` hint is prepended telling the model to use `recall_history` or `search_history`.
-
-Two tools are registered globally: `recall_history` (retrieves messages by session/project/direction) and `search_history` (FTS5 keyword search returning snippets). Both receive the DB handle via `ToolCtx` threaded through `call_tool`.
+- **Max 10 tool-call iterations per turn** — hardcoded in `agent.rs`.
+- **No user-configurable `window_turns`** — default of 5 is hardcoded; requires a code change.
+- **Positional SQL params in `recall`/`search`** — extra bound params are silently ignored by SQLite when a filter is absent; fragile if the WHERE clause changes.
