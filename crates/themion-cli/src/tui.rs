@@ -48,6 +48,9 @@ pub struct App<'a> {
     running: bool,
     agent_busy: bool,
     scroll_offset: usize,       // lines from bottom (0 = pinned to bottom)
+    history: Vec<String>,       // submitted messages, oldest first
+    history_pos: Option<usize>, // None = not navigating; Some(i) = showing history[i]
+    history_draft: String,      // input saved before starting history navigation
 }
 
 impl<'a> App<'a> {
@@ -60,6 +63,41 @@ impl<'a> App<'a> {
             running: true,
             agent_busy: false,
             scroll_offset: 0,
+            history: Vec::new(),
+            history_pos: None,
+            history_draft: String::new(),
+        }
+    }
+
+    fn history_up(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let new_pos = match self.history_pos {
+            None => {
+                self.history_draft = self.input.lines().join("\n");
+                self.history.len() - 1
+            }
+            Some(0) => return,
+            Some(i) => i - 1,
+        };
+        self.history_pos = Some(new_pos);
+        set_input_text(&mut self.input, &self.history[new_pos].clone());
+    }
+
+    fn history_down(&mut self) {
+        match self.history_pos {
+            None => {}
+            Some(i) if i + 1 < self.history.len() => {
+                self.history_pos = Some(i + 1);
+                let text = self.history[i + 1].clone();
+                set_input_text(&mut self.input, &text);
+            }
+            Some(_) => {
+                self.history_pos = None;
+                let draft = self.history_draft.clone();
+                set_input_text(&mut self.input, &draft);
+            }
         }
     }
 
@@ -214,6 +252,9 @@ impl<'a> App<'a> {
             return;
         }
 
+        self.history.push(text.clone());
+        self.history_pos = None;
+        self.history_draft = String::new();
         self.input = make_input();
         self.scroll_offset = 0;
 
@@ -255,6 +296,13 @@ impl<'a> App<'a> {
         tokio::spawn(async move {
             let _ = agent.run_loop(&text).await;
         });
+    }
+}
+
+fn set_input_text(input: &mut TextArea, text: &str) {
+    *input = make_input();
+    if !text.is_empty() {
+        input.insert_str(text);
     }
 }
 
@@ -413,6 +461,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 }
                 (KeyCode::PageUp, _) | (KeyCode::Up, KeyModifiers::ALT) => app.scroll_up(),
                 (KeyCode::PageDown, _) | (KeyCode::Down, KeyModifiers::ALT) => app.scroll_down(),
+                (KeyCode::Up, KeyModifiers::NONE) => app.history_up(),
+                (KeyCode::Down, KeyModifiers::NONE) => app.history_down(),
                 _ => { app.input.input(key); }
             },
             Some(AppEvent::Agent(ev)) => app.handle_agent_event(ev),
