@@ -1,6 +1,6 @@
 # themion
 
-> A terminal AI agent that thinks, uses tools, and gets things done — built in Rust.
+> Just another AI agent. Started as a weekend experiment — works on purpose. Built in Rust, runs in your terminal.
 
 ```
 █████  █   █  █████  █   █  ███   ███   █   █
