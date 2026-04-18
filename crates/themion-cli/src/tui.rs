@@ -44,14 +44,15 @@ enum Entry {
 pub struct App<'a> {
     session: Session,
     entries: Vec<Entry>,
-    pending: Option<String>,    // current in-progress status shown below entries
+    pending: Option<String>,       // current in-progress status shown below entries
     input: TextArea<'a>,
     running: bool,
     agent_busy: bool,
-    scroll_offset: usize,       // lines from bottom (0 = pinned to bottom)
-    history: Vec<String>,       // submitted messages, oldest first
-    history_pos: Option<usize>, // None = not navigating; Some(i) = showing history[i]
-    history_draft: String,      // input saved before starting history navigation
+    scroll_offset: usize,          // lines from bottom (0 = pinned to bottom)
+    history: Vec<String>,          // submitted messages, oldest first
+    history_pos: Option<usize>,    // None = not navigating; Some(i) = showing history[i]
+    history_draft: String,         // input saved before starting history navigation
+    streaming_idx: Option<usize>,  // index into entries of the live assistant entry
 }
 
 impl<'a> App<'a> {
@@ -67,6 +68,7 @@ impl<'a> App<'a> {
             history: Vec::new(),
             history_pos: None,
             history_draft: String::new(),
+            streaming_idx: None,
         }
     }
 
@@ -110,8 +112,31 @@ impl<'a> App<'a> {
         match ev {
             AgentEvent::LlmStart => {
                 self.pending = Some("  ⋯ thinking…".to_string());
+                self.streaming_idx = None;
+            }
+            AgentEvent::AssistantChunk(chunk) => {
+                self.pending = None;
+                match self.streaming_idx {
+                    Some(i) => {
+                        if let Some(Entry::Assistant(ref mut text)) = self.entries.get_mut(i) {
+                            text.push_str(&chunk);
+                        }
+                    }
+                    None => {
+                        self.push(Entry::Assistant(chunk));
+                        self.streaming_idx = Some(self.entries.len() - 1);
+                    }
+                }
+            }
+            AgentEvent::AssistantText(text) => {
+                // Fallback for non-streaming path; ignored if streaming already populated the entry.
+                if self.streaming_idx.is_none() {
+                    self.pending = None;
+                    self.push(Entry::Assistant(text));
+                }
             }
             AgentEvent::ToolStart { detail } => {
+                self.streaming_idx = None;
                 self.pending = None;
                 self.push(Entry::ToolCall(detail));
             }
@@ -119,11 +144,8 @@ impl<'a> App<'a> {
                 self.push(Entry::ToolDone);
                 self.pending = Some("  ⋯ thinking…".to_string());
             }
-            AgentEvent::AssistantText(text) => {
-                self.pending = None;
-                self.push(Entry::Assistant(text));
-            }
             AgentEvent::TurnDone(stats) => {
+                self.streaming_idx = None;
                 self.pending = None;
                 self.push(Entry::Stats(format_stats(&stats)));
                 self.push(Entry::Blank);

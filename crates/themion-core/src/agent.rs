@@ -19,6 +19,7 @@ pub enum AgentEvent {
     LlmStart,
     ToolStart { detail: String },
     ToolEnd,
+    AssistantChunk(String),
     AssistantText(String),
     TurnDone(TurnStats),
 }
@@ -113,8 +114,18 @@ impl Agent {
             msgs_with_system.extend_from_slice(&self.messages);
 
             self.emit(AgentEvent::LlmStart);
+            let event_tx = self.event_tx.clone();
             let (response, usage) = self.client
-                .chat_completion(&self.model, &msgs_with_system, &tool_defs)
+                .chat_completion_stream(
+                    &self.model,
+                    &msgs_with_system,
+                    &tool_defs,
+                    move |chunk| {
+                        if let Some(ref tx) = event_tx {
+                            let _ = tx.send(AgentEvent::AssistantChunk(chunk));
+                        }
+                    },
+                )
                 .await?;
 
             llm_rounds += 1;
@@ -142,7 +153,6 @@ impl Agent {
 
             if let Some(ref content) = response.content {
                 final_response = content.clone();
-                self.emit(AgentEvent::AssistantText(content.clone()));
             }
 
             let tool_calls_vec = match response.tool_calls {
