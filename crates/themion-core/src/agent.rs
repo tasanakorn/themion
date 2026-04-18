@@ -1,3 +1,4 @@
+use crate::agents_md;
 use crate::client::{ChatBackend, Message};
 use crate::db::DbHandle;
 use crate::tools;
@@ -212,6 +213,16 @@ impl Agent {
                 tool_calls: None,
                 tool_call_id: None,
             }];
+
+            if let Some(agents_md_message) = agents_md::build_agents_md_message(&self.project_dir) {
+                msgs_with_system.push(Message {
+                    role: "user".to_string(),
+                    content: Some(agents_md_message),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+            }
+
             let window_start = if self.turn_boundaries.len() > self.window_turns {
                 let omitted = self.turn_boundaries.len() - self.window_turns;
                 msgs_with_system.push(Message {

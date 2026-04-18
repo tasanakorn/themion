@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod agents_md;
 pub mod auth;
 pub mod client;
 pub mod client_codex;
