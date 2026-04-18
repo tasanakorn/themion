@@ -12,7 +12,7 @@
 - Drive completions through the OpenAI Responses API at `https://chatgpt.com/backend-api/codex/responses` using the OAuth access token issued during login.
 - Persist `{ access, refresh, expires, account_id }` to `~/.config/themion/auth.json` so subsequent process launches reuse the session without re-authenticating.
 - Refresh the access token transparently before any request whose token has expired (or is about to), and rewrite `auth.json` with the fresh values.
-- Default the provider's model alias `codex-mini-latest` to the upstream model id `gpt-5.1-codex-mini`, while leaving the alias overridable in config.
+- Default the provider's model alias `gpt-5.4` to the upstream model id `gpt-5.4`, while leaving the alias overridable in config.
 
 ## 2. Non-goals
 
@@ -120,7 +120,7 @@ Splitting the type from the IO is the smallest change that makes the §4.4 callb
 Constants:
 
 - `CODEX_DEFAULT_BASE_URL = "https://chatgpt.com/backend-api/codex"`
-- `CODEX_DEFAULT_MODEL    = "codex-mini-latest"`
+- `CODEX_DEFAULT_MODEL    = "gpt-5.4"`
 
 The `api_key`-required guard at `config.rs:157–167` is widened to skip when `provider == "openai-codex"`. No `api_key` env var is honored for this provider — the credential lives entirely in `auth.json`.
 
@@ -129,11 +129,11 @@ The auto-generated `CONFIG_TEMPLATE` gains a commented example:
 ```toml
 # [profile.codex]
 # provider = "openai-codex"
-# # model defaults to "codex-mini-latest" → gpt-5.1-codex-mini
+# # model defaults to "gpt-5.4" → gpt-5.4
 # # log in once with: /login codex
 ```
 
-Model alias mapping (`codex-mini-latest` → `gpt-5.1-codex-mini`) lives inside `CodexClient::resolve_model_alias`, not in config — the alias is a property of the upstream API and would otherwise force every user to know the underlying SKU.
+Model alias mapping (`gpt-5.4` → `gpt-5.4`) lives inside `CodexClient::resolve_model_alias`, not in config — the alias is a property of the upstream API and would otherwise force every user to know the underlying SKU.
 
 ### 4.4 `CodexClient`
 
@@ -153,7 +153,7 @@ pub struct CodexClient {
 `impl ChatBackend for CodexClient::chat_completion_stream`:
 
 1. `ensure_fresh_token().await` — acquires read lock, checks `auth.is_expired(60)`, drops the read lock; on stale, takes write lock, re-checks (double-check), POSTs `application/x-www-form-urlencoded` body `grant_type=refresh_token&refresh_token=…&client_id=…` to `https://auth.openai.com/oauth/token`, replaces the inner state, calls `auth_writer` to persist.
-2. Resolve the model alias: `model_id = resolve_model_alias(model)` (single-arm match: `"codex-mini-latest" => "gpt-5.1-codex-mini"`, otherwise pass-through).
+2. Resolve the model alias: `model_id = resolve_model_alias(model)` (single-arm match: `"gpt-5.4" => "gpt-5.4"`, otherwise pass-through).
 3. Translate `&[Message]` → Responses-API `input` array (see §4.5).
 4. POST to `{base_url}/responses` with body `{"model": model_id, "instructions": system_prompt, "input": [...], "tools": [...], "stream": true}`. Required headers: `Authorization: Bearer {access}`, `chatgpt-account-id: {account_id}`, `originator: pi`, `OpenAI-Beta: responses=experimental`, `Content-Type: application/json`, `Accept: text/event-stream`.
 5. Parse SSE frames in the named-event format (see §4.6), assemble a `ResponseMessage` and `Option<Usage>` from the `response.completed` payload, return.
@@ -334,7 +334,7 @@ First-time Codex users follow this path:
 | Run `cargo build` after the trait refactor with no Codex profile configured                                         | OpenRouter and llamacpp profiles still build and run; one-turn REPL against OpenRouter returns an answer; no compile warnings about unused trait imports.                            |
 | In TUI with no `auth.json`, run `/login codex`                                                                      | Browser opens to `auth.openai.com/authorize?…`; loopback listener accepts the callback; entry shows "logged in as account …"; `~/.config/themion/auth.json` exists with mode `0600`. |
 | Re-run `/login codex` while a previous login is still in flight                                                     | Second invocation is rejected by the `agent_busy` guard with "wait for current operation"; only one browser tab opens.                                                               |
-| With a valid `auth.json`, set `[profile.codex] provider = "openai-codex"` and run `/config profile use codex`        | Status bar shows `codex` profile and `codex-mini-latest` model; one-turn chat completes and stats line shows non-zero `in:` / `out:` token counts.                                  |
+| With a valid `auth.json`, set `[profile.codex] provider = "openai-codex"` and run `/config profile use codex`        | Status bar shows `codex` profile and `gpt-5.4` model; one-turn chat completes and stats line shows non-zero `in:` / `out:` token counts.                                  |
 | Manually edit `auth.json` to set `expires_at` to one second in the past, then send a chat                            | Token refresh fires before the request; `auth.json` `access_token` and `expires_at` are rewritten on disk; chat completes normally.                                                  |
 | Manually corrupt `auth.json` (write `not json`), restart themion targeting the codex profile                        | Startup prints a clear error naming `auth.json` and the `/login codex` hint; process exits non-zero; no panic.                                                                      |
 | Delete `auth.json` entirely and run `cargo run -p themion-cli -- "hello"` (print mode) against the codex profile     | Print mode exits non-zero with a stderr line "no codex auth; run /login codex first"; nothing is written to stdout.                                                                  |
