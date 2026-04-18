@@ -135,3 +135,13 @@ Dev profile disables debug symbols to reduce artifact size during iteration. Rel
 - **No path sandboxing** — tools accept any absolute or relative path.
 - **No context truncation** — if conversation history grows beyond the model's context window, the API call will fail.
 - **Max 10 tool-call iterations** — hardcoded in `agent.rs`.
+
+## Persistent History
+
+Chat history is persisted to `$XDG_DATA_HOME/themion/history.db` (default `~/.local/share/themion/history.db`). On each process start, `App::new` in `themion-cli` canonicalizes the working directory as `project_dir`, opens (or creates) the database, and inserts a row into `agent_sessions`.
+
+The database has three tables — `agent_sessions`, `agent_turns`, `agent_messages` — plus an `agent_messages_fts` FTS5 virtual table for full-text search. WAL mode is enabled on open for safe concurrent access across processes.
+
+`Agent` in `themion-core` holds a `window_turns` limit (default 5). On each `run_loop` call, only messages from the last `window_turns` complete turns are included in the API request. When older turns are omitted, a synthetic `role="system"` hint is prepended telling the model to use `recall_history` or `search_history`.
+
+Two tools are registered globally: `recall_history` (retrieves messages by session/project/direction) and `search_history` (FTS5 keyword search returning snippets). Both receive the DB handle via `ToolCtx` threaded through `call_tool`.

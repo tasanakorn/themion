@@ -1,4 +1,6 @@
 use std::io;
+use std::path::PathBuf;
+use std::sync::Arc;
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers, EventStream, MouseEventKind},
     execute,
@@ -15,9 +17,11 @@ use ratatui::{
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tui_textarea::TextArea;
+use uuid::Uuid;
 use crate::config::{Config, ProfileConfig, save_profiles};
-use themion_core::agent::{Agent, AgentEvent};
+use themion_core::agent::{Agent, AgentEvent, TurnStats};
 use themion_core::client::ChatClient;
+use themion_core::db::DbHandle;
 use crate::{Session, format_stats};
 
 // ── App events ────────────────────────────────────────────────────────────────
@@ -26,7 +30,7 @@ enum AppEvent {
     Key(event::KeyEvent),
     Mouse(event::MouseEvent),
     Agent(AgentEvent),
-    AgentReady(Box<Agent>),
+    AgentReady(Box<Agent>, Uuid),
 }
 
 // ── Chat entries ──────────────────────────────────────────────────────────────
@@ -42,6 +46,12 @@ enum Entry {
 
 // ── App state ─────────────────────────────────────────────────────────────────
 
+pub struct AgentHandle {
+    pub agent: Option<Agent>,
+    pub session_id: Uuid,
+    pub is_interactive: bool,
+}
+
 pub struct App<'a> {
     session: Session,
     entries: Vec<Entry>,
@@ -54,12 +64,17 @@ pub struct App<'a> {
     history_pos: Option<usize>,    // None = not navigating; Some(i) = showing history[i]
     history_draft: String,         // input saved before starting history navigation
     streaming_idx: Option<usize>,  // index into entries of the live assistant entry
-    agent: Option<Agent>,          // None only while a task is running
+    agents: Vec<AgentHandle>,
+    db: Arc<DbHandle>,
+    project_dir: PathBuf,
+    session_tokens: TurnStats,     // cumulative across all turns
+    last_ctx_tokens: u64,          // tokens_in from last API call
 }
 
 impl<'a> App<'a> {
-    pub fn new(session: Session) -> Self {
-        let agent = build_agent(&session);
+    pub fn new(session: Session, db: Arc<DbHandle>, session_id: Uuid, project_dir: PathBuf) -> Self {
+        let agent = build_agent(&session, session_id, project_dir.clone(), db.clone());
+        let handle = AgentHandle { agent: Some(agent), session_id, is_interactive: true };
         Self {
             session,
             entries: Vec::new(),
@@ -72,8 +87,17 @@ impl<'a> App<'a> {
             history_pos: None,
             history_draft: String::new(),
             streaming_idx: None,
-            agent: Some(agent),
+            agents: vec![handle],
+            db,
+            project_dir,
+            session_tokens: TurnStats { llm_rounds: 0, tool_calls: 0, tokens_in: 0, tokens_out: 0, tokens_cached: 0, elapsed_ms: 0 },
+            last_ctx_tokens: 0,
         }
+    }
+
+    #[allow(dead_code)]
+    fn interactive_agent_mut(&mut self) -> Option<&mut AgentHandle> {
+        self.agents.iter_mut().find(|h| h.is_interactive)
     }
 
     fn history_up(&mut self) {
@@ -154,6 +178,13 @@ impl<'a> App<'a> {
                 self.push(Entry::Stats(format_stats(&stats)));
                 self.push(Entry::Blank);
                 self.agent_busy = false;
+                self.last_ctx_tokens = stats.tokens_in;
+                self.session_tokens.tokens_in += stats.tokens_in;
+                self.session_tokens.tokens_out += stats.tokens_out;
+                self.session_tokens.tokens_cached += stats.tokens_cached;
+                self.session_tokens.llm_rounds += stats.llm_rounds;
+                self.session_tokens.tool_calls += stats.tool_calls;
+                self.session_tokens.elapsed_ms += stats.elapsed_ms;
             }
         }
     }
@@ -217,7 +248,12 @@ impl<'a> App<'a> {
                         if let Err(e) = save_profiles(&self.session.active_profile, &self.session.profiles) {
                             out.push(format!("warning: {}", e));
                         }
-                        self.agent = Some(build_agent(&self.session));
+                        let new_session_id = Uuid::new_v4();
+                        let new_agent = build_agent(&self.session, new_session_id, self.project_dir.clone(), self.db.clone());
+                        let db = self.db.clone();
+                        let pdir = self.project_dir.clone();
+                        let _ = db.insert_session(new_session_id, &pdir, true);
+                        self.agents = vec![AgentHandle { agent: Some(new_agent), session_id: new_session_id, is_interactive: true }];
                         out.push(format!("switched to profile '{}'  provider={}  model={}", name, self.session.provider, self.session.model));
                     } else {
                         let mut names: Vec<String> = self.session.profiles.keys().cloned().collect();
@@ -314,28 +350,30 @@ impl<'a> App<'a> {
             }
         });
 
-        let mut agent = self.agent.take().expect("agent available when not busy");
+        let handle = self.agents.iter_mut().find(|h| h.is_interactive).expect("interactive agent");
+        let mut agent = handle.agent.take().expect("agent available when not busy");
+        let handle_session_id = handle.session_id;
         agent.set_event_tx(event_tx);
 
         let app_tx_done = app_tx.clone();
         tokio::spawn(async move {
             let _ = agent.run_loop(&text).await;
-            let _ = app_tx_done.send(AppEvent::AgentReady(Box::new(agent)));
+            let _ = app_tx_done.send(AppEvent::AgentReady(Box::new(agent), handle_session_id));
         });
     }
 }
 
-fn build_agent(session: &Session) -> Agent {
+fn build_agent(session: &Session, session_id: Uuid, project_dir: PathBuf, db: Arc<DbHandle>) -> Agent {
     let mut client = ChatClient::new(session.base_url.clone(), session.api_key.clone());
     if session.provider == "openrouter" {
         client = client.with_headers([
-            ("HTTP-Referer".into(),           "https://github.com/tasanakorn".into()),
-            ("X-Title".into(),                "themion".into()),
-            ("X-OpenRouter-Title".into(),     "themion".into()),
+            ("HTTP-Referer".into(),            "https://github.com/tasanakorn".into()),
+            ("X-Title".into(),                 "themion".into()),
+            ("X-OpenRouter-Title".into(),      "themion".into()),
             ("X-OpenRouter-Categories".into(), "developer-tools".into()),
         ]);
     }
-    Agent::new(client, session.model.clone(), session.system_prompt.clone())
+    Agent::new_with_db(client, session.model.clone(), session.system_prompt.clone(), session_id, project_dir, db)
 }
 
 fn set_input_text(input: &mut TextArea, text: &str) {
@@ -431,9 +469,19 @@ fn draw(f: &mut Frame, app: &App) {
         .split(area);
 
     // ── Top bar ──────────────────────────────────────────────────────────────
+    let project_leaf = app.project_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("?");
     let bar = format!(
-        "  themion  ·  {}  ·  {}  ·  {}",
-        app.session.active_profile, app.session.provider, app.session.model
+        "  {}  ·  {}  ·  {}  ·  in:{} out:{} cached:{}  ·  ctx:~{}tok",
+        project_leaf,
+        app.session.active_profile,
+        app.session.model,
+        app.session_tokens.tokens_in,
+        app.session_tokens.tokens_out,
+        app.session_tokens.tokens_cached,
+        app.last_ctx_tokens,
     );
     f.render_widget(
         Paragraph::new(bar).style(Style::default().bg(Color::DarkGray).fg(Color::White)),
@@ -477,6 +525,31 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         original_hook(info);
     }));
 
+    // Resolve project_dir
+    let project_dir = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .canonicalize()
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    // Open DB
+    let db = match dirs::data_dir() {
+        Some(d) => {
+            let db_path = d.join("themion").join("history.db");
+            DbHandle::open(&db_path).unwrap_or_else(|e| {
+                eprintln!("warning: history persistence disabled: {e}");
+                DbHandle::open_in_memory().expect("in-memory db")
+            })
+        }
+        None => {
+            eprintln!("warning: history persistence disabled (no data dir)");
+            DbHandle::open_in_memory().expect("in-memory db")
+        }
+    };
+
+    // Create session
+    let session_id = Uuid::new_v4();
+    let _ = db.insert_session(session_id, &project_dir, true);
+
     let session = Session::from_config(cfg);
     let (app_tx, mut app_rx) = mpsc::unbounded_channel::<AppEvent>();
 
@@ -492,7 +565,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         }
     });
 
-    let mut app = App::new(session);
+    let mut app = App::new(session, db, session_id, project_dir);
 
     while app.running {
         terminal.draw(|f| draw(f, &app))?;
@@ -515,7 +588,11 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 _ => { app.input.input(key); }
             },
             Some(AppEvent::Agent(ev)) => app.handle_agent_event(ev),
-            Some(AppEvent::AgentReady(agent)) => { app.agent = Some(*agent); }
+            Some(AppEvent::AgentReady(agent, sid)) => {
+                if let Some(h) = app.agents.iter_mut().find(|h| h.session_id == sid) {
+                    h.agent = Some(*agent);
+                }
+            }
             None => {}
         }
     }

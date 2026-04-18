@@ -1,8 +1,7 @@
 mod config;
 mod tui;
 use config::{Config, ProfileConfig};
-use themion_core::agent::{Agent, TurnStats};
-use themion_core::client::ChatClient;
+use themion_core::agent::TurnStats;
 use std::collections::HashMap;
 
 pub fn format_duration(ms: u128) -> String {
@@ -66,10 +65,30 @@ async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if !args.is_empty() {
-        // Print mode: send args as prompt, run agent loop, print result, exit
         let prompt = args.join(" ");
-        let client = ChatClient::new(cfg.base_url, cfg.api_key);
-        let mut agent = Agent::new(client, cfg.model, cfg.system_prompt);
+
+        let project_dir = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .canonicalize()
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+
+        let db = match dirs::data_dir() {
+            Some(d) => {
+                let db_path = d.join("themion").join("history.db");
+                themion_core::db::DbHandle::open(&db_path).unwrap_or_else(|_| {
+                    themion_core::db::DbHandle::open_in_memory().expect("in-memory db")
+                })
+            }
+            None => themion_core::db::DbHandle::open_in_memory().expect("in-memory db"),
+        };
+
+        let session_id = uuid::Uuid::new_v4();
+        let _ = db.insert_session(session_id, &project_dir, false);
+
+        let client = themion_core::client::ChatClient::new(cfg.base_url, cfg.api_key);
+        let mut agent = themion_core::agent::Agent::new_with_db(
+            client, cfg.model, cfg.system_prompt, session_id, project_dir, db,
+        );
         let (result, stats) = agent.run_loop(&prompt).await?;
         println!("{result}");
         eprintln!("{}", format_stats(&stats));
