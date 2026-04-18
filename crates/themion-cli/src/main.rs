@@ -24,7 +24,13 @@ async fn main() -> anyhow::Result<()> {
         // REPL mode
         let stdin = io::stdin();
         let client = OpenRouterClient::new(api_key);
-        let mut agent = Agent::new(client, model, system_prompt);
+        let mut agent = Agent::new(client, model.clone(), system_prompt);
+
+        println!(
+            "themion v{} | OpenRouter | {model}",
+            env!("CARGO_PKG_VERSION")
+        );
+        println!("Type '/exit' or '/quit' to quit.\n");
 
         loop {
             print!("> ");
@@ -44,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
             if input.is_empty() {
                 continue;
             }
-            if input == "exit" || input == "quit" {
+            if input == "/exit" || input == "/quit" {
                 break;
             }
 
