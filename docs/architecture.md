@@ -1,17 +1,18 @@
 # Architecture
 
-Themion is a Rust AI agent with a Ratatui TUI, streaming token output, persistent SQLite history, and a tool-calling loop compatible with any OpenAI-format API.
+Themion is a Rust AI agent with a Ratatui TUI, streaming token output, persistent SQLite history, and a tool-calling loop compatible with multiple OpenAI-style backends.
 
 ## Design Philosophy
 
 - **No framework dependencies** — the agent loop, HTTP client, tool dispatch, and TUI are all hand-rolled.
 - **Stateful conversation, context-windowed** — `Agent` owns the full in-memory history but sends only the last N turns to the API. Older turns persist in SQLite and are reachable via tools.
-- **OpenAI tool-calling protocol** — tools are described as JSON function schemas; the LLM calls them by name using the standard `tool_calls` response field.
+- **OpenAI-style tool calling** — tools are described as JSON function schemas; compatible providers can invoke them and return structured tool calls.
 - **Event-driven TUI** — `Agent` emits `AgentEvent` variants over an `mpsc` channel; the TUI renders each event as it arrives, giving streaming token display without blocking the input loop.
+- **Provider abstraction** — the core agent speaks through a `ChatBackend` trait so different transports and wire formats can be swapped at runtime.
 
 ## Component Map
 
-```
+```text
 main.rs
   └─ loads Config, resolves project_dir, opens DbHandle
        ├─ print mode  ──► Agent::new_with_db → run_loop(prompt) → print → exit
@@ -26,14 +27,23 @@ tui::run  (tui.rs)
 Agent  (agent.rs)
   ├─ owns: Vec<Message> (full in-memory history)
   ├─ owns: Arc<DbHandle>, session_id, project_dir, turn_boundaries
-  ├─ calls: ChatClient::chat_completion_stream() — SSE streaming
+  ├─ calls: client.chat_completion_stream() via ChatBackend
   ├─ calls: tools::call_tool(name, args, &ToolCtx)
   └─ emits: AgentEvent over mpsc channel
 
+ChatBackend  (trait in client.rs)
+  └─ async fn chat_completion_stream(model, messages, tools, on_chunk)
+
 ChatClient  (client.rs)
   ├─ POST /chat/completions with stream=true
-  ├─ parses SSE line-by-line (byte-safe UTF-8 splitting)
+  ├─ parses Chat Completions SSE line-by-line (byte-safe UTF-8 splitting)
   └─ assembles ResponseMessage + Usage from stream chunks
+
+CodexClient  (client_codex.rs)
+  ├─ POST /responses with stream=true
+  ├─ parses named-event Responses API SSE frames
+  ├─ refreshes OAuth tokens when needed
+  └─ assembles ResponseMessage + Usage from Responses events
 
 tools.rs
   ├─ tool_definitions() → JSON schema array (sent every request)
@@ -55,7 +65,7 @@ Each call to `run_loop(user_input)`:
 
 1. Record turn boundary (`turn_boundaries.push(messages.len())`); open a DB turn row via `begin_turn`.
 2. Push `role="user"` message to history; persist to `agent_messages`.
-3. Build windowed context (see §Context Windowing) and call `chat_completion_stream`.
+3. Build windowed context (see §Context Windowing) and call `chat_completion_stream` on the active backend.
 4. Stream tokens to TUI via `AgentEvent::AssistantChunk`; accumulate full response.
 5. Push `role="assistant"` response to history; persist to `agent_messages`.
 6. If response has no `tool_calls` → break.
@@ -67,7 +77,7 @@ Each call to `run_loop(user_input)`:
 
 `Agent.window_turns` (default 5) controls how much history is sent to the API. On each LLM round:
 
-```
+```text
 [system_prompt]
 [recall hint — only when turn_boundaries.len() > window_turns]
 [messages from turn (current − window_turns) … now]
@@ -79,11 +89,17 @@ The recall hint is a synthetic `role="system"` message:
 
 The full `messages` Vec is never trimmed — the in-memory copy is always complete. Windowing only affects what is sent over the wire.
 
-## Streaming (client.rs)
+## Streaming
+
+### Chat Completions backends (`client.rs`)
 
 `chat_completion_stream` sends `"stream": true` and reads the response body chunk-by-chunk via `Response::chunk()`. SSE lines are split on the `0x0A` byte (safe for UTF-8 multi-byte sequences) and decoded per line. Each `data:` line is parsed as a `StreamChunkData`; `delta.content` fragments are forwarded to the `on_chunk` callback immediately. Tool call argument fragments are accumulated by `index` and assembled after `[DONE]`.
 
 `"stream_options": {"include_usage": true}` is sent so the last chunk carries token counts.
+
+### Codex Responses backend (`client_codex.rs`)
+
+Codex uses the OpenAI Responses API rather than Chat Completions. Its stream consists of named SSE events such as `response.output_text.delta` and `response.completed`. The parser accumulates `event:` and `data:` lines until a blank-line frame boundary, then updates the in-flight response state. Text deltas stream to the UI immediately; usage is taken from the completion event.
 
 ## Tools (tools.rs)
 
@@ -121,7 +137,7 @@ The TUI uses Ratatui + Crossterm and runs in the alternate screen buffer.
 
 Layout (top to bottom):
 
-```
+```text
 ┌─ conversation pane (Min 1) ───────────────────────────────────────┐
 │  startup banner (block ASCII art + version / profile / model)     │
 │  word-wrapped entries; bottom-pinned via ratatui line_count()     │
@@ -159,6 +175,18 @@ Key bindings:
 | `Stats`        | dim     | Turn summary (tokens, time)              |
 | `Blank`        | —       | Vertical spacing                         |
 
+### Commands
+
+| Command                          | Action |
+| -------------------------------- | ------ |
+| `/config`                        | Show active settings |
+| `/config profile list`           | List profiles |
+| `/config profile show`           | Show active profile |
+| `/config profile create <name>`  | Create a profile from current settings |
+| `/config profile use <name>`     | Switch profile |
+| `/config profile set key=value`  | Update provider/model/base_url/api_key |
+| `/login codex`                   | Start Codex auth flow and switch to codex profile |
+
 ## Multi-Agent Shape
 
 `App` holds `agents: Vec<AgentHandle>` where each handle owns an `Option<Agent>` (None while a task is running), a `session_id`, and an `is_interactive` flag. Exactly one handle is interactive today; the Vec shape is forward-compatible for background agents without another struct refactor.
@@ -167,23 +195,23 @@ On each submit, the interactive agent is moved out of its handle into a spawned 
 
 ## Providers
 
-Themion abstracts the LLM backend behind a `ChatBackend` trait (`crates/themion-core/src/client.rs`). Each provider implements the `async fn chat_completion_stream(...)` method. `Agent.client` is a `Box<dyn ChatBackend + Send + Sync>`, allowing swappable backends at runtime.
+Themion abstracts the LLM backend behind a `ChatBackend` trait (`crates/themion-core/src/client.rs`). Each provider implements `async fn chat_completion_stream(...)`. `Agent.client` is a `Box<dyn ChatBackend + Send + Sync>`, allowing swappable backends at runtime.
 
-| Provider       | Config value       | Auth              | Wire format                            |
-| -------------- | ------------------ | ----------------- | -------------------------------------- |
-| OpenRouter     | `openrouter`       | API key           | OpenAI Chat Completions SSE            |
-| llama.cpp      | `llamacpp`         | none              | OpenAI Chat Completions SSE            |
-| OpenAI Codex   | `openai-codex`     | OAuth (device code) | OpenAI Responses API SSE             |
+| Provider       | Config value       | Auth                 | Endpoint family                  | Wire format                  |
+| -------------- | ------------------ | -------------------- | -------------------------------- | ---------------------------- |
+| OpenRouter     | `openrouter`       | API key              | `/chat/completions`              | Chat Completions SSE         |
+| llama.cpp      | `llamacpp`         | none                 | `/chat/completions`              | Chat Completions SSE         |
+| OpenAI Codex   | `openai-codex`     | OAuth / device login | `/responses` via Codex backend   | Responses API named-event SSE |
 
-**Codex authentication** — device-code flow (no browser popup required). Tokens are persisted to `~/.config/themion/auth.json` (chmod 0600). Login via `/login codex` in the TUI. Token refresh happens transparently before each request.
+**Codex authentication** — tokens are persisted to `$XDG_CONFIG_HOME/themion/auth.json` (typically `~/.config/themion/auth.json`) and written with mode `0600` on Unix. Login is initiated from the TUI with `/login codex`. Refresh happens automatically before requests when needed.
 
-**SSE format divergence** — OpenRouter and llama.cpp both use Chat Completions with unnamed `data:` frames. Codex uses named-event frames (`event: response.output_text.delta`, etc.) from the Responses API at `https://chatgpt.com/backend-api/codex/responses`.
+**SSE format divergence** — OpenRouter and llama.cpp both use Chat Completions with unnamed `data:` frames. Codex uses named-event frames (`event: response.output_text.delta`, etc.) from the Responses API, so it has a separate parser and request translator.
 
 ## Configuration
 
 Configuration is resolved in priority order: **env var > config file > built-in default**.
 
-No environment variables are required. All settings can be managed with `/config` inside the TUI and are saved to `$XDG_CONFIG_HOME/themion/config.toml` (default `~/.config/themion/config.toml`). A commented template is written on first run. Environment variables are supported as a convenience override.
+No environment variables are required. All settings can be managed with `/config` inside the TUI and are saved to `$XDG_CONFIG_HOME/themion/config.toml` (typically `~/.config/themion/config.toml`). A commented template is written on first run. Environment variables remain available as convenience overrides.
 
 Multiple named profiles are stored under `[profile.<name>]` in the config file and switchable at runtime via `/config profile use <name>`.
 
@@ -199,12 +227,22 @@ Requires an API key from [openrouter.ai](https://openrouter.ai). Supports any mo
 
 ### Provider: llamacpp (local)
 
-No API key needed. Compatible with any OpenAI-format local server (llama.cpp, Ollama, LM Studio).
+No API key needed. Compatible with any OpenAI-format local server such as llama.cpp, Ollama, or LM Studio.
 
 | Field      | Env var             | Default                    |
 | ---------- | ------------------- | -------------------------- |
 | `base_url` | `LLAMACPP_BASE_URL` | `http://localhost:8080/v1` |
 | `model`    | `LLAMACPP_MODEL`    | `local`                    |
+
+### Provider: openai-codex
+
+Uses persisted OAuth credentials rather than an API key.
+
+| Field      | Env var         | Default                               |
+| ---------- | --------------- | ------------------------------------- |
+| `base_url` | —               | `https://chatgpt.com/backend-api/codex` |
+| `model`    | `CODEX_MODEL`   | `gpt-5.4`                             |
+| auth file  | —               | `$XDG_CONFIG_HOME/themion/auth.json`  |
 
 ### Global
 
@@ -212,6 +250,7 @@ No API key needed. Compatible with any OpenAI-format local server (llama.cpp, Ol
 | -------------- | ----------------- | ----------------------------------- |
 | `system_prompt`| `SYSTEM_PROMPT`   | `"You are a helpful AI assistant…"` |
 | active profile | `THEMION_PROFILE` | `default`                           |
+| provider       | `THEMION_PROVIDER`| from selected profile               |
 
 ## Build Profiles
 
