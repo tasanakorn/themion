@@ -462,13 +462,32 @@ fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),   // top bar
             Constraint::Min(1),      // conversation
             Constraint::Length(3),   // input
+            Constraint::Length(1),   // status bar
         ])
         .split(area);
 
-    // ── Top bar ──────────────────────────────────────────────────────────────
+    // ── Conversation ─────────────────────────────────────────────────────────
+    let lines = build_lines(&app.entries, &app.pending);
+    let height = chunks[0].height as usize;
+    let width = chunks[0].width;
+
+    // Use ratatui's own line_count() to get the exact visual row count after
+    // word-wrap, then compute a scroll that pins the newest content to the bottom.
+    let conv_base = Paragraph::new(lines)
+        .wrap(ratatui::widgets::Wrap { trim: false })
+        .block(Block::default());
+    let total_visual = conv_base.line_count(width);
+    let max_scroll = total_visual.saturating_sub(height);
+    let scroll = max_scroll.saturating_sub(app.scroll_offset) as u16;
+
+    f.render_widget(conv_base.scroll((scroll, 0)), chunks[0]);
+
+    // ── Input ─────────────────────────────────────────────────────────────────
+    f.render_widget(&app.input, chunks[1]);
+
+    // ── Status bar ───────────────────────────────────────────────────────────
     let project_leaf = app.project_dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -485,27 +504,8 @@ fn draw(f: &mut Frame, app: &App) {
     );
     f.render_widget(
         Paragraph::new(bar).style(Style::default().bg(Color::DarkGray).fg(Color::White)),
-        chunks[0],
+        chunks[2],
     );
-
-    // ── Conversation ─────────────────────────────────────────────────────────
-    let lines = build_lines(&app.entries, &app.pending);
-    let height = chunks[1].height as usize;
-    let width = chunks[1].width;
-
-    // Use ratatui's own line_count() to get the exact visual row count after
-    // word-wrap, then compute a scroll that pins the newest content to the bottom.
-    let conv_base = Paragraph::new(lines)
-        .wrap(ratatui::widgets::Wrap { trim: false })
-        .block(Block::default());
-    let total_visual = conv_base.line_count(width);
-    let max_scroll = total_visual.saturating_sub(height);
-    let scroll = max_scroll.saturating_sub(app.scroll_offset) as u16;
-
-    f.render_widget(conv_base.scroll((scroll, 0)), chunks[1]);
-
-    // ── Input ─────────────────────────────────────────────────────────────────
-    f.render_widget(&app.input, chunks[2]);
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -536,7 +536,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
         Some(d) => {
             let db_path = d.join("themion").join("history.db");
             DbHandle::open(&db_path).unwrap_or_else(|e| {
-                eprintln!("warning: history persistence disabled: {e}");
+                eprintln!("warning: history persistence disabled: {}", e);
                 DbHandle::open_in_memory().expect("in-memory db")
             })
         }
