@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Padding, Paragraph},
     Frame, Terminal,
 };
 use tokio::sync::mpsc;
@@ -313,7 +313,8 @@ fn make_input<'a>() -> TextArea<'a> {
         Block::default()
             .borders(Borders::TOP)
             .border_style(Style::default().fg(Color::DarkGray))
-            .title(Span::styled(" ▸ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+            .title(Span::styled("▸ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+            .padding(Padding::left(2)),
     );
     ta.set_cursor_line_style(Style::default());
     ta.set_placeholder_text("message…  (Enter send · Ctrl-C quit)");
