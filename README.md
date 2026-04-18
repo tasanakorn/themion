@@ -22,6 +22,12 @@ themion is a Rust-powered AI agent with a full-featured TUI. Give it a task in p
 - **Print mode** — Pipe a single prompt and get a result; perfect for scripting
 - **Single binary** — Ships as one statically-linked executable with no runtime dependencies
 
+## Version
+
+Current version: **0.2.0**
+
+After `0.2.0`, themion will use themion to help develop itself.
+
 ## Quick Start
 
 ```bash

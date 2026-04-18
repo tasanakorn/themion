@@ -24,10 +24,11 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [profile.dev]
 debug = false
-incremental = true
+incremental = false
+strip = "symbols"
 
 [profile.release]
 lto = true
 codegen-units = 1
-strip = true
+strip = "symbols"
 opt-level = "z"
