@@ -1,12 +1,12 @@
+use crate::client::{ChatBackend, Message};
+use crate::db::DbHandle;
+use crate::tools;
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use uuid::Uuid;
-use crate::client::{ChatBackend, Message};
-use crate::db::DbHandle;
-use crate::tools;
 
 #[derive(Debug, Clone)]
 pub struct TurnStats {
@@ -41,13 +41,16 @@ fn tool_call_detail(name: &str, args_json: &str) -> String {
     let args: serde_json::Value = serde_json::from_str(args_json).unwrap_or_default();
     let t = |key: &str| truncate(args[key].as_str().unwrap_or("?"), 60);
     match name {
-        "bash"          => format!("bash: {}", t("command")),
-        "read_file"     => format!("read: {}", t("path")),
-        "write_file"    => format!("write: {}", t("path")),
-        "list_directory"=> format!("ls: {}", t("path")),
-        "recall_history"=> format!("recall_history: session={}", truncate(args["session_id"].as_str().unwrap_or("current"), 60)),
-        "search_history"=> format!("search_history: {}", t("query")),
-        _               => name.to_string(),
+        "bash" => format!("bash: {}", t("command")),
+        "read_file" => format!("read: {}", t("path")),
+        "write_file" => format!("write: {}", t("path")),
+        "list_directory" => format!("ls: {}", t("path")),
+        "recall_history" => format!(
+            "recall_history: session={}",
+            truncate(args["session_id"].as_str().unwrap_or("current"), 60)
+        ),
+        "search_history" => format!("search_history: {}", t("query")),
+        _ => name.to_string(),
     }
 }
 
@@ -62,10 +65,15 @@ pub struct Agent {
     pub db: Arc<DbHandle>,
     pub window_turns: usize,
     turn_boundaries: Vec<usize>,
+    turn_seq_counter: u32,
 }
 
 impl Agent {
-    pub fn new(client: Box<dyn ChatBackend + Send + Sync>, model: String, system_prompt: String) -> Self {
+    pub fn new(
+        client: Box<dyn ChatBackend + Send + Sync>,
+        model: String,
+        system_prompt: String,
+    ) -> Self {
         Self {
             client,
             model,
@@ -77,10 +85,15 @@ impl Agent {
             db: DbHandle::open_in_memory().expect("in-memory db"),
             window_turns: 5,
             turn_boundaries: Vec::new(),
+            turn_seq_counter: 0,
         }
     }
 
-    pub fn new_verbose(client: Box<dyn ChatBackend + Send + Sync>, model: String, system_prompt: String) -> Self {
+    pub fn new_verbose(
+        client: Box<dyn ChatBackend + Send + Sync>,
+        model: String,
+        system_prompt: String,
+    ) -> Self {
         Self {
             client,
             model,
@@ -92,6 +105,7 @@ impl Agent {
             db: DbHandle::open_in_memory().expect("in-memory db"),
             window_turns: 5,
             turn_boundaries: Vec::new(),
+            turn_seq_counter: 0,
         }
     }
 
@@ -112,6 +126,7 @@ impl Agent {
             db: DbHandle::open_in_memory().expect("in-memory db"),
             window_turns: 5,
             turn_boundaries: Vec::new(),
+            turn_seq_counter: 0,
         }
     }
 
@@ -124,7 +139,9 @@ impl Agent {
         db: Arc<DbHandle>,
     ) -> Self {
         Self {
-            client, model, system_prompt,
+            client,
+            model,
+            system_prompt,
             messages: Vec::new(),
             event_tx: None,
             session_id,
@@ -132,11 +149,17 @@ impl Agent {
             db,
             window_turns: 5,
             turn_boundaries: Vec::new(),
+            turn_seq_counter: 0,
         }
     }
 
     pub fn set_event_tx(&mut self, tx: mpsc::UnboundedSender<AgentEvent>) {
         self.event_tx = Some(tx);
+    }
+
+    pub fn clear_context(&mut self) {
+        self.messages.clear();
+        self.turn_boundaries.clear();
     }
 
     fn emit(&self, event: AgentEvent) {
@@ -146,7 +169,8 @@ impl Agent {
     }
 
     pub async fn run_loop(&mut self, user_input: &str) -> Result<(String, TurnStats)> {
-        let turn_seq = self.turn_boundaries.len() as u32 + 1;
+        self.turn_seq_counter += 1;
+        let turn_seq = self.turn_seq_counter;
         self.turn_boundaries.push(self.messages.len());
         let turn_id = {
             let db = self.db.clone();
@@ -166,7 +190,8 @@ impl Agent {
             let sid = self.session_id;
             let msg = self.messages.last().unwrap().clone();
             let seq = self.messages.len() as u32;
-            tokio::task::spawn_blocking(move || db.append_message(turn_id, sid, seq, &msg)).await??;
+            tokio::task::spawn_blocking(move || db.append_message(turn_id, sid, seq, &msg))
+                .await??;
         }
 
         let turn_start = Instant::now();
@@ -179,7 +204,6 @@ impl Agent {
         let mut tokens_out = 0u64;
         let mut tokens_cached = 0u64;
 
-        // TODO: make max iterations configurable
         for _ in 0..10 {
             let mut msgs_with_system = vec![Message {
                 role: "system".to_string(),
@@ -206,7 +230,8 @@ impl Agent {
 
             self.emit(AgentEvent::LlmStart);
             let event_tx = self.event_tx.clone();
-            let (response, usage) = self.client
+            let (response, usage) = self
+                .client
                 .chat_completion_stream(
                     &self.model,
                     &msgs_with_system,
@@ -234,7 +259,6 @@ impl Agent {
                 }
             }
 
-            // Push assistant message to history
             self.messages.push(Message {
                 role: response.role.clone(),
                 content: response.content.clone(),
@@ -247,7 +271,8 @@ impl Agent {
                 let sid = self.session_id;
                 let msg = self.messages.last().unwrap().clone();
                 let seq = self.messages.len() as u32;
-                tokio::task::spawn_blocking(move || db.append_message(turn_id, sid, seq, &msg)).await??;
+                tokio::task::spawn_blocking(move || db.append_message(turn_id, sid, seq, &msg))
+                    .await??;
             }
 
             if let Some(ref content) = response.content {
@@ -259,7 +284,6 @@ impl Agent {
                 _ => break,
             };
 
-            // Execute each tool call and push results
             for tc in &tool_calls_vec {
                 let detail = tool_call_detail(&tc.function.name, &tc.function.arguments);
                 self.emit(AgentEvent::ToolStart { detail });
@@ -268,7 +292,8 @@ impl Agent {
                     session_id: self.session_id,
                     project_dir: self.project_dir.clone(),
                 };
-                let result = tools::call_tool(&tc.function.name, &tc.function.arguments, &tool_ctx).await;
+                let result =
+                    tools::call_tool(&tc.function.name, &tc.function.arguments, &tool_ctx).await;
                 self.emit(AgentEvent::ToolEnd);
                 tool_calls += 1;
                 self.messages.push(Message {
@@ -282,12 +307,20 @@ impl Agent {
                     let sid = self.session_id;
                     let msg = self.messages.last().unwrap().clone();
                     let seq = self.messages.len() as u32;
-                    tokio::task::spawn_blocking(move || db.append_message(turn_id, sid, seq, &msg)).await??;
+                    tokio::task::spawn_blocking(move || db.append_message(turn_id, sid, seq, &msg))
+                        .await??;
                 }
             }
         }
 
-        let stats = TurnStats { llm_rounds, tool_calls, tokens_in, tokens_out, tokens_cached, elapsed_ms: turn_start.elapsed().as_millis() };
+        let stats = TurnStats {
+            llm_rounds,
+            tool_calls,
+            tokens_in,
+            tokens_out,
+            tokens_cached,
+            elapsed_ms: turn_start.elapsed().as_millis(),
+        };
         {
             let db = self.db.clone();
             let s = stats.clone();
