@@ -543,15 +543,24 @@ fn draw(f: &mut Frame, app: &App) {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("?");
+    let fmt = |n: u64| -> String {
+        let s = n.to_string();
+        let mut out = String::new();
+        for (i, ch) in s.chars().rev().enumerate() {
+            if i > 0 && i % 3 == 0 { out.push(','); }
+            out.push(ch);
+        }
+        out.chars().rev().collect()
+    };
     let bar = format!(
-        "  {}  |  {}  |  {}  |  in:{} out:{} cached:{}  |  ctx:~{}tok",
+        "  {}  |  {}  |  {}  |  in:{} out:{} cached:{}  |  ctx:{}",
         project_leaf,
         app.session.active_profile,
         app.session.model,
-        app.session_tokens.tokens_in,
-        app.session_tokens.tokens_out,
-        app.session_tokens.tokens_cached,
-        app.last_ctx_tokens,
+        fmt(app.session_tokens.tokens_in),
+        fmt(app.session_tokens.tokens_out),
+        fmt(app.session_tokens.tokens_cached),
+        fmt(app.last_ctx_tokens),
     );
     f.render_widget(
         Paragraph::new(bar).style(Style::default().bg(Color::DarkGray).fg(Color::White)),
