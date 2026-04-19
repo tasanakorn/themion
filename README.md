@@ -31,13 +31,52 @@ Current version: **0.2.0**
 
 After `0.2.0`, themion will use themion to help develop itself.
 
-## Quick Start
+## Installation
+
+### Install to `~/.local/bin`
+
+For normal use, install with Cargo in release mode:
 
 ```bash
-# Build a release binary
-cargo build --release
+cargo install --path . --root ~/.local
+```
 
-# Launch the TUI
+That installs the binary to:
+
+```text
+~/.local/bin/themion
+```
+
+Make sure `~/.local/bin` is on your `PATH`:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+To make that permanent, add it to your shell config (for example `~/.bashrc` or `~/.zshrc`).
+
+### Build without installing
+
+If you only want a local build from the repo, use a release build:
+
+```bash
+cargo build --release
+./target/release/themion
+```
+
+Release builds are recommended for the best runtime performance. Use debug builds only if you're actively developing themion itself.
+
+## Quick Start
+
+After installation:
+
+```bash
+themion
+```
+
+If you built from source without installing:
+
+```bash
 ./target/release/themion
 ```
 
@@ -50,6 +89,12 @@ Recommended first run inside the TUI:
 That starts the built-in Codex login flow and switches you to the Codex-backed profile after authentication.
 
 Or use a one-shot prompt in print mode:
+
+```bash
+themion "summarise the files in this directory"
+```
+
+If you're running from the build directory instead of an installed binary:
 
 ```bash
 ./target/release/themion "summarise the files in this directory"
