@@ -93,6 +93,7 @@ If you changed only one crate, prefer checking that crate first.
 - In Testing, write each outcome as `step → verify:`.
 - For major design choices, include a brief inline `Alternative considered` note in the relevant design subsection instead of adding a standalone alternatives section.
 - When implementing a feature from an existing PRD, update the relevant PRD and `docs/README.md` status/notes so the docs reflect what has actually landed.
+- When implementing a feature from a PRD that specifies a target software version, check whether the repository version should be updated as part of that implementation and update it when appropriate.
 
 ## Git discipline
 
