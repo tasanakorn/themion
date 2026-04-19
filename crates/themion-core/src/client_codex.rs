@@ -714,6 +714,7 @@ impl ChatBackend for CodexClient {
         messages: &[Message],
         tools: &Value,
         mut on_chunk: Box<dyn FnMut(String) + Send + 'static>,
+        should_cancel: Option<Box<dyn Fn() -> bool + Send + Sync + 'static>>,
     ) -> Result<(
         ResponseMessage,
         Option<Usage>,
@@ -780,6 +781,9 @@ impl ChatBackend for CodexClient {
         let mut response = response;
 
         while !done {
+            if should_cancel.as_ref().is_some_and(|cancel| cancel()) {
+                anyhow::bail!("interrupted");
+            }
             let Some(bytes) = response.chunk().await? else {
                 break;
             };
@@ -810,6 +814,9 @@ impl ChatBackend for CodexClient {
                         match event_type.as_str() {
                             "response.output_text.delta" => {
                                 if let Some(delta) = data["delta"].as_str() {
+                                    if should_cancel.as_ref().is_some_and(|cancel| cancel()) {
+                                        anyhow::bail!("interrupted");
+                                    }
                                     content.push_str(delta);
                                     on_chunk(delta.to_string());
                                 }
@@ -939,9 +946,9 @@ impl ChatBackend for CodexClient {
 
         let payload: ModelsResponse = response.json().await?;
         let models = payload.data.or(payload.models).unwrap_or_default();
-        let found = models.into_iter().find(|m| {
-            m.id.as_deref() == Some(model) || m.slug.as_deref() == Some(model)
-        });
+        let found = models
+            .into_iter()
+            .find(|m| m.id.as_deref() == Some(model) || m.slug.as_deref() == Some(model));
 
         Ok(found.map(|m| ModelInfo {
             id: m.id.or(m.slug).unwrap_or_else(|| model.to_string()),

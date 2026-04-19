@@ -2,6 +2,7 @@ use anyhow::Result;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::task::yield_now;
 
 use crate::client_codex::ApiCallRateLimitReport;
 
@@ -110,6 +111,7 @@ pub trait ChatBackend: Send + Sync {
         messages: &[Message],
         tools: &Value,
         on_chunk: Box<dyn FnMut(String) + Send + 'static>,
+        should_cancel: Option<Box<dyn Fn() -> bool + Send + Sync + 'static>>,
     ) -> Result<(
         ResponseMessage,
         Option<Usage>,
@@ -202,6 +204,7 @@ impl ChatClient {
         messages: &[Message],
         tools: &Value,
         mut on_chunk: impl FnMut(String),
+        should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
     ) -> Result<(
         ResponseMessage,
         Option<Usage>,
@@ -230,6 +233,9 @@ impl ChatClient {
         let mut done = false;
 
         while !done {
+            if should_cancel.is_some_and(|cancel| cancel()) {
+                anyhow::bail!("interrupted");
+            }
             let Some(bytes) = response.chunk().await? else {
                 break;
             };
@@ -271,8 +277,12 @@ impl ChatClient {
 
                     if let Some(text) = delta.content {
                         if !text.is_empty() {
+                            if should_cancel.is_some_and(|cancel| cancel()) {
+                                anyhow::bail!("interrupted");
+                            }
                             content.push_str(&text);
                             on_chunk(text);
+                            yield_now().await;
                         }
                     }
 
@@ -342,12 +352,13 @@ impl ChatBackend for ChatClient {
         messages: &[Message],
         tools: &Value,
         on_chunk: Box<dyn FnMut(String) + Send + 'static>,
+        should_cancel: Option<Box<dyn Fn() -> bool + Send + Sync + 'static>>,
     ) -> Result<(
         ResponseMessage,
         Option<Usage>,
         Option<ApiCallRateLimitReport>,
     )> {
-        self.chat_completion_stream(model, messages, tools, on_chunk)
+        self.chat_completion_stream(model, messages, tools, on_chunk, should_cancel.as_deref())
             .await
     }
 }
