@@ -907,13 +907,7 @@ fn make_input<'a>() -> TextArea<'a> {
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray))
-            .title(Span::styled(
-                "❯ ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ))
-            .padding(Padding::left(1)),
+                        .padding(Padding::left(1)),
     );
     ta.set_cursor_line_style(Style::default());
     ta.set_placeholder_text(
@@ -1071,33 +1065,15 @@ fn draw(f: &mut Frame, app: &App) {
     f.render_widget(conv_base.scroll((scroll, 0)), chunks[0]);
 
     f.render_widget(Clear, chunks[1]);
-    let display_input = if input_text.is_empty() {
-        "❯ ".to_string()
-    } else {
-        let mut lines = input_text.lines();
-        let first = lines.next().unwrap_or("");
-        let mut out = format!("❯ {}", first);
-        for line in lines {
-            out.push('\n');
-            out.push_str("  ");
-            out.push_str(line);
-        }
-        out
-    };
+    let display_input = input_text.clone();
     let input_para = Paragraph::new(display_input)
         .wrap(Wrap { trim: false })
         .block(input_block);
     f.render_widget(input_para, chunks[1]);
 
     let (cursor_row, cursor_col) = app.input.cursor();
-    let cursor_prefix_x = chunks[1].x + 4;
-    let cursor_prefix_y = chunks[1].y + 1;
-    let cursor_y = cursor_prefix_y.saturating_add(cursor_row as u16);
-    let cursor_x = if cursor_row == 0 {
-        cursor_prefix_x.saturating_add(cursor_col as u16)
-    } else {
-        (chunks[1].x + 3).saturating_add(cursor_col as u16)
-    };
+    let cursor_x = chunks[1].x + 2 + cursor_col as u16;
+    let cursor_y = chunks[1].y + 1 + cursor_row as u16;
     if cursor_y < chunks[1].bottom() && cursor_x < chunks[1].right() {
         f.set_cursor_position((cursor_x, cursor_y));
     }
