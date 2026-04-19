@@ -26,7 +26,8 @@ A single user turn follows this shape:
 4. The harness builds the model input from:
    - the base system prompt
    - predefined built-in coding guardrails
-   - injected contextual instructions such as `AGENTS.md`
+   - predefined Codex CLI web-search instruction
+- injected contextual instructions such as `AGENTS.md`
    - workflow context and phase instructions
    - an optional history recall hint
    - the recent conversation window
@@ -60,7 +61,15 @@ The built-in topics are:
 
 This layer remains separate from both the base system prompt and repository-local instruction files.
 
-### 3. Contextual instruction files
+### 3. Predefined Codex CLI web-search instruction
+
+Themion injects a short built-in instruction layer telling the agent to use Codex CLI via the shell as the preferred path for web-search-style research when the task requires current external information that is not available in the local repository.
+
+This layer is separate from both the predefined coding guardrails and repository-local instructions. It is intentionally narrow: it guides the model toward Codex CLI for focused external research, not arbitrary external-tool delegation.
+
+The instruction also tells the model to report clearly when Codex CLI is unavailable or fails, rather than pretending certainty about external facts.
+
+### 4. Contextual instruction files
 
 Repository or workspace instructions such as `AGENTS.md` are treated as separate injected prompt inputs, not as text concatenated into the base system prompt.
 
@@ -72,7 +81,7 @@ That separation matters because:
 
 In practice, the model sees both the base system prompt and the injected contextual instructions, but they remain separate prompt components.
 
-### 4. Workflow context and phase instructions
+### 5. Workflow context and phase instructions
 
 Workflow runtime state is injected as another separate prompt component.
 
@@ -97,7 +106,7 @@ The runtime also injects phase-specific guidance from `workflow.rs`. For the bui
 - `EXECUTE` tells the model to implement the smallest working slice and keep scope narrow
 - `VALIDATE` tells the model to check success criteria and return pass or fail
 
-### 5. Recall hint for trimmed history
+### 6. Recall hint for trimmed history
 
 When the in-memory conversation is longer than the configured context window, the harness adds a synthetic system message explaining that earlier turns are still available in persistent history.
 
@@ -128,6 +137,7 @@ For each model request, the harness constructs a smaller prompt window. Conceptu
 ```text
 [system prompt]
 [predefined coding guardrails]
+[predefined Codex CLI web-search instruction]
 [injected contextual instructions, e.g. AGENTS.md]
 [workflow context + phase instructions]
 [recall hint, if older turns were omitted]
@@ -459,6 +469,7 @@ A useful way to think about Themion's engine/runtime is:
 
 - **system prompt** defines default assistant behavior
 - **predefined coding guardrails** add a built-in coding baseline before repository-local instructions
+- **predefined Codex CLI web-search instruction** points the agent to Codex CLI for focused external research when local information is insufficient
 - **`AGENTS.md` and related instructions** define repository-local behavior
 - **workflow context** tells the model what state machine it is currently operating inside
 - **recent turns** provide immediate conversational context

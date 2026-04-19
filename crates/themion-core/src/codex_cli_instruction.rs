@@ -1,0 +1,1 @@
+pub const CODEX_CLI_WEB_SEARCH_INSTRUCTION: &str = r#"When a task needs current external information or web search beyond the local repository, use Codex CLI via the shell as the preferred research path when available. Keep the query focused on the task, summarize the result for the user, and if Codex CLI is unavailable or fails, say so clearly instead of pretending to know."#;

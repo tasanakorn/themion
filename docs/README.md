@@ -21,7 +21,9 @@
 | PRD-009 | [Domain-Prefixed Tool Naming Convention](prd/prd-009-domain-prefixed-tool-naming-convention.md)             | Implemented   | v0.5.1  | `themion-core`, docs                     |
 | PRD-010 | [Rename Persistent Database File from `history.db` to `system.db`](prd/prd-010-rename-database-file-to-system-db.md) | Implemented | v0.5.2 | `themion-core`, `themion-cli`, docs      |
 | PRD-011 | [Softer, More Verbose Harness Status Events](prd/prd-011-softer-more-verbose-harness-status-events.md) | Implemented | v0.6.0 | `themion-core`, `themion-cli`, docs      |
-| PRD-012 | [Human-Friendly Statusline Token Units](prd/prd-012-human-friendly-statusline-token-units.md) | Implemented | v0.6.1 | `themion-cli`, docs |
+| PRD-012 | [Human-Friendly Statusline Token Units](prd/prd-012-human-friendly-statusline-token-units.md) | Implemented | v0.6.1 | `themion-cli`, docs      |
+| PRD-013 | [Minimal Karpathy-Inspired Predefined Coding Guardrails](prd/prd-013-minimal-karpathy-inspired-system-prompt-guardrails.md) | Implemented | v0.7.0 | `themion-core`, docs |
+| PRD-014 | [Codex CLI Web-Search Instruction Injection](prd/prd-014-codex-cli-web-search-instruction-injection.md) | Implemented | v0.8.0 | `themion-core`, docs |
 
 ## Roadmap note
 

@@ -3,6 +3,7 @@ pub mod agents_md;
 pub mod auth;
 pub mod client;
 pub mod client_codex;
+pub mod codex_cli_instruction;
 pub mod db;
 pub mod predefined_guardrails;
 pub mod tools;

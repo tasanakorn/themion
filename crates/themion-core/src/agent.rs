@@ -1,5 +1,6 @@
 use crate::agents_md;
 use crate::client::{ChatBackend, Message, ModelInfo};
+use crate::codex_cli_instruction::CODEX_CLI_WEB_SEARCH_INSTRUCTION;
 use crate::db::DbHandle;
 use crate::predefined_guardrails::PREDEFINED_GUARDRAILS;
 use crate::tools;
@@ -658,6 +659,13 @@ impl Agent {
             msgs_with_system.push(Message {
                 role: "system".to_string(),
                 content: Some(PREDEFINED_GUARDRAILS.to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+
+            msgs_with_system.push(Message {
+                role: "system".to_string(),
+                content: Some(CODEX_CLI_WEB_SEARCH_INSTRUCTION.to_string()),
                 tool_calls: None,
                 tool_call_id: None,
             });
