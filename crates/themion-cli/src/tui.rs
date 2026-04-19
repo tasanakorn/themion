@@ -64,7 +64,7 @@ pub struct AgentHandle {
 }
 
 #[derive(Clone)]
-enum BusyPhase {
+enum AgentActivity {
     PreparingRequest,
     WaitingForModel,
     StreamingResponse,
@@ -75,35 +75,35 @@ enum BusyPhase {
     Finishing,
 }
 
-impl BusyPhase {
+impl AgentActivity {
     fn label(&self, stream_chunks: u64, stream_chars: u64) -> String {
         match self {
-            BusyPhase::PreparingRequest => "preparing request…".to_string(),
-            BusyPhase::WaitingForModel => "waiting for model…".to_string(),
-            BusyPhase::StreamingResponse => format!(
+            AgentActivity::PreparingRequest => "preparing request…".to_string(),
+            AgentActivity::WaitingForModel => "waiting for model…".to_string(),
+            AgentActivity::StreamingResponse => format!(
                 "receiving response… chunks:{} chars:{}",
                 stream_chunks, stream_chars
             ),
-            BusyPhase::RunningTool(detail) => format!("running tool… {}", detail),
-            BusyPhase::WaitingAfterTool => "tool finished, waiting for model…".to_string(),
-            BusyPhase::LoginStarting => "starting login…".to_string(),
-            BusyPhase::WaitingForLoginBrowser => "waiting for login confirmation…".to_string(),
-            BusyPhase::Finishing => "finalizing…".to_string(),
+            AgentActivity::RunningTool(detail) => format!("running tool… {}", detail),
+            AgentActivity::WaitingAfterTool => "tool finished, waiting for model…".to_string(),
+            AgentActivity::LoginStarting => "starting login…".to_string(),
+            AgentActivity::WaitingForLoginBrowser => "waiting for login confirmation…".to_string(),
+            AgentActivity::Finishing => "finalizing…".to_string(),
         }
     }
 
     fn status_bar(&self, stream_chunks: u64, stream_chars: u64) -> String {
         match self {
-            BusyPhase::PreparingRequest => "phase: preparing".to_string(),
-            BusyPhase::WaitingForModel => "phase: waiting-model".to_string(),
-            BusyPhase::StreamingResponse => {
-                format!("phase: streaming c:{} ch:{}", stream_chunks, stream_chars)
+            AgentActivity::PreparingRequest => "agent: preparing".to_string(),
+            AgentActivity::WaitingForModel => "agent: waiting-model".to_string(),
+            AgentActivity::StreamingResponse => {
+                format!("agent: streaming c:{} ch:{}", stream_chunks, stream_chars)
             }
-            BusyPhase::RunningTool(_) => "phase: running-tool".to_string(),
-            BusyPhase::WaitingAfterTool => "phase: waiting-after-tool".to_string(),
-            BusyPhase::LoginStarting => "phase: login-start".to_string(),
-            BusyPhase::WaitingForLoginBrowser => "phase: login-wait".to_string(),
-            BusyPhase::Finishing => "phase: finalizing".to_string(),
+            AgentActivity::RunningTool(_) => "agent: running-tool".to_string(),
+            AgentActivity::WaitingAfterTool => "agent: waiting-after-tool".to_string(),
+            AgentActivity::LoginStarting => "agent: login-start".to_string(),
+            AgentActivity::WaitingForLoginBrowser => "agent: login-wait".to_string(),
+            AgentActivity::Finishing => "agent: finalizing".to_string(),
         }
     }
 }
@@ -127,7 +127,7 @@ pub struct App<'a> {
     project_dir: PathBuf,
     session_tokens: TurnStats,
     last_ctx_tokens: u64,
-    busy_phase: Option<BusyPhase>,
+    agent_activity: Option<AgentActivity>,
     stream_chunks: u64,
     stream_chars: u64,
     status_rate_limits: Option<ApiCallRateLimitReport>,
@@ -197,7 +197,7 @@ impl<'a> App<'a> {
                 elapsed_ms: 0,
             },
             last_ctx_tokens: 0,
-            busy_phase: None,
+            agent_activity: None,
             stream_chunks: 0,
             stream_chars: 0,
             status_rate_limits: None,
@@ -244,21 +244,21 @@ impl<'a> App<'a> {
     fn pending_str(&self) -> String {
         const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
         let ch = SPINNER[self.anim_frame as usize % SPINNER.len()];
-        let phase = self
-            .busy_phase
+        let activity = self
+            .agent_activity
             .as_ref()
             .map(|p| p.label(self.stream_chunks, self.stream_chars))
             .unwrap_or_else(|| "thinking…".to_string());
-        format!("  {} {}", ch, phase)
+        format!("  {} {}", ch, activity)
     }
 
-    fn set_busy_phase(&mut self, phase: BusyPhase) {
-        self.busy_phase = Some(phase);
+    fn set_agent_activity(&mut self, activity: AgentActivity) {
+        self.agent_activity = Some(activity);
         self.pending = Some(self.pending_str());
     }
 
-    fn clear_busy_phase(&mut self) {
-        self.busy_phase = None;
+    fn clear_agent_activity(&mut self) {
+        self.agent_activity = None;
         self.pending = None;
     }
 
@@ -282,13 +282,13 @@ impl<'a> App<'a> {
         match ev {
             AgentEvent::LlmStart => {
                 self.reset_stream_counters();
-                self.set_busy_phase(BusyPhase::WaitingForModel);
+                self.set_agent_activity(AgentActivity::WaitingForModel);
                 self.streaming_idx = None;
             }
             AgentEvent::AssistantChunk(chunk) => {
                 self.stream_chunks += 1;
                 self.stream_chars += chunk.chars().count() as u64;
-                self.set_busy_phase(BusyPhase::StreamingResponse);
+                self.set_agent_activity(AgentActivity::StreamingResponse);
                 match self.streaming_idx {
                     Some(i) => {
                         if let Some(Entry::Assistant(ref mut text)) = self.entries.get_mut(i) {
@@ -303,17 +303,17 @@ impl<'a> App<'a> {
             }
             AgentEvent::AssistantText(text) => {
                 self.streaming_idx = None;
-                self.clear_busy_phase();
+                self.clear_agent_activity();
                 self.push(Entry::Assistant(text));
             }
             AgentEvent::ToolStart { detail } => {
                 self.streaming_idx = None;
-                self.set_busy_phase(BusyPhase::RunningTool(detail.clone()));
+                self.set_agent_activity(AgentActivity::RunningTool(detail.clone()));
                 self.push(Entry::ToolCall(detail));
             }
             AgentEvent::ToolEnd => {
                 self.push(Entry::ToolDone);
-                self.set_busy_phase(BusyPhase::WaitingAfterTool);
+                self.set_agent_activity(AgentActivity::WaitingAfterTool);
             }
             AgentEvent::Stats(text) => {
                 if let Some(json) = text.strip_prefix("[rate-limit] ") {
@@ -326,8 +326,8 @@ impl<'a> App<'a> {
             }
             AgentEvent::TurnDone(stats) => {
                 self.streaming_idx = None;
-                self.set_busy_phase(BusyPhase::Finishing);
-                self.clear_busy_phase();
+                self.set_agent_activity(AgentActivity::Finishing);
+                self.clear_agent_activity();
                 self.push(Entry::Stats(format_stats(&stats)));
                 self.push(Entry::Blank);
                 self.agent_busy = false;
@@ -355,7 +355,7 @@ impl<'a> App<'a> {
                 return vec!["busy, please wait".to_string()];
             }
             self.agent_busy = true;
-            self.set_busy_phase(BusyPhase::LoginStarting);
+            self.set_agent_activity(AgentActivity::LoginStarting);
             self.push(Entry::Assistant("logging in to OpenAI Codex…".to_string()));
             let tx = app_tx.clone();
             tokio::spawn(async move {
@@ -592,7 +592,7 @@ impl<'a> App<'a> {
         self.push(Entry::User(text.clone()));
         self.agent_busy = true;
         self.reset_stream_counters();
-        self.set_busy_phase(BusyPhase::PreparingRequest);
+        self.set_agent_activity(AgentActivity::PreparingRequest);
 
         let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let app_tx_relay = app_tx.clone();
@@ -1010,14 +1010,14 @@ fn draw(f: &mut Frame, app: &App) {
         }
         out.chars().rev().collect()
     };
-    let phase = app
-        .busy_phase
+    let activity = app
+        .agent_activity
         .as_ref()
-        .map(|p| p.status_bar(app.stream_chunks, app.stream_chars))
-        .unwrap_or_else(|| "phase: idle".to_string());
+        .map(|a| a.status_bar(app.stream_chunks, app.stream_chars))
+        .unwrap_or_else(|| "agent: idle".to_string());
     let bar_top = format!(
         " {} | {} | {} | {}",
-        project_leaf, app.session.active_profile, app.session.model, phase,
+        project_leaf, app.session.active_profile, app.session.model, activity,
     );
     let bar_bottom = format!(
         " {} | in:{} out:{} cached:{} | ctx:{}",
@@ -1269,14 +1269,14 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 user_code,
                 verification_uri,
             }) => {
-                app.set_busy_phase(BusyPhase::WaitingForLoginBrowser);
+                app.set_agent_activity(AgentActivity::WaitingForLoginBrowser);
                 app.push(Entry::Assistant(format!(
                     "open {} and enter code {}",
                     verification_uri, user_code
                 )));
             }
             Some(AppEvent::LoginComplete(Ok(auth))) => {
-                app.clear_busy_phase();
+                app.clear_agent_activity();
                 if let Err(e) = crate::auth_store::save(&auth) {
                     app.push(Entry::Assistant(format!(
                         "warning: failed to save auth: {}",
@@ -1331,7 +1331,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 }
             }
             Some(AppEvent::LoginComplete(Err(e))) => {
-                app.clear_busy_phase();
+                app.clear_agent_activity();
                 app.push(Entry::Assistant(format!("login failed: {}", e)));
                 app.agent_busy = false;
             }
