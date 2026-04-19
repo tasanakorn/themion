@@ -18,6 +18,7 @@
 | PRD-006 | [Workflow and Phase Model for the Harness Engine](prd/prd-006-workflow-and-phase-model-for-harness-engine.md) | Implemented   | v0.4.0  | `themion-core`, `themion-cli`, docs      |
 | PRD-007 | [Lite Workflow Activation and Runtime Structure](prd/prd-007-lite-workflow-activation-and-runtime-structure.md) | Implemented   | v0.5.0  | `themion-core`, `themion-cli`, docs      |
 | PRD-008 | [Workflow Phase Retry and Recovery Policy](prd/prd-008-workflow-phase-retry-and-recovery-policy.md)         | Proposed      | v0.5.0  | `themion-core`, `themion-cli`, docs      |
+| PRD-009 | [Domain-Prefixed Tool Naming Convention](prd/prd-009-domain-prefixed-tool-naming-convention.md)             | Proposed      | v0.5.0  | `themion-core`, docs                     |
 
 ## Roadmap note
 
