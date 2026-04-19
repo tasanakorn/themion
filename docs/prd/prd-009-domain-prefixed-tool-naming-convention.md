@@ -1,7 +1,7 @@
 # PRD-009: Domain-Prefixed Tool Naming Convention
 
 - **Status:** Proposed
-- **Version:** v0.5.0
+- **Version:** v0.5.1
 - **Scope:** `themion-core` (tool definitions, dispatch, prompt references, provider translation compatibility), docs
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
 - **Date:** 2026-04-19
@@ -140,7 +140,7 @@ The rename should not change tool behavior.
 The following must remain stable except for the exposed name:
 
 - parameter shapes
-n- return payload shapes and error formatting where currently relied upon
+- return payload shapes and error formatting where currently relied upon
 - workflow-state validation rules
 - shell execution behavior and working-directory semantics
 - history query semantics
