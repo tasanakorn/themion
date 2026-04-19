@@ -6,6 +6,8 @@
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
 - **Date:** 2026-04-19
 
+> Implementation note: PRD-016 landed the first-pass commit-when-asked guardrail. PRD-018 refines the wording because the original “use a useful brief summary” phrasing proved too weak in practice for real-world commit history quality.
+
 ## Goals
 
 - Update `PREDEFINED_GUARDRAILS` so that when the user explicitly asks the agent to create a git commit, the agent is instructed to use a useful brief summary of the change as the commit message.

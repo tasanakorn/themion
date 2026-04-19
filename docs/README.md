@@ -27,6 +27,7 @@
 | PRD-015 | [User-Feedback-Required Phase Result](prd/prd-015-user-feedback-required-phase-result.md) | Proposed | v0.8.0 | `themion-core`, `themion-cli`, docs |
 | PRD-016 | [Commit-When-Asked Guardrail for Useful Brief Commit Messages](prd/prd-016-commit-when-asked-brief-summary-guardrail.md) | Implemented | v0.8.1 | `themion-core`, docs |
 | PRD-017 | [Press `Esc` to Interrupt an In-Progress Agent Turn](prd/prd-017-press-esc-to-interrupt-agent.md) | Implemented | v0.9.0 | `themion-cli`, `themion-core`, docs |
+| PRD-018 | [Stronger Short Commit-Message Guardrail](prd/prd-018-stronger-short-commit-message-guardrail.md) | Proposed | v0.9.1 | `themion-core`, docs |
 
 ## Roadmap note
 
