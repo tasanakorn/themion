@@ -25,6 +25,7 @@ use themion_core::agent::{Agent, AgentEvent, TurnStats};
 use themion_core::client::ChatClient;
 use themion_core::client_codex::{ApiCallRateLimitReport, CodexClient};
 use themion_core::db::DbHandle;
+use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tui_textarea::CursorMove;
@@ -45,6 +46,10 @@ enum AppEvent {
         verification_uri: String,
     },
     LoginComplete(anyhow::Result<themion_core::CodexAuth>),
+    ShellComplete {
+        output: String,
+        exit_code: Option<i32>,
+    },
 }
 
 enum Entry {
@@ -73,6 +78,7 @@ enum AgentActivity {
     WaitingAfterTool,
     LoginStarting,
     WaitingForLoginBrowser,
+    RunningShellCommand,
     Finishing,
 }
 
@@ -89,6 +95,7 @@ impl AgentActivity {
             AgentActivity::WaitingAfterTool => "tool finished, waiting for model…".to_string(),
             AgentActivity::LoginStarting => "starting login…".to_string(),
             AgentActivity::WaitingForLoginBrowser => "waiting for login confirmation…".to_string(),
+            AgentActivity::RunningShellCommand => "running shell command…".to_string(),
             AgentActivity::Finishing => "finalizing…".to_string(),
         }
     }
@@ -104,6 +111,7 @@ impl AgentActivity {
             AgentActivity::WaitingAfterTool => "agent: waiting-after-tool".to_string(),
             AgentActivity::LoginStarting => "agent: login-start".to_string(),
             AgentActivity::WaitingForLoginBrowser => "agent: login-wait".to_string(),
+            AgentActivity::RunningShellCommand => "agent: shell".to_string(),
             AgentActivity::Finishing => "agent: finalizing".to_string(),
         }
     }
@@ -575,6 +583,49 @@ impl<'a> App<'a> {
         self.scroll_offset = self.scroll_offset.saturating_sub(3);
     }
 
+    fn submit_shell_command(&mut self, command: &str, app_tx: &mpsc::UnboundedSender<AppEvent>) {
+        let command = command.trim_start().to_string();
+        self.push(Entry::User(format!("!{}", command)));
+
+        if command.is_empty() {
+            self.push(Entry::Assistant("empty shell command".to_string()));
+            self.push(Entry::Blank);
+            return;
+        }
+
+        self.agent_busy = true;
+        self.set_agent_activity(AgentActivity::RunningShellCommand);
+
+        let tx = app_tx.clone();
+        let project_dir = self.project_dir.clone();
+        tokio::spawn(async move {
+            let result = Command::new("sh")
+                .arg("-c")
+                .arg(&command)
+                .current_dir(project_dir)
+                .output()
+                .await;
+
+            let (output, exit_code) = match result {
+                Ok(output) => {
+                    let mut text = String::new();
+                    text.push_str(&String::from_utf8_lossy(&output.stdout));
+                    text.push_str(&String::from_utf8_lossy(&output.stderr));
+                    let trimmed = text.trim_end_matches(['\n', '\r']);
+                    let display = if trimmed.is_empty() {
+                        "(no output)".to_string()
+                    } else {
+                        trimmed.to_string()
+                    };
+                    (display, output.status.code())
+                }
+                Err(e) => (format!("failed to run shell command: {}", e), None),
+            };
+
+            let _ = tx.send(AppEvent::ShellComplete { output, exit_code });
+        });
+    }
+
     fn submit_input(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) {
         let text: String = self.input.lines().join("\n");
         let text = text.trim().to_string();
@@ -592,6 +643,11 @@ impl<'a> App<'a> {
 
         if text == "/exit" || text == "/quit" {
             self.running = false;
+            return;
+        }
+
+        if let Some(command) = text.strip_prefix('!') {
+            self.submit_shell_command(command, app_tx);
             return;
         }
 
@@ -1365,6 +1421,17 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
             Some(AppEvent::LoginComplete(Err(e))) => {
                 app.clear_agent_activity();
                 app.push(Entry::Assistant(format!("login failed: {}", e)));
+                app.agent_busy = false;
+            }
+            Some(AppEvent::ShellComplete { output, exit_code }) => {
+                app.clear_agent_activity();
+                app.push(Entry::Assistant(output));
+                if let Some(code) = exit_code {
+                    if code != 0 {
+                        app.push(Entry::Assistant(format!("exit code: {}", code)));
+                    }
+                }
+                app.push(Entry::Blank);
                 app.agent_busy = false;
             }
             None => {}

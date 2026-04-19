@@ -3,11 +3,12 @@
 > Just another AI agent. Started as a weekend experiment — works on purpose. Built in Rust, runs in your terminal.
 
 ```
-█████  █   █  █████  █   █  ███   ███   █   █
-  █    █   █  █      ██ ██   █   █   █  ██  █
-  █    █████  ████   █ █ █   █   █   █  █ █ █
-  █    █   █  █      █   █   █   █   █  █  ██
-  █    █   █  █████  █   █  ███   ███   █   █
+████████╗██╗  ██╗███████╗███╗   ███╗██╗ ██████╗ ███╗   ██╗
+╚══██╔══╝██║  ██║██╔════╝████╗ ████║██║██╔═══██╗████╗  ██║
+   ██║   ███████║█████╗  ██╔████╔██║██║██║   ██║██╔██╗ ██║
+   ██║   ██╔══██║██╔══╝  ██║╚██╔╝██║██║██║   ██║██║╚██╗██║
+   ██║   ██║  ██║███████╗██║ ╚═╝ ██║██║╚██████╔╝██║ ╚████║
+   ╚═╝   ╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝
 ```
 
 themion is a Rust-powered AI agent with a full-featured TUI. Give it a task in plain English and watch it reason, call tools, and produce results — all from your terminal.
@@ -16,6 +17,7 @@ themion is a Rust-powered AI agent with a full-featured TUI. Give it a task in p
 
 - **Full TUI** — Ratatui-powered interface with streaming output, scroll, mouse support, and a braille spinner while thinking
 - **Agentic tool use** — Reads files, writes files, lists directories, runs shell commands; loops until done
+- **Direct shell shortcut** — Run local commands instantly from the TUI with `!<command>` and see the output in the conversation pane
 - **Persistent session history** — SQLite-backed conversation history with windowed context and keyword search
 - **Multi-profile support** — Switch between providers and models on the fly with `/config profile use`
 - **Multi-model** — Works with any OpenRouter model: Claude, GPT-4o, Gemini, Mistral, and more
@@ -42,6 +44,14 @@ export OPENROUTER_API_KEY=sk-or-...
 
 # Or fire a one-shot prompt (print mode)
 ./target/release/themion "summarise the files in this directory"
+```
+
+Inside the TUI, prefix input with `!` to run a local shell command immediately:
+
+```text
+!pwd
+!ls -la
+!cargo check -p themion-cli
 ```
 
 ## Configuration

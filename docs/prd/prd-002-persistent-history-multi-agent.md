@@ -1,6 +1,6 @@
 # PRD-002: Persistent Chat History, Multi-Agent Session Management, and Context Window Strategy
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Version:** v0.2.0
 - **Scope:** `themion-core` (agent, tools, new `db` module); `themion-cli` (TUI status bar, `build_agent`, session bootstrap); workspace `Cargo.toml`
 - **Author:** Tasanakorn (design) + Claude Code (PRD authoring)

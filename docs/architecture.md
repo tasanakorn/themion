@@ -203,6 +203,9 @@ Key bindings:
 | `/config profile use <name>`     | Switch profile |
 | `/config profile set key=value`  | Update provider/model/base_url/api_key |
 | `/login codex`                   | Start Codex auth flow and switch to codex profile |
+| `!<command>`                     | Run a local shell command in the project directory and show output in the pane |
+
+The `!<command>` shortcut is handled entirely in `themion-cli`. It does not go through the model tool loop, is not sent as a prompt, and is intended as a direct user convenience for local terminal work.
 
 ## Multi-Agent Shape
 
@@ -279,6 +282,7 @@ Uses persisted OAuth credentials rather than an API key.
 ## Known Limitations
 
 - **No timeout on `bash`** — a hung subprocess blocks the harness indefinitely.
+- **No timeout on direct `!<command>` execution** — a hung local subprocess blocks that TUI operation until completion.
 - **No path sandboxing** — tools accept any absolute or relative path.
 - **Max 10 tool-call iterations per turn** — hardcoded in `agent.rs`.
 - **No user-configurable `window_turns`** — default of 5 is hardcoded; requires a code change.

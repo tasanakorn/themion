@@ -1,6 +1,6 @@
 # PRD-001: Config File + REPL Verbose Feedback
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Version:** v0.1.0
 - **Scope:** `themion-cli` (config loading, REPL output); `themion-core` (agent event hooks)
 - **Author:** Tasanakorn (design) + Claude Code (PRD authoring)
