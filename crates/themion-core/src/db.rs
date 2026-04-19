@@ -25,11 +25,17 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     current_workflow TEXT,
     current_phase TEXT,
     workflow_status TEXT,
+    current_phase_result TEXT,
     current_agent TEXT,
     workflow_last_updated_turn_seq INTEGER,
     workflow_started_at INTEGER,
     workflow_updated_at INTEGER,
-    workflow_completed_at INTEGER
+    workflow_completed_at INTEGER,
+    current_phase_retry_count INTEGER,
+    current_phase_retry_limit INTEGER,
+    previous_phase_retry_count INTEGER,
+    previous_phase_retry_limit INTEGER,
+    phase_entered_via TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_agent_sessions_project ON agent_sessions(project_dir, created_at);
 
@@ -47,10 +53,11 @@ CREATE TABLE IF NOT EXISTS agent_turns (
     phase_start TEXT,
     phase_end TEXT,
     workflow_status_at_start TEXT,
+    phase_result_at_start TEXT,
     workflow_status_at_end TEXT,
+    phase_result_at_end TEXT,
     workflow_continues_after_turn INTEGER,
-    turn_end_reason TEXT,
-    UNIQUE(session_id, turn_seq)
+    turn_end_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS agent_messages (
@@ -79,6 +86,9 @@ CREATE TABLE IF NOT EXISTS agent_workflow_transitions (
     transition_kind TEXT NOT NULL,
     trigger_source TEXT,
     message_id INTEGER,
+    retry_current_count INTEGER,
+    retry_previous_count INTEGER,
+    phase_entered_via TEXT,
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_agent_workflow_transitions_session_time
@@ -130,20 +140,31 @@ fn init_schema(conn: &Connection, fts5: bool) -> Result<()> {
     ensure_column(conn, "agent_sessions", "current_workflow", "TEXT")?;
     ensure_column(conn, "agent_sessions", "current_phase", "TEXT")?;
     ensure_column(conn, "agent_sessions", "workflow_status", "TEXT")?;
+    ensure_column(conn, "agent_sessions", "current_phase_result", "TEXT")?;
     ensure_column(conn, "agent_sessions", "current_agent", "TEXT")?;
     ensure_column(conn, "agent_sessions", "workflow_last_updated_turn_seq", "INTEGER")?;
     ensure_column(conn, "agent_sessions", "workflow_started_at", "INTEGER")?;
     ensure_column(conn, "agent_sessions", "workflow_updated_at", "INTEGER")?;
     ensure_column(conn, "agent_sessions", "workflow_completed_at", "INTEGER")?;
+    ensure_column(conn, "agent_sessions", "current_phase_retry_count", "INTEGER")?;
+    ensure_column(conn, "agent_sessions", "current_phase_retry_limit", "INTEGER")?;
+    ensure_column(conn, "agent_sessions", "previous_phase_retry_count", "INTEGER")?;
+    ensure_column(conn, "agent_sessions", "previous_phase_retry_limit", "INTEGER")?;
+    ensure_column(conn, "agent_sessions", "phase_entered_via", "TEXT")?;
     ensure_column(conn, "agent_turns", "workflow_name", "TEXT")?;
     ensure_column(conn, "agent_turns", "phase_start", "TEXT")?;
     ensure_column(conn, "agent_turns", "phase_end", "TEXT")?;
     ensure_column(conn, "agent_turns", "workflow_status_at_start", "TEXT")?;
+    ensure_column(conn, "agent_turns", "phase_result_at_start", "TEXT")?;
     ensure_column(conn, "agent_turns", "workflow_status_at_end", "TEXT")?;
+    ensure_column(conn, "agent_turns", "phase_result_at_end", "TEXT")?;
     ensure_column(conn, "agent_turns", "workflow_continues_after_turn", "INTEGER")?;
     ensure_column(conn, "agent_turns", "turn_end_reason", "TEXT")?;
     ensure_column(conn, "agent_messages", "workflow_name", "TEXT")?;
     ensure_column(conn, "agent_messages", "phase_name", "TEXT")?;
+    ensure_column(conn, "agent_workflow_transitions", "retry_current_count", "INTEGER")?;
+    ensure_column(conn, "agent_workflow_transitions", "retry_previous_count", "INTEGER")?;
+    ensure_column(conn, "agent_workflow_transitions", "phase_entered_via", "TEXT")?;
     if fts5 {
         conn.execute_batch(SCHEMA_FTS5)?;
     }
@@ -209,23 +230,35 @@ impl DbHandle {
              SET current_workflow = ?2,
                  current_phase = ?3,
                  workflow_status = ?4,
-                 current_agent = ?5,
-                 workflow_last_updated_turn_seq = ?6,
-                 workflow_started_at = COALESCE(workflow_started_at, ?7),
-                 workflow_updated_at = ?7,
+                 current_phase_result = ?5,
+                 current_agent = ?6,
+                 workflow_last_updated_turn_seq = ?7,
+                 workflow_started_at = COALESCE(workflow_started_at, ?8),
+                 workflow_updated_at = ?8,
                  workflow_completed_at = CASE
-                     WHEN ?4 IN ('completed', 'failed', 'interrupted') THEN ?7
+                     WHEN ?4 IN ('completed', 'failed', 'interrupted') THEN ?8
                      ELSE workflow_completed_at
-                 END
+                 END,
+                 current_phase_retry_count = ?9,
+                 current_phase_retry_limit = ?10,
+                 previous_phase_retry_count = ?11,
+                 previous_phase_retry_limit = ?12,
+                 phase_entered_via = ?13
              WHERE session_id = ?1",
             rusqlite::params![
                 session_id.to_string(),
                 state.workflow_name,
                 state.phase_name,
                 state.status.as_str(),
+                state.phase_result.as_str(),
                 state.agent_name,
                 state.last_updated_turn_seq.map(|v| v as i64),
                 now,
+                state.retry_state.current_phase_retries as i64,
+                state.retry_state.current_phase_retry_limit as i64,
+                state.retry_state.previous_phase_retries as i64,
+                state.retry_state.previous_phase_retry_limit as i64,
+                state.retry_state.entered_via.as_str(),
             ],
         )?;
         Ok(())
@@ -237,7 +270,9 @@ impl DbHandle {
     ) -> Result<Option<crate::workflow::WorkflowState>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT current_workflow, current_phase, workflow_status, current_agent, workflow_last_updated_turn_seq
+            "SELECT current_workflow, current_phase, workflow_status, current_phase_result, current_agent, workflow_last_updated_turn_seq,
+                    current_phase_retry_count, current_phase_retry_limit, previous_phase_retry_count,
+                    previous_phase_retry_limit, phase_entered_via
              FROM agent_sessions WHERE session_id = ?1",
         )?;
         let mut rows = stmt.query(rusqlite::params![session_id.to_string()])?;
@@ -247,7 +282,8 @@ impl DbHandle {
         let workflow_name: Option<String> = row.get(0)?;
         let phase_name: Option<String> = row.get(1)?;
         let workflow_status: Option<String> = row.get(2)?;
-        let agent_name: Option<String> = row.get(3)?;
+        let phase_result: Option<String> = row.get(3)?;
+        let agent_name: Option<String> = row.get(4)?;
         if workflow_name.is_none() && phase_name.is_none() && workflow_status.is_none() {
             return Ok(None);
         }
@@ -257,8 +293,20 @@ impl DbHandle {
             status: crate::workflow::WorkflowStatus::from_str(
                 workflow_status.as_deref().unwrap_or("running"),
             ),
+            phase_result: crate::workflow::PhaseResult::from_str(
+                phase_result.as_deref().unwrap_or("pending"),
+            ),
             agent_name: agent_name.unwrap_or_else(|| crate::workflow::DEFAULT_AGENT.to_string()),
-            last_updated_turn_seq: row.get::<_, Option<i64>>(4)?.map(|v| v as u32),
+            last_updated_turn_seq: row.get::<_, Option<i64>>(5)?.map(|v| v as u32),
+            retry_state: crate::workflow::PhaseRetryState {
+                current_phase_retries: row.get::<_, Option<i64>>(6)?.unwrap_or(0) as u32,
+                current_phase_retry_limit: row.get::<_, Option<i64>>(7)?.unwrap_or(crate::workflow::MAX_CURRENT_PHASE_RETRIES as i64) as u32,
+                previous_phase_retries: row.get::<_, Option<i64>>(8)?.unwrap_or(0) as u32,
+                previous_phase_retry_limit: row.get::<_, Option<i64>>(9)?.unwrap_or(crate::workflow::MAX_PREVIOUS_PHASE_RETRIES as i64) as u32,
+                entered_via: crate::workflow::PhaseEntryKind::from_str(
+                    row.get::<_, Option<String>>(10)?.as_deref().unwrap_or("normal")
+                ),
+            },
         }))
     }
 
@@ -271,8 +319,8 @@ impl DbHandle {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO agent_turns (
-                session_id, turn_seq, created_at, workflow_name, phase_start, workflow_status_at_start
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                session_id, turn_seq, created_at, workflow_name, phase_start, workflow_status_at_start, phase_result_at_start
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![
                 session_id.to_string(),
                 turn_seq as i64,
@@ -280,6 +328,7 @@ impl DbHandle {
                 workflow.workflow_name,
                 workflow.phase_name,
                 workflow.status.as_str(),
+                workflow.phase_result.as_str(),
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -329,13 +378,17 @@ impl DbHandle {
         transition_kind: crate::workflow::WorkflowTransitionKind,
         trigger_source: Option<&str>,
         message_id: Option<i64>,
+        retry_current_count: Option<u32>,
+        retry_previous_count: Option<u32>,
+        phase_entered_via: Option<&str>,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO agent_workflow_transitions (
                 session_id, turn_id, turn_seq, workflow_name, from_phase, to_phase,
-                workflow_status, transition_kind, trigger_source, message_id, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                workflow_status, transition_kind, trigger_source, message_id,
+                retry_current_count, retry_previous_count, phase_entered_via, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             rusqlite::params![
                 session_id.to_string(),
                 turn_id,
@@ -347,6 +400,9 @@ impl DbHandle {
                 transition_kind.as_str(),
                 trigger_source,
                 message_id,
+                retry_current_count.map(|v| v as i64),
+                retry_previous_count.map(|v| v as i64),
+                phase_entered_via,
                 now_unix(),
             ],
         )?;
@@ -368,9 +424,10 @@ impl DbHandle {
                  llm_rounds = ?4, tool_calls_count = ?5,
                  phase_end = ?6,
                  workflow_status_at_end = ?7,
-                 workflow_continues_after_turn = ?8,
-                 turn_end_reason = ?9
-             WHERE turn_id = ?10",
+                 phase_result_at_end = ?8,
+                 workflow_continues_after_turn = ?9,
+                 turn_end_reason = ?10
+             WHERE turn_id = ?11",
             rusqlite::params![
                 stats.tokens_in as i64,
                 stats.tokens_out as i64,
@@ -379,6 +436,7 @@ impl DbHandle {
                 stats.tool_calls as i64,
                 workflow.phase_name,
                 workflow.status.as_str(),
+                workflow.phase_result.as_str(),
                 workflow_continues_after_turn as i64,
                 turn_end_reason,
                 turn_id,

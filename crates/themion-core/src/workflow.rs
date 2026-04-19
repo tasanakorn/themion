@@ -1,12 +1,87 @@
 use serde::Serialize;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PhaseResult {
+    Pending,
+    Passed,
+    Failed,
+}
+
+impl PhaseResult {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PhaseResult::Pending => "pending",
+            PhaseResult::Passed => "passed",
+            PhaseResult::Failed => "failed",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "passed" => PhaseResult::Passed,
+            "failed" => PhaseResult::Failed,
+            _ => PhaseResult::Pending,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PhaseRetryState {
+    pub current_phase_retries: u32,
+    pub current_phase_retry_limit: u32,
+    pub previous_phase_retries: u32,
+    pub previous_phase_retry_limit: u32,
+    pub entered_via: PhaseEntryKind,
+}
+
+impl Default for PhaseRetryState {
+    fn default() -> Self {
+        Self {
+            current_phase_retries: 0,
+            current_phase_retry_limit: MAX_CURRENT_PHASE_RETRIES,
+            previous_phase_retries: 0,
+            previous_phase_retry_limit: MAX_PREVIOUS_PHASE_RETRIES,
+            entered_via: PhaseEntryKind::Normal,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PhaseEntryKind {
+    Normal,
+    RetryCurrentPhase,
+    RetryPreviousPhase,
+}
+
+impl PhaseEntryKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PhaseEntryKind::Normal => "normal",
+            PhaseEntryKind::RetryCurrentPhase => "retry_current_phase",
+            PhaseEntryKind::RetryPreviousPhase => "retry_previous_phase",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "retry_current_phase" => PhaseEntryKind::RetryCurrentPhase,
+            "retry_previous_phase" => PhaseEntryKind::RetryPreviousPhase,
+            _ => PhaseEntryKind::Normal,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowState {
     pub workflow_name: String,
     pub phase_name: String,
     pub status: WorkflowStatus,
+    pub phase_result: PhaseResult,
     pub agent_name: String,
     pub last_updated_turn_seq: Option<u32>,
+    pub retry_state: PhaseRetryState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -49,6 +124,9 @@ pub enum WorkflowTransitionKind {
     WorkflowCompleted,
     WorkflowFailed,
     WorkflowInterrupted,
+    PhaseRetryCurrent,
+    PhaseRetryPrevious,
+    PhaseRetryExhausted,
 }
 
 impl WorkflowTransitionKind {
@@ -60,6 +138,9 @@ impl WorkflowTransitionKind {
             WorkflowTransitionKind::WorkflowCompleted => "workflow_completed",
             WorkflowTransitionKind::WorkflowFailed => "workflow_failed",
             WorkflowTransitionKind::WorkflowInterrupted => "workflow_interrupted",
+            WorkflowTransitionKind::PhaseRetryCurrent => "phase_retry_current",
+            WorkflowTransitionKind::PhaseRetryPrevious => "phase_retry_previous",
+            WorkflowTransitionKind::PhaseRetryExhausted => "phase_retry_exhausted",
         }
     }
 }
@@ -83,6 +164,8 @@ pub const DEFAULT_WORKFLOW: &str = "NORMAL";
 pub const DEFAULT_PHASE: &str = "IDLE";
 pub const DEFAULT_AGENT: &str = "main";
 pub const LITE_WORKFLOW: &str = "LITE";
+pub const MAX_CURRENT_PHASE_RETRIES: u32 = 3;
+pub const MAX_PREVIOUS_PHASE_RETRIES: u32 = 3;
 
 pub fn workflow_definition(name: &str) -> Option<WorkflowDefinition> {
     match name {
@@ -114,21 +197,48 @@ pub fn start_phase_for_workflow(name: &str) -> Option<&'static str> {
     workflow_definition(name).map(|d| d.start_phase)
 }
 
-pub fn allowed_transitions(workflow: &str, phase: &str) -> Vec<&'static str> {
+pub fn previous_phase(workflow: &str, phase: &str) -> Option<&'static str> {
     match (workflow, phase) {
+        (LITE_WORKFLOW, "EXECUTE") => Some("CLARIFY"),
+        (LITE_WORKFLOW, "VALIDATE") => Some("EXECUTE"),
+        _ => None,
+    }
+}
+
+pub fn allowed_transitions(workflow: &str, phase: &str) -> Vec<&'static str> {
+    let mut transitions = match (workflow, phase) {
         (DEFAULT_WORKFLOW, "IDLE") => vec!["EXECUTE"],
         (DEFAULT_WORKFLOW, "EXECUTE") => vec!["IDLE"],
         (LITE_WORKFLOW, "CLARIFY") => vec!["EXECUTE"],
         (LITE_WORKFLOW, "EXECUTE") => vec!["VALIDATE"],
         (LITE_WORKFLOW, "VALIDATE") => vec![],
         _ => vec![],
+    };
+
+    if let Some(prev) = previous_phase(workflow, phase) {
+        if !transitions.contains(&prev) {
+            transitions.push(prev);
+        }
     }
+
+    transitions
 }
 
 pub fn can_transition(workflow: &str, from_phase: &str, to_phase: &str) -> bool {
     allowed_transitions(workflow, from_phase)
         .into_iter()
         .any(|phase| phase == to_phase)
+}
+
+pub fn can_retry_current_phase(workflow: &str, phase: &str) -> bool {
+    matches!(
+        (workflow, phase),
+        (LITE_WORKFLOW, "CLARIFY") | (LITE_WORKFLOW, "EXECUTE") | (LITE_WORKFLOW, "VALIDATE")
+    )
+}
+
+pub fn can_retry_previous_phase(workflow: &str, phase: &str) -> bool {
+    previous_phase(workflow, phase).is_some()
 }
 
 pub fn activation_marker(input: &str) -> Option<&'static str> {
@@ -196,8 +306,10 @@ impl Default for WorkflowState {
             workflow_name: DEFAULT_WORKFLOW.to_string(),
             phase_name: DEFAULT_PHASE.to_string(),
             status: WorkflowStatus::Running,
+            phase_result: PhaseResult::Pending,
             agent_name: DEFAULT_AGENT.to_string(),
             last_updated_turn_seq: None,
+            retry_state: PhaseRetryState::default(),
         }
     }
 }

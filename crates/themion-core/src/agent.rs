@@ -4,8 +4,9 @@ use crate::db::DbHandle;
 use crate::tools;
 use crate::workflow::{
     activation_marker, allowed_transitions, can_transition, normalize_workflow_name,
-    phase_instructions, start_phase_for_workflow, WorkflowState, WorkflowStatus,
-    WorkflowTransitionKind, DEFAULT_AGENT, DEFAULT_PHASE, DEFAULT_WORKFLOW, LITE_WORKFLOW,
+    phase_instructions, previous_phase, start_phase_for_workflow, PhaseEntryKind,
+    PhaseResult, PhaseRetryState, WorkflowState, WorkflowStatus, WorkflowTransitionKind, DEFAULT_AGENT,
+    DEFAULT_PHASE, DEFAULT_WORKFLOW, LITE_WORKFLOW,
 };
 use anyhow::Result;
 use serde_json::Value;
@@ -215,9 +216,39 @@ impl Agent {
                 kind,
                 trigger.as_deref(),
                 None,
+                Some(workflow.retry_state.current_phase_retries),
+                Some(workflow.retry_state.previous_phase_retries),
+                Some(workflow.retry_state.entered_via.as_str()),
             )
         })
         .await??;
+        Ok(())
+    }
+
+    fn reset_retry_state(&mut self) {
+        self.workflow_state.retry_state = PhaseRetryState::default();
+    }
+
+    async fn reset_to_default_workflow(
+        &mut self,
+        turn_id: Option<i64>,
+        turn_seq: Option<u32>,
+        trigger: Option<&str>,
+    ) -> Result<()> {
+        let from_phase = Some(self.workflow_state.phase_name.clone());
+        self.workflow_state = WorkflowState::default();
+        self.workflow_state.last_updated_turn_seq = turn_seq;
+        self.emit(AgentEvent::WorkflowStateChanged(self.workflow_state.clone()));
+        self.persist_workflow_state().await?;
+        self.record_transition(
+            turn_id,
+            turn_seq,
+            from_phase,
+            self.workflow_state.phase_name.clone(),
+            WorkflowTransitionKind::WorkflowStarted,
+            trigger,
+        )
+        .await?;
         Ok(())
     }
 
@@ -236,8 +267,10 @@ impl Agent {
         self.workflow_state.workflow_name = workflow_name.to_string();
         self.workflow_state.phase_name = start_phase.to_string();
         self.workflow_state.status = WorkflowStatus::Running;
+        self.workflow_state.phase_result = PhaseResult::Pending;
         self.workflow_state.agent_name = DEFAULT_AGENT.to_string();
         self.workflow_state.last_updated_turn_seq = turn_seq;
+        self.reset_retry_state();
         self.emit(AgentEvent::WorkflowStateChanged(self.workflow_state.clone()));
         self.persist_workflow_state().await?;
         self.record_transition(
@@ -274,7 +307,9 @@ impl Agent {
         let from_phase = self.workflow_state.phase_name.clone();
         self.workflow_state.phase_name = next_phase.to_string();
         self.workflow_state.status = WorkflowStatus::Running;
+        self.workflow_state.phase_result = PhaseResult::Pending;
         self.workflow_state.last_updated_turn_seq = turn_seq;
+        self.reset_retry_state();
         self.emit(AgentEvent::WorkflowStateChanged(self.workflow_state.clone()));
         self.persist_workflow_state().await?;
         self.record_transition(
@@ -289,17 +324,95 @@ impl Agent {
         Ok(())
     }
 
+    async fn retry_or_fail_phase(
+        &mut self,
+        turn_id: i64,
+        turn_seq: u32,
+        phase: &str,
+        trigger: &str,
+    ) -> Result<bool> {
+        if self.workflow_state.retry_state.current_phase_retries
+            < self.workflow_state.retry_state.current_phase_retry_limit
+        {
+            self.workflow_state.retry_state.current_phase_retries += 1;
+            self.workflow_state.retry_state.entered_via = PhaseEntryKind::RetryCurrentPhase;
+            self.workflow_state.status = WorkflowStatus::Running;
+            self.workflow_state.phase_result = PhaseResult::Pending;
+            self.workflow_state.last_updated_turn_seq = Some(turn_seq);
+            self.emit(AgentEvent::WorkflowStateChanged(self.workflow_state.clone()));
+            self.persist_workflow_state().await?;
+            self.record_transition(
+                Some(turn_id),
+                Some(turn_seq),
+                Some(phase.to_string()),
+                phase.to_string(),
+                WorkflowTransitionKind::PhaseRetryCurrent,
+                Some(trigger),
+            )
+            .await?;
+            return Ok(true);
+        }
+
+        if self.workflow_state.retry_state.previous_phase_retries
+            < self.workflow_state.retry_state.previous_phase_retry_limit
+        {
+            if let Some(prev) = previous_phase(&self.workflow_state.workflow_name, phase) {
+                self.workflow_state.retry_state.previous_phase_retries += 1;
+                self.workflow_state.retry_state.current_phase_retries = 0;
+                self.workflow_state.retry_state.entered_via = PhaseEntryKind::RetryPreviousPhase;
+                let from_phase = self.workflow_state.phase_name.clone();
+                self.workflow_state.phase_name = prev.to_string();
+                self.workflow_state.status = WorkflowStatus::Running;
+                self.workflow_state.phase_result = PhaseResult::Pending;
+                self.workflow_state.last_updated_turn_seq = Some(turn_seq);
+                self.emit(AgentEvent::WorkflowStateChanged(self.workflow_state.clone()));
+                self.persist_workflow_state().await?;
+                self.record_transition(
+                    Some(turn_id),
+                    Some(turn_seq),
+                    Some(from_phase),
+                    prev.to_string(),
+                    WorkflowTransitionKind::PhaseRetryPrevious,
+                    Some(trigger),
+                )
+                .await?;
+                return Ok(true);
+            }
+        }
+
+        self.workflow_state.status = WorkflowStatus::Failed;
+        self.workflow_state.last_updated_turn_seq = Some(turn_seq);
+        self.emit(AgentEvent::WorkflowStateChanged(self.workflow_state.clone()));
+        self.persist_workflow_state().await?;
+        self.record_transition(
+            Some(turn_id),
+            Some(turn_seq),
+            Some(phase.to_string()),
+            phase.to_string(),
+            WorkflowTransitionKind::PhaseRetryExhausted,
+            Some(trigger),
+        )
+        .await?;
+        Ok(false)
+    }
+
     fn build_workflow_context_messages(&self, activation_source: &str) -> Vec<Message> {
         let mut out = vec![Message {
             role: "system".to_string(),
             content: Some(format!(
-                "Workflow context: flow={} phase={} status={} agent={} activation_source={} allowed_next={}",
+                "Workflow context: flow={} phase={} status={} phase_result={} agent={} activation_source={} allowed_next={} retry_current={}/{} retry_previous={}/{} entered_via={}",
                 self.workflow_state.workflow_name,
                 self.workflow_state.phase_name,
                 self.workflow_state.status.as_str(),
+                self.workflow_state.phase_result.as_str(),
                 self.workflow_state.agent_name,
                 activation_source,
-                allowed_transitions(&self.workflow_state.workflow_name, &self.workflow_state.phase_name).join(",")
+                allowed_transitions(&self.workflow_state.workflow_name, &self.workflow_state.phase_name).join(","),
+                self.workflow_state.retry_state.current_phase_retries,
+                self.workflow_state.retry_state.current_phase_retry_limit,
+                self.workflow_state.retry_state.previous_phase_retries,
+                self.workflow_state.retry_state.previous_phase_retry_limit,
+                self.workflow_state.retry_state.entered_via.as_str(),
             )),
             tool_calls: None,
             tool_call_id: None,
@@ -348,14 +461,27 @@ impl Agent {
                 self.workflow_state.workflow_name = workflow.to_string();
                 self.workflow_state.phase_name = phase.to_string();
                 self.workflow_state.status = WorkflowStatus::Running;
+                self.workflow_state.phase_result = PhaseResult::Pending;
                 self.workflow_state.agent_name = parsed["agent"].as_str().unwrap_or(DEFAULT_AGENT).to_string();
                 self.workflow_state.last_updated_turn_seq = Some(turn_seq);
+                self.reset_retry_state();
                 Ok(true)
             }
             "set_workflow_phase" => {
                 let phase = parsed["phase"].as_str().ok_or_else(|| anyhow::anyhow!("missing phase"))?;
                 self.workflow_state.phase_name = phase.to_string();
                 self.workflow_state.status = WorkflowStatus::Running;
+                self.workflow_state.phase_result = PhaseResult::Pending;
+                self.workflow_state.last_updated_turn_seq = Some(turn_seq);
+                self.reset_retry_state();
+                Ok(true)
+            }
+            "set_phase_result" => {
+                self.workflow_state.phase_result = match parsed["phase_result"].as_str().unwrap_or("pending") {
+                    "passed" => PhaseResult::Passed,
+                    "failed" => PhaseResult::Failed,
+                    _ => PhaseResult::Pending,
+                };
                 self.workflow_state.last_updated_turn_seq = Some(turn_seq);
                 Ok(true)
             }
@@ -397,8 +523,10 @@ impl Agent {
         {
             self.workflow_state.phase_name = "EXECUTE".to_string();
             self.workflow_state.status = WorkflowStatus::Running;
+            self.workflow_state.phase_result = PhaseResult::Pending;
             self.workflow_state.agent_name = DEFAULT_AGENT.to_string();
             self.workflow_state.last_updated_turn_seq = Some(turn_seq);
+            self.reset_retry_state();
             self.emit(AgentEvent::WorkflowStateChanged(self.workflow_state.clone()));
             self.persist_workflow_state().await?;
         }
@@ -557,6 +685,15 @@ impl Agent {
                             "CLARIFY" => {
                                 let content = response.content.as_deref().unwrap_or_default().to_ascii_lowercase();
                                 if content.contains("?") || content.contains("need clarification") || content.contains("unclear") {
+                                    if self.retry_or_fail_phase(turn_id, turn_seq, "CLARIFY", "engine_rule").await? {
+                                        if self.workflow_state.phase_name == "CLARIFY" && self.workflow_state.retry_state.entered_via == PhaseEntryKind::RetryCurrentPhase {
+                                            continue;
+                                        }
+                                    }
+                                    if self.workflow_state.status == WorkflowStatus::Failed {
+                                        turn_end_reason = "workflow_failed".to_string();
+                                        break;
+                                    }
                                     self.workflow_state.status = WorkflowStatus::WaitingUser;
                                     self.workflow_state.last_updated_turn_seq = Some(turn_seq);
                                     self.emit(AgentEvent::WorkflowStateChanged(self.workflow_state.clone()));
@@ -573,41 +710,53 @@ impl Agent {
                                     turn_end_reason = "phase_waiting_user".to_string();
                                     break;
                                 }
+                                self.workflow_state.phase_result = PhaseResult::Passed;
+                                self.persist_workflow_state().await?;
                                 self.set_phase("EXECUTE", Some(turn_id), Some(turn_seq), Some("engine_rule"))
                                     .await?;
                                 continue;
                             }
                             "EXECUTE" => {
+                                let content = response.content.as_deref().unwrap_or_default().to_ascii_lowercase();
+                                if content.contains("cannot continue") || content.contains("blocked") || content.contains("failed") {
+                                    if self.retry_or_fail_phase(turn_id, turn_seq, "EXECUTE", "model_completion").await? {
+                                        continue;
+                                    }
+                                    turn_end_reason = "workflow_failed".to_string();
+                                    break;
+                                }
+                                self.workflow_state.phase_result = PhaseResult::Passed;
+                                self.persist_workflow_state().await?;
                                 self.set_phase("VALIDATE", Some(turn_id), Some(turn_seq), Some("engine_rule"))
                                     .await?;
                                 continue;
                             }
                             "VALIDATE" => {
                                 let content = response.content.as_deref().unwrap_or_default().to_ascii_lowercase();
-                                self.workflow_state.status = if content.contains("fail") {
+                                if content.contains("fail") {
+                                    self.workflow_state.phase_result = PhaseResult::Failed;
+                                    self.persist_workflow_state().await?;
+                                    if self.retry_or_fail_phase(turn_id, turn_seq, "VALIDATE", "model_completion").await? {
+                                        continue;
+                                    }
                                     turn_end_reason = "workflow_failed".to_string();
-                                    WorkflowStatus::Failed
-                                } else {
-                                    turn_end_reason = "workflow_completed".to_string();
-                                    WorkflowStatus::Completed
-                                };
+                                    break;
+                                }
+                                self.workflow_state.phase_result = PhaseResult::Passed;
+                                self.workflow_state.status = WorkflowStatus::Completed;
                                 self.workflow_state.last_updated_turn_seq = Some(turn_seq);
                                 self.emit(AgentEvent::WorkflowStateChanged(self.workflow_state.clone()));
                                 self.persist_workflow_state().await?;
-                                let kind = if self.workflow_state.status == WorkflowStatus::Failed {
-                                    WorkflowTransitionKind::WorkflowFailed
-                                } else {
-                                    WorkflowTransitionKind::WorkflowCompleted
-                                };
                                 self.record_transition(
                                     Some(turn_id),
                                     Some(turn_seq),
                                     Some("VALIDATE".to_string()),
                                     "VALIDATE".to_string(),
-                                    kind,
+                                    WorkflowTransitionKind::WorkflowCompleted,
                                     Some("model_completion"),
                                 )
                                 .await?;
+                                turn_end_reason = "workflow_completed".to_string();
                                 break;
                             }
                             _ => break,
@@ -632,8 +781,8 @@ impl Agent {
                 self.emit(AgentEvent::ToolEnd);
                 tool_calls += 1;
 
+                let old_phase = self.workflow_state.phase_name.clone();
                 if self.apply_workflow_tool_result(&tc.function.name, &result, turn_seq)? {
-                    let old_phase = self.workflow_state.phase_name.clone();
                     let parsed: Value = serde_json::from_str(&result).unwrap_or_default();
                     if tc.function.name == "set_workflow" {
                         self.persist_workflow_state().await?;
@@ -657,6 +806,8 @@ impl Agent {
                             Some("tool_result"),
                         )
                         .await?;
+                    } else if tc.function.name == "set_phase_result" {
+                        self.persist_workflow_state().await?;
                     } else if tc.function.name == "complete_workflow" {
                         self.persist_workflow_state().await?;
                         let kind = if self.workflow_state.status == WorkflowStatus::Failed {
@@ -692,14 +843,35 @@ impl Agent {
                     tokio::task::spawn_blocking(move || db.append_message(turn_id, sid, seq, &msg, &workflow))
                         .await??;
                 }
+
+                if self.workflow_state.status == WorkflowStatus::Completed {
+                    turn_end_reason = "workflow_completed".to_string();
+                    break;
+                }
+                if self.workflow_state.status == WorkflowStatus::Failed {
+                    turn_end_reason = "workflow_failed".to_string();
+                    break;
+                }
             }
 
-            if matches!(self.workflow_state.status, WorkflowStatus::Completed | WorkflowStatus::Failed) {
+            if self.workflow_state.status == WorkflowStatus::Completed {
+                turn_end_reason = "workflow_completed".to_string();
+                break;
+            }
+            if self.workflow_state.status == WorkflowStatus::Failed {
+                turn_end_reason = "workflow_failed".to_string();
                 break;
             }
         }
 
-        if self.workflow_state.workflow_name == DEFAULT_WORKFLOW {
+        if self.workflow_state.status == WorkflowStatus::Completed {
+            self.reset_to_default_workflow(
+                Some(turn_id),
+                Some(turn_seq),
+                Some("workflow_completion"),
+            )
+            .await?;
+        } else if self.workflow_state.workflow_name == DEFAULT_WORKFLOW {
             let from_phase = self.workflow_state.phase_name.clone();
             self.workflow_state.phase_name = DEFAULT_PHASE.to_string();
             self.workflow_state.status = WorkflowStatus::Completed;
@@ -713,6 +885,12 @@ impl Agent {
                 self.workflow_state.phase_name.clone(),
                 WorkflowTransitionKind::WorkflowCompleted,
                 Some("model_completion"),
+            )
+            .await?;
+            self.reset_to_default_workflow(
+                Some(turn_id),
+                Some(turn_seq),
+                Some("workflow_completion"),
             )
             .await?;
         }

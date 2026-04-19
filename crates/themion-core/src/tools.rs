@@ -1,7 +1,8 @@
 use crate::db::{DbHandle, RecallArgs, RecallDirection, SearchArgs};
 use crate::workflow::{
-    allowed_transitions, can_transition, normalize_workflow_name, phase_instructions,
-    start_phase_for_workflow, WorkflowState, WorkflowStatus, DEFAULT_AGENT,
+    allowed_transitions, can_retry_current_phase, can_retry_previous_phase, can_transition,
+    normalize_workflow_name, phase_instructions, previous_phase, start_phase_for_workflow,
+    PhaseResult, WorkflowState, WorkflowStatus, DEFAULT_AGENT,
 };
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -115,7 +116,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "get_workflow_state",
-                "description": "Return the current workflow, phase, status, and allowed next transitions.",
+                "description": "Return the current workflow, phase, status, phase result, and allowed next transitions.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -156,8 +157,23 @@ pub fn tool_definitions() -> Value {
         {
             "type": "function",
             "function": {
+                "name": "set_phase_result",
+                "description": "Set the current phase result to passed or failed before transitioning or completing the workflow.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "result": { "type": "string", "enum": ["passed", "failed"] },
+                        "reason": { "type": "string", "description": "Reason for this phase result." }
+                    },
+                    "required": ["result"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "complete_workflow",
-                "description": "Mark the current workflow as passed/completed or failed.",
+                "description": "Mark the current workflow as passed/completed or failed. Completed requires current phase_result=passed.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -298,9 +314,14 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 "workflow": state.workflow_name,
                 "phase": state.phase_name,
                 "status": state.status,
+                "phase_result": state.phase_result,
                 "agent": state.agent_name,
                 "last_updated_turn_seq": state.last_updated_turn_seq,
+                "retry_state": state.retry_state,
                 "allowed_next_phases": allowed_transitions(&state.workflow_name, &state.phase_name),
+                "allowed_retry_current_phase": can_retry_current_phase(&state.workflow_name, &state.phase_name),
+                "allowed_retry_previous_phase": can_retry_previous_phase(&state.workflow_name, &state.phase_name),
+                "previous_phase": previous_phase(&state.workflow_name, &state.phase_name),
                 "phase_instructions": phase_instructions(&state.workflow_name, &state.phase_name),
             })
             .to_string())
@@ -317,8 +338,10 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 "workflow": workflow,
                 "phase": start_phase,
                 "status": WorkflowStatus::Running,
+                "phase_result": PhaseResult::Pending,
                 "agent": DEFAULT_AGENT,
                 "reason": args["reason"].as_str(),
+                "retry_state": WorkflowState::default().retry_state,
             })
             .to_string())
         }
@@ -330,6 +353,9 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             let phase = args["phase"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing phase"))?;
+            if state.phase_result != PhaseResult::Passed {
+                anyhow::bail!("current phase result must be passed before transitioning phases");
+            }
             if !can_transition(&state.workflow_name, &state.phase_name, phase) {
                 anyhow::bail!(
                     "invalid phase transition: {}:{} -> {}",
@@ -342,8 +368,31 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 "workflow": state.workflow_name,
                 "phase": phase,
                 "status": WorkflowStatus::Running,
+                "phase_result": PhaseResult::Pending,
                 "agent": state.agent_name,
                 "reason": args["reason"].as_str(),
+                "retry_state": WorkflowState::default().retry_state,
+            })
+            .to_string())
+        }
+        "set_phase_result" => {
+            let state = ctx
+                .workflow_state
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("workflow state unavailable"))?;
+            let result = match args["result"].as_str().ok_or_else(|| anyhow::anyhow!("missing result"))? {
+                "passed" => PhaseResult::Passed,
+                "failed" => PhaseResult::Failed,
+                other => anyhow::bail!("invalid result: {other}"),
+            };
+            Ok(json!({
+                "workflow": state.workflow_name,
+                "phase": state.phase_name,
+                "status": state.status,
+                "phase_result": result,
+                "agent": state.agent_name,
+                "reason": args["reason"].as_str(),
+                "retry_state": state.retry_state,
             })
             .to_string())
         }
@@ -356,7 +405,12 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing outcome"))?;
             let status = match outcome {
-                "completed" => WorkflowStatus::Completed,
+                "completed" => {
+                    if state.phase_result != PhaseResult::Passed {
+                        anyhow::bail!("current phase result must be passed before completing workflow");
+                    }
+                    WorkflowStatus::Completed
+                }
                 "failed" => WorkflowStatus::Failed,
                 _ => anyhow::bail!("invalid outcome: {outcome}"),
             };
@@ -364,8 +418,10 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 "workflow": state.workflow_name,
                 "phase": state.phase_name,
                 "status": status,
+                "phase_result": state.phase_result,
                 "agent": state.agent_name,
                 "reason": args["reason"].as_str(),
+                "retry_state": state.retry_state,
             })
             .to_string())
         }
