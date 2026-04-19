@@ -298,7 +298,9 @@ pub fn phase_instructions(workflow: &str, phase: &str) -> Vec<&'static str> {
             "Run a narrow smoke check and return pass or fail.",
             "Do not silently continue implementation work after a failed validation.",
         ],
-        (DEFAULT_WORKFLOW, "EXECUTE") => vec!["Solve the user's request directly using available tools as needed."],
+        (DEFAULT_WORKFLOW, "EXECUTE") => {
+            vec!["Solve the user's request directly using available tools as needed."]
+        }
         _ => vec![],
     }
 }

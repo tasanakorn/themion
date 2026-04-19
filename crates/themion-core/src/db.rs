@@ -127,10 +127,7 @@ fn ensure_column(conn: &Connection, table: &str, col: &str, decl: &str) -> Resul
     let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
     let exists = cols.filter_map(|r| r.ok()).any(|name| name == col);
     if !exists {
-        conn.execute(
-            &format!("ALTER TABLE {table} ADD COLUMN {col} {decl}"),
-            [],
-        )?;
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {col} {decl}"), [])?;
     }
     Ok(())
 }
@@ -142,14 +139,39 @@ fn init_schema(conn: &Connection, fts5: bool) -> Result<()> {
     ensure_column(conn, "agent_sessions", "workflow_status", "TEXT")?;
     ensure_column(conn, "agent_sessions", "current_phase_result", "TEXT")?;
     ensure_column(conn, "agent_sessions", "current_agent", "TEXT")?;
-    ensure_column(conn, "agent_sessions", "workflow_last_updated_turn_seq", "INTEGER")?;
+    ensure_column(
+        conn,
+        "agent_sessions",
+        "workflow_last_updated_turn_seq",
+        "INTEGER",
+    )?;
     ensure_column(conn, "agent_sessions", "workflow_started_at", "INTEGER")?;
     ensure_column(conn, "agent_sessions", "workflow_updated_at", "INTEGER")?;
     ensure_column(conn, "agent_sessions", "workflow_completed_at", "INTEGER")?;
-    ensure_column(conn, "agent_sessions", "current_phase_retry_count", "INTEGER")?;
-    ensure_column(conn, "agent_sessions", "current_phase_retry_limit", "INTEGER")?;
-    ensure_column(conn, "agent_sessions", "previous_phase_retry_count", "INTEGER")?;
-    ensure_column(conn, "agent_sessions", "previous_phase_retry_limit", "INTEGER")?;
+    ensure_column(
+        conn,
+        "agent_sessions",
+        "current_phase_retry_count",
+        "INTEGER",
+    )?;
+    ensure_column(
+        conn,
+        "agent_sessions",
+        "current_phase_retry_limit",
+        "INTEGER",
+    )?;
+    ensure_column(
+        conn,
+        "agent_sessions",
+        "previous_phase_retry_count",
+        "INTEGER",
+    )?;
+    ensure_column(
+        conn,
+        "agent_sessions",
+        "previous_phase_retry_limit",
+        "INTEGER",
+    )?;
     ensure_column(conn, "agent_sessions", "phase_entered_via", "TEXT")?;
     ensure_column(conn, "agent_turns", "workflow_name", "TEXT")?;
     ensure_column(conn, "agent_turns", "phase_start", "TEXT")?;
@@ -158,13 +180,33 @@ fn init_schema(conn: &Connection, fts5: bool) -> Result<()> {
     ensure_column(conn, "agent_turns", "phase_result_at_start", "TEXT")?;
     ensure_column(conn, "agent_turns", "workflow_status_at_end", "TEXT")?;
     ensure_column(conn, "agent_turns", "phase_result_at_end", "TEXT")?;
-    ensure_column(conn, "agent_turns", "workflow_continues_after_turn", "INTEGER")?;
+    ensure_column(
+        conn,
+        "agent_turns",
+        "workflow_continues_after_turn",
+        "INTEGER",
+    )?;
     ensure_column(conn, "agent_turns", "turn_end_reason", "TEXT")?;
     ensure_column(conn, "agent_messages", "workflow_name", "TEXT")?;
     ensure_column(conn, "agent_messages", "phase_name", "TEXT")?;
-    ensure_column(conn, "agent_workflow_transitions", "retry_current_count", "INTEGER")?;
-    ensure_column(conn, "agent_workflow_transitions", "retry_previous_count", "INTEGER")?;
-    ensure_column(conn, "agent_workflow_transitions", "phase_entered_via", "TEXT")?;
+    ensure_column(
+        conn,
+        "agent_workflow_transitions",
+        "retry_current_count",
+        "INTEGER",
+    )?;
+    ensure_column(
+        conn,
+        "agent_workflow_transitions",
+        "retry_previous_count",
+        "INTEGER",
+    )?;
+    ensure_column(
+        conn,
+        "agent_workflow_transitions",
+        "phase_entered_via",
+        "TEXT",
+    )?;
     if fts5 {
         conn.execute_batch(SCHEMA_FTS5)?;
     }
@@ -185,7 +227,10 @@ fn migrate_db_file(old_path: &Path, new_path: &Path) -> Result<()> {
 
     let rename_attempt = || -> std::io::Result<()> {
         std::fs::rename(old_path, new_path)?;
-        for (old_sidecar, new_sidecar) in sidecar_paths(old_path).into_iter().zip(sidecar_paths(new_path)) {
+        for (old_sidecar, new_sidecar) in sidecar_paths(old_path)
+            .into_iter()
+            .zip(sidecar_paths(new_path))
+        {
             if old_sidecar.exists() {
                 std::fs::rename(old_sidecar, new_sidecar)?;
             }
@@ -198,7 +243,10 @@ fn migrate_db_file(old_path: &Path, new_path: &Path) -> Result<()> {
     }
 
     std::fs::copy(old_path, new_path)?;
-    for (old_sidecar, new_sidecar) in sidecar_paths(old_path).into_iter().zip(sidecar_paths(new_path)) {
+    for (old_sidecar, new_sidecar) in sidecar_paths(old_path)
+        .into_iter()
+        .zip(sidecar_paths(new_path))
+    {
         if old_sidecar.exists() {
             std::fs::copy(&old_sidecar, &new_sidecar)?;
         }
@@ -355,7 +403,8 @@ impl DbHandle {
             return Ok(None);
         }
         Ok(Some(crate::workflow::WorkflowState {
-            workflow_name: workflow_name.unwrap_or_else(|| crate::workflow::DEFAULT_WORKFLOW.to_string()),
+            workflow_name: workflow_name
+                .unwrap_or_else(|| crate::workflow::DEFAULT_WORKFLOW.to_string()),
             phase_name: phase_name.unwrap_or_else(|| crate::workflow::DEFAULT_PHASE.to_string()),
             status: crate::workflow::WorkflowStatus::from_str(
                 workflow_status.as_deref().unwrap_or("running"),
@@ -367,11 +416,19 @@ impl DbHandle {
             last_updated_turn_seq: row.get::<_, Option<i64>>(5)?.map(|v| v as u32),
             retry_state: crate::workflow::PhaseRetryState {
                 current_phase_retries: row.get::<_, Option<i64>>(6)?.unwrap_or(0) as u32,
-                current_phase_retry_limit: row.get::<_, Option<i64>>(7)?.unwrap_or(crate::workflow::MAX_CURRENT_PHASE_RETRIES as i64) as u32,
+                current_phase_retry_limit: row
+                    .get::<_, Option<i64>>(7)?
+                    .unwrap_or(crate::workflow::MAX_CURRENT_PHASE_RETRIES as i64)
+                    as u32,
                 previous_phase_retries: row.get::<_, Option<i64>>(8)?.unwrap_or(0) as u32,
-                previous_phase_retry_limit: row.get::<_, Option<i64>>(9)?.unwrap_or(crate::workflow::MAX_PREVIOUS_PHASE_RETRIES as i64) as u32,
+                previous_phase_retry_limit: row
+                    .get::<_, Option<i64>>(9)?
+                    .unwrap_or(crate::workflow::MAX_PREVIOUS_PHASE_RETRIES as i64)
+                    as u32,
                 entered_via: crate::workflow::PhaseEntryKind::from_str(
-                    row.get::<_, Option<String>>(10)?.as_deref().unwrap_or("normal")
+                    row.get::<_, Option<String>>(10)?
+                        .as_deref()
+                        .unwrap_or("normal"),
                 ),
             },
         }))

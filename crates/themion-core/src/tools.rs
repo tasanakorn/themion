@@ -309,7 +309,10 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             }
         }
         "workflow_get_state" | "get_workflow_state" => {
-            let state = ctx.workflow_state.clone().unwrap_or_else(WorkflowState::default);
+            let state = ctx
+                .workflow_state
+                .clone()
+                .unwrap_or_else(WorkflowState::default);
             Ok(json!({
                 "workflow": state.workflow_name,
                 "phase": state.phase_name,
@@ -380,7 +383,10 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 .workflow_state
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("workflow state unavailable"))?;
-            let result = match args["result"].as_str().ok_or_else(|| anyhow::anyhow!("missing result"))? {
+            let result = match args["result"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing result"))?
+            {
                 "passed" => PhaseResult::Passed,
                 "failed" => PhaseResult::Failed,
                 "user_feedback_required" => PhaseResult::UserFeedbackRequired,
@@ -408,7 +414,9 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             let status = match outcome {
                 "completed" => {
                     if state.phase_result != PhaseResult::Passed {
-                        anyhow::bail!("current phase result must be passed before completing workflow");
+                        anyhow::bail!(
+                            "current phase result must be passed before completing workflow"
+                        );
                     }
                     WorkflowStatus::Completed
                 }

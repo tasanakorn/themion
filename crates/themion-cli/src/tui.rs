@@ -1,6 +1,5 @@
 use crate::config::{save_profiles, Config, ProfileConfig};
 use crate::{format_stats, Session};
-use themion_core::ModelInfo;
 use crossterm::{
     event::{
         self, DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode,
@@ -23,10 +22,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use themion_core::agent::{Agent, AgentEvent, TurnCancellation, TurnStats};
-use themion_core::workflow::WorkflowState;
 use themion_core::client::ChatClient;
 use themion_core::client_codex::{ApiCallRateLimitReport, CodexClient};
 use themion_core::db::DbHandle;
+use themion_core::workflow::WorkflowState;
+use themion_core::ModelInfo;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -147,7 +147,6 @@ pub struct App<'a> {
     workflow_state: WorkflowState,
     active_turn_cancellation: Option<TurnCancellation>,
 }
-
 
 impl<'a> App<'a> {
     pub fn new(
@@ -369,7 +368,8 @@ impl<'a> App<'a> {
                 self.streaming_idx = None;
                 self.set_agent_activity(AgentActivity::Finishing);
                 self.clear_agent_activity();
-                let interrupted = self.workflow_state.status == themion_core::workflow::WorkflowStatus::Interrupted;
+                let interrupted = self.workflow_state.status
+                    == themion_core::workflow::WorkflowStatus::Interrupted;
                 let stats_text = format_stats(&stats);
                 let stats_text = stats_text
                     .strip_prefix("[stats: ")
@@ -722,7 +722,10 @@ impl<'a> App<'a> {
 
         let app_tx_done = app_tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = agent.run_loop_with_cancellation(&text, Some(cancellation)).await {
+            if let Err(e) = agent
+                .run_loop_with_cancellation(&text, Some(cancellation))
+                .await
+            {
                 let _ = app_tx_done.send(AppEvent::Agent(AgentEvent::AssistantText(format!(
                     "error: {e}"
                 ))));
@@ -745,7 +748,7 @@ fn format_human_count(n: u64) -> String {
 fn build_context_statusline(last_ctx_tokens: u64, info: Option<&ModelInfo>) -> String {
     let max_part = info
         .and_then(|info| info.max_context_window.or(info.context_window))
-         .map(format_human_count)
+        .map(format_human_count)
         .unwrap_or_else(|| "?".to_string());
     format!("{}/{}", format_human_count(last_ctx_tokens), max_part)
 }
@@ -941,7 +944,7 @@ fn make_input<'a>() -> TextArea<'a> {
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray))
-                        .padding(Padding::left(1)),
+            .padding(Padding::left(1)),
     );
     ta.set_cursor_line_style(Style::default());
     ta.set_placeholder_text(
@@ -1197,12 +1200,10 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
     let db = match dirs::data_dir() {
-        Some(d) => {
-            themion_core::db::open_default_in_data_dir(&d).unwrap_or_else(|e| {
-                eprintln!("warning: history persistence disabled: {}", e);
-                DbHandle::open_in_memory().expect("in-memory db")
-            })
-        }
+        Some(d) => themion_core::db::open_default_in_data_dir(&d).unwrap_or_else(|e| {
+            eprintln!("warning: history persistence disabled: {}", e);
+            DbHandle::open_in_memory().expect("in-memory db")
+        }),
         None => {
             eprintln!("warning: history persistence disabled (no data dir)");
             DbHandle::open_in_memory().expect("in-memory db")
