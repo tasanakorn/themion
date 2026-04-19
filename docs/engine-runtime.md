@@ -27,7 +27,7 @@ A single user turn follows this shape:
    - the base system prompt
    - predefined built-in coding guardrails
    - predefined Codex CLI web-search instruction
-- injected contextual instructions such as `AGENTS.md`
+   - injected contextual instructions such as `AGENTS.md`
    - workflow context and phase instructions
    - an optional history recall hint
    - the recent conversation window
@@ -58,6 +58,7 @@ The built-in topics are:
 - prefer the simplest solution that cleanly solves the task
 - make targeted changes and avoid unrelated refactors
 - run the narrowest useful validation and report the result
+- do not create commits or branches unless explicitly asked, and when the user explicitly asks for a commit, use a useful brief summary of the change as the commit message
 
 This layer remains separate from both the base system prompt and repository-local instruction files.
 
@@ -470,7 +471,7 @@ The core crate is responsible for:
 A useful way to think about Themion's engine/runtime is:
 
 - **system prompt** defines default assistant behavior
-- **predefined coding guardrails** add a built-in coding baseline before repository-local instructions
+- **predefined coding guardrails** add a built-in coding baseline before repository-local instructions, including the rule that commits and branches require an explicit user request and that user-requested commits should use a useful brief summary as the commit message
 - **predefined Codex CLI web-search instruction** points the agent to Codex CLI for focused external research when local information is insufficient
 - **`AGENTS.md` and related instructions** define repository-local behavior
 - **workflow context** tells the model what state machine it is currently operating inside
