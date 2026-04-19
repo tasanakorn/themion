@@ -13,6 +13,8 @@
 
 themion is a Rust-powered AI agent with a full-featured TUI. Give it a task in plain English and watch it reason, call tools, and produce results — all from your terminal.
 
+> After 0.2.0, themion will use themion to help develop itself.
+
 ## Features
 
 - **First-class Codex login** — Sign in with `/login codex` and use your ChatGPT / Codex subscription directly, without managing an API key
@@ -24,12 +26,6 @@ themion is a Rust-powered AI agent with a full-featured TUI. Give it a task in p
 - **Flexible backends** — Codex is the recommended default, with OpenRouter and local OpenAI-compatible servers like llama.cpp, Ollama, or LM Studio as alternatives
 - **Print mode** — Pipe a single prompt and get a result; perfect for scripting
 - **Single binary** — Ships as one statically-linked executable with no runtime dependencies
-
-## Version
-
-Current version: **0.2.0**
-
-After `0.2.0`, themion will use themion to help develop itself.
 
 ## Installation
 
@@ -174,23 +170,11 @@ No API key needed — just point `endpoint` at any running OpenAI-compatible ser
 
 ## Architecture
 
-```
-crates/
-├── themion-core/
-│   ├── agent.rs    # Agent loop: LLM → tools → repeat (windowed context, SQLite history)
-│   ├── client.rs   # Chat backend abstraction + OpenRouter/OpenAI-compatible client
-│   ├── client_codex.rs # Codex Responses API client (OAuth + streaming)
-│   └── tools.rs    # Tool registry: bash, read_file, write_file, list_directory, recall/search history
-└── themion-cli/
-    ├── main.rs     # Entry point — TUI mode or print mode
-    ├── tui.rs      # Ratatui TUI: layout, events, spinner animation
-    ├── login_codex.rs # `/login codex` device flow
-    └── config.rs   # XDG config file, profile management
-```
+For architecture and runtime details, see:
 
-The agent loop runs up to 10 iterations per turn: push user message → call LLM → execute any tool calls → feed results back → repeat until no more tool calls → return final response.
-
-Context is managed via a sliding window of the last 5 turns. Earlier turns are persisted to SQLite and retrievable via `recall_history` and `search_history` tools that the model can call itself.
+- [`docs/architecture.md`](docs/architecture.md)
+- [`docs/engine-runtime.md`](docs/engine-runtime.md)
+- [`docs/codex-integration-guide.md`](docs/codex-integration-guide.md)
 
 ## Adding a Tool
 

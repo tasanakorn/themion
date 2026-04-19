@@ -2,8 +2,8 @@
 
 ## Architecture
 
-- [architecture.md](architecture.md) — component map, harness loop, context windowing, tool dispatch, TUI layout, build profiles.
-- [core-ai-engine-loop.md](core-ai-engine-loop.md) — detailed walkthrough of prompt inputs, `AGENTS.md` injection, context building, tool-calling flow, workflow runtime behavior, and SQLite session storage.
+- [architecture.md](architecture.md) — workspace structure, core design philosophy, component map, harness loop, context windowing, streaming, tools, persistent history, and TUI behavior.
+- [engine-runtime.md](engine-runtime.md) — detailed walkthrough of prompt inputs, `AGENTS.md` injection, context building, tool-calling flow, workflow runtime behavior, and SQLite session storage.
 - [codex-integration-guide.md](codex-integration-guide.md) — Codex provider integration contract, endpoint usage, auth, `/models` metadata parsing, `/responses` translation, and rate-limit extraction behavior.
 
 ## Product Requirements Documents (PRDs)
@@ -31,4 +31,4 @@
 
 ## Roadmap note
 
-After `v0.2.0`, themion will use themion to help develop itself.
+After `0.2.0`, themion will use themion to help develop itself.
