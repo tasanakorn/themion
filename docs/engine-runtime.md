@@ -1,6 +1,6 @@
 # Engine Runtime
 
-This document explains how Themion's core harness/runtime works: how prompt inputs are assembled, how context is built, how tool calls are executed, and how session history is stored.
+This document explains how Themion's core harness/runtime works: how prompt inputs are assembled, how context is built, how tool calls are executed, how workflow state progresses, and how session history is stored.
 
 ## Scope
 
@@ -13,6 +13,7 @@ Relevant areas:
 - `crates/themion-core/src/client_codex.rs`
 - `crates/themion-core/src/tools.rs`
 - `crates/themion-core/src/db.rs`
+- `crates/themion-core/src/workflow.rs`
 - `crates/themion-cli/src/` for session startup and UI integration
 
 ## High-level flow
@@ -25,13 +26,15 @@ A single user turn follows this shape:
 4. The harness builds the model input from:
    - the base system prompt
    - injected contextual instructions such as `AGENTS.md`
+   - workflow context and phase instructions
    - an optional history recall hint
    - the recent conversation window
 5. The active backend streams the assistant response.
 6. If the model requests tools, the harness executes them and appends tool results to the conversation.
 7. The harness calls the model again with the updated conversation.
-8. This repeats until the model returns a normal assistant response with no more tool calls, or the loop limit is reached.
-9. The turn is finalized in SQLite with message and token metadata.
+8. Workflow tools may also inspect or mutate the current workflow state between model calls.
+9. This repeats until the model returns a normal assistant response with no more tool calls, or the loop limit is reached.
+10. The turn is finalized in SQLite with message, workflow, and token metadata.
 
 ## Prompt inputs
 
@@ -55,7 +58,32 @@ That separation matters because:
 
 In practice, the model sees both the base system prompt and the injected contextual instructions, but they remain separate prompt components.
 
-### 3. Recall hint for trimmed history
+### 3. Workflow context and phase instructions
+
+Workflow runtime state is injected as another separate prompt component.
+
+The runtime includes a compact workflow summary such as:
+
+- active workflow name
+- current phase
+- workflow status
+- current phase result
+- activation source
+- allowed next phases
+- retry counters and limits
+- phase entry kind
+
+For example, the engine injects a line in this shape:
+
+> Workflow context: flow=LITE phase=CLARIFY status=running phase_result=pending agent=main activation_source=user_input allowed_next=EXECUTE retry_current=0/3 retry_previous=0/3 entered_via=normal
+
+The runtime also injects phase-specific guidance from `workflow.rs`. For the built-in `LITE` workflow:
+
+- `CLARIFY` tells the model to produce a compact brief, state assumptions, and ask only when ambiguity is genuinely blocking
+- `EXECUTE` tells the model to implement the smallest working slice and keep scope narrow
+- `VALIDATE` tells the model to check success criteria and return pass or fail
+
+### 4. Recall hint for trimmed history
 
 When the in-memory conversation is longer than the configured context window, the harness adds a synthetic system message explaining that earlier turns are still available in persistent history.
 
@@ -86,6 +114,7 @@ For each model request, the harness constructs a smaller prompt window. Conceptu
 ```text
 [system prompt]
 [injected contextual instructions, e.g. AGENTS.md]
+[workflow context + phase instructions]
 [recall hint, if older turns were omitted]
 [recent turns only]
 ```
@@ -98,6 +127,109 @@ This design gives a few benefits:
 - stable prompt size
 - recoverability of old context through explicit tool use
 
+## Workflow runtime
+
+Themion has explicit workflow and phase runtime state, separate from plain conversational history.
+
+### Built-in workflows
+
+The current built-in workflows are:
+
+- `NORMAL`
+  - start phase: `EXECUTE`
+  - used for the default one-turn direct execution path
+- `LITE`
+  - start phase: `CLARIFY`
+  - uses a compressed `CLARIFY -> EXECUTE -> VALIDATE` flow with retry-aware recovery
+
+Sessions still default to `NORMAL`, and the runtime may return to `NORMAL` / `IDLE` behavior after a workflow completes.
+
+### Workflow state shape
+
+The runtime tracks state including:
+
+- workflow name
+- phase name
+- workflow status: `running`, `waiting_user`, `completed`, `failed`, or `interrupted`
+- phase result: `pending`, `passed`, or `failed`
+- agent label
+- last updated turn sequence
+- retry state
+  - current-phase retries and limit
+  - previous-phase retries and limit
+  - how the phase was entered: `normal`, `retry_current_phase`, or `retry_previous_phase`
+
+### Workflow control tools
+
+Workflow state is model-visible through dedicated tools:
+
+- `workflow_get_state`
+- `workflow_set_active`
+- `workflow_set_phase`
+- `workflow_set_phase_result`
+- `workflow_complete`
+
+Important runtime rules:
+
+- `workflow_set_active` always resets the phase to that workflow's start phase
+- `workflow_set_phase` is validated against the active workflow's allowed transitions
+- `workflow_set_phase` requires the current `phase_result` to be `passed`
+- `workflow_complete` with outcome `completed` also requires current `phase_result=passed`
+- runtime validation stays authoritative even when the model requests a change
+
+`workflow_get_state` returns not only workflow and phase, but also retry information, previous phase info, phase instructions, and allowed next phases.
+
+## Workflow state diagram
+
+The built-in workflow graph is small enough to document directly.
+
+```mermaid
+stateDiagram-v2
+    [*] --> NORMAL_IDLE: session start / completed default turn
+
+    state "NORMAL" as NORMAL {
+        NORMAL_IDLE: IDLE
+        NORMAL_EXECUTE: EXECUTE
+        NORMAL_IDLE --> NORMAL_EXECUTE: user turn starts
+        NORMAL_EXECUTE --> NORMAL_IDLE: turn completes
+    }
+
+    NORMAL_IDLE --> LITE_CLARIFY: activate LITE
+    NORMAL_EXECUTE --> LITE_CLARIFY: workflow_set_active(LITE)
+
+    state "LITE" as LITE {
+        LITE_CLARIFY: CLARIFY
+        LITE_EXECUTE: EXECUTE
+        LITE_VALIDATE: VALIDATE
+
+        LITE_CLARIFY --> LITE_EXECUTE: phase_result=passed\nworkflow_set_phase(EXECUTE)
+        LITE_CLARIFY --> LITE_CLARIFY: retry current\nup to 3
+        LITE_CLARIFY --> WAITING_USER: blocking ambiguity
+
+        WAITING_USER --> LITE_CLARIFY: next user input resumes
+
+        LITE_EXECUTE --> LITE_VALIDATE: phase_result=passed\nworkflow_set_phase(VALIDATE)
+        LITE_EXECUTE --> LITE_EXECUTE: retry current\nup to 3
+        LITE_EXECUTE --> LITE_CLARIFY: retry previous\nup to 3
+
+        LITE_VALIDATE --> COMPLETED: phase_result=passed\nworkflow_complete(completed)
+        LITE_VALIDATE --> LITE_VALIDATE: retry current\nup to 3
+        LITE_VALIDATE --> LITE_EXECUTE: retry previous\nup to 3
+    }
+
+    COMPLETED --> NORMAL_IDLE: future turns use default flow
+    WAITING_USER --> [*]: turn ends while workflow stays active
+```
+
+### Diagram notes
+
+- `NORMAL` is the default runtime path. In practice it moves into `EXECUTE` for active work and back to idle when the turn ends.
+- Activating `LITE` always enters `CLARIFY`; phase names do not carry across workflow switches.
+- `waiting_user` is a workflow status pause, not a normal phase in the `LITE` sequence.
+- The model must set `workflow_set_phase_result(result="passed")` before a valid `workflow_set_phase(...)` or successful `workflow_complete(outcome="completed")`.
+- Retry behavior is bounded separately for current-phase and previous-phase recovery, each with a limit of `3`.
+- On retry exhaustion, the runtime marks the workflow failed rather than looping indefinitely.
+
 ## Harness loop behavior
 
 Each `run_loop(user_input)` call handles one user-submitted turn, including any tool round-trips triggered during that turn.
@@ -106,24 +238,30 @@ Each `run_loop(user_input)` call handles one user-submitted turn, including any 
 
 1. Record a turn boundary in memory.
 2. Open a new turn row in SQLite.
-3. Append the user message to the in-memory conversation.
-4. Persist the user message to the database.
-5. Build the current model context window.
-6. Call the active `ChatBackend` with:
+3. Detect any workflow activation marker such as `workflow:lite` before normal processing.
+4. Append the user message to the in-memory conversation.
+5. Persist the user message to the database.
+6. Build the current model context window.
+7. Call the active `ChatBackend` with:
    - model name
    - prompt messages
    - tool definitions
    - streaming callback
-7. Stream assistant text chunks to the UI while accumulating the full assistant response.
-8. Persist the assistant response.
-9. If there are no tool calls, the turn is complete.
-10. If there are tool calls:
+8. Stream assistant text chunks to the UI while accumulating the full assistant response.
+9. Persist the assistant response.
+10. If there are no tool calls, evaluate the workflow state:
+    - a normal phase may complete
+    - the workflow may auto-advance
+    - the workflow may pause in `waiting_user`
+    - the workflow may complete or fail
+11. If there are tool calls:
     - execute each requested tool
     - append tool results as `role="tool"` messages
     - persist those results
+    - update workflow state if a workflow-control tool was used
     - call the model again with the updated conversation
-11. Repeat until no more tool calls are returned, up to the hardcoded loop limit.
-12. Finalize the turn with token statistics.
+12. Repeat until no more tool calls are returned, up to the hardcoded loop limit.
+13. Finalize the turn with workflow summary and token statistics.
 
 Themion currently caps this inner tool loop at 10 iterations per turn.
 
@@ -174,6 +312,7 @@ Tool output is inserted back into the conversation as a tool message. The model 
 - answer the user directly
 - request another tool
 - recover older context from history
+- inspect or change workflow runtime state
 - revise its prior plan based on tool output
 
 If a tool fails, the runtime returns an error string as the tool result rather than crashing the loop. That lets the model observe the failure and decide what to do next.
@@ -213,13 +352,15 @@ The database includes:
 
 - `agent_sessions`
   - one row per started session
-  - includes session identity and project directory
+  - includes session identity, project directory, and current workflow runtime state
 - `agent_turns`
   - one row per user turn
-  - includes turn sequence and token metadata
+  - includes turn sequence, workflow summary, and token metadata
 - `agent_messages`
   - one row per message within a turn
-  - stores role, content, and tool-call metadata
+  - stores role, content, tool-call metadata, and workflow annotations when available
+- `agent_workflow_transitions`
+  - transition log for workflow and retry state changes
 - `agent_messages_fts`
   - full-text search index for message content
 
@@ -232,6 +373,7 @@ This allows:
 - persistent history across runs
 - session-scoped recall
 - full-text search over past messages
+- reconstruction of current workflow state
 - future support for multiple concurrent agents
 
 ## Why history tools exist
@@ -262,11 +404,13 @@ It is responsible for:
 - creating session IDs
 - running the TUI or print mode
 - rendering streaming `AgentEvent` output
+- showing workflow and phase state in the statusline
 
 The core crate is responsible for:
 
 - message history management
 - prompt/context assembly
+- workflow state and retry logic
 - provider calls
 - tool execution
 - database persistence logic
@@ -277,10 +421,11 @@ A useful way to think about Themion's engine/runtime is:
 
 - **system prompt** defines default assistant behavior
 - **`AGENTS.md` and related instructions** define repository-local behavior
+- **workflow context** tells the model what state machine it is currently operating inside
 - **recent turns** provide immediate conversational context
 - **history tools** recover older context on demand
 - **workflow tools** let the model inspect and control workflow runtime state
 - **tool calls** let the model inspect and change the workspace
-- **SQLite** preserves the long-term memory that no longer fits in the active prompt window
+- **SQLite** preserves both long-term conversation memory and workflow progression state
 
-That combination gives Themion a bounded live context with explicit access to deeper session memory.
+That combination gives Themion a bounded live context with explicit access to deeper session memory and explicit workflow-aware execution semantics.
