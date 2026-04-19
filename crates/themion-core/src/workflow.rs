@@ -6,6 +6,7 @@ pub enum PhaseResult {
     Pending,
     Passed,
     Failed,
+    UserFeedbackRequired,
 }
 
 impl PhaseResult {
@@ -14,6 +15,7 @@ impl PhaseResult {
             PhaseResult::Pending => "pending",
             PhaseResult::Passed => "passed",
             PhaseResult::Failed => "failed",
+            PhaseResult::UserFeedbackRequired => "user_feedback_required",
         }
     }
 
@@ -21,6 +23,7 @@ impl PhaseResult {
         match s {
             "passed" => PhaseResult::Passed,
             "failed" => PhaseResult::Failed,
+            "user_feedback_required" => PhaseResult::UserFeedbackRequired,
             _ => PhaseResult::Pending,
         }
     }

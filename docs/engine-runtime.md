@@ -176,7 +176,7 @@ The runtime tracks state including:
 - workflow name
 - phase name
 - workflow status: `running`, `waiting_user`, `completed`, `failed`, or `interrupted`
-- phase result: `pending`, `passed`, or `failed`
+- phase result: `pending`, `passed`, `failed`, or `user_feedback_required`
 - agent label
 - last updated turn sequence
 - retry state
@@ -200,6 +200,7 @@ Important runtime rules:
 - `workflow_set_phase` is validated against the active workflow's allowed transitions
 - `workflow_set_phase` requires the current `phase_result` to be `passed`
 - `workflow_complete` with outcome `completed` also requires current `phase_result=passed`
+- `workflow_set_phase_result(result="user_feedback_required")` pauses the workflow in `waiting_user` and ends the turn without auto-retry
 - runtime validation stays authoritative even when the model requests a change
 
 `workflow_get_state` returns not only workflow and phase, but also retry information, previous phase info, phase instructions, and allowed next phases.
@@ -251,6 +252,7 @@ stateDiagram-v2
 - `NORMAL` is the default runtime path. In practice it moves into `EXECUTE` for active work and back to idle when the turn ends.
 - Activating `LITE` always enters `CLARIFY`; phase names do not carry across workflow switches.
 - `waiting_user` is a workflow status pause, not a normal phase in the `LITE` sequence.
+- `phase_result=user_feedback_required` is the explicit non-retryable reason for a `waiting_user` pause when the current phase needs user input before it can continue.
 - The model must set `workflow_set_phase_result(result="passed")` before a valid `workflow_set_phase(...)` or successful `workflow_complete(outcome="completed")`.
 - Retry behavior is bounded separately for current-phase and previous-phase recovery, each with a limit of `3`.
 - On retry exhaustion, the runtime marks the workflow failed rather than looping indefinitely.

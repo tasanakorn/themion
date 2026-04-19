@@ -541,7 +541,15 @@ impl Agent {
                 self.workflow_state.phase_result = match parsed["phase_result"].as_str().unwrap_or("pending") {
                     "passed" => PhaseResult::Passed,
                     "failed" => PhaseResult::Failed,
+                    "user_feedback_required" => PhaseResult::UserFeedbackRequired,
                     _ => PhaseResult::Pending,
+                };
+                self.workflow_state.status = match parsed["status"].as_str().unwrap_or(self.workflow_state.status.as_str()) {
+                    "waiting_user" => WorkflowStatus::WaitingUser,
+                    "completed" => WorkflowStatus::Completed,
+                    "failed" => WorkflowStatus::Failed,
+                    "interrupted" => WorkflowStatus::Interrupted,
+                    _ => WorkflowStatus::Running,
                 };
                 self.workflow_state.last_updated_turn_seq = Some(turn_seq);
                 self.emit_phase_result_update(old_phase_result, self.workflow_state.phase_result);
@@ -581,6 +589,17 @@ impl Agent {
         if let Some(workflow) = requested_workflow {
             self.set_workflow(workflow, None, Some(turn_seq), Some("user_input"))
                 .await?;
+        } else if self.workflow_state.status == WorkflowStatus::WaitingUser
+            && self.workflow_state.phase_result == PhaseResult::UserFeedbackRequired
+        {
+            let old_phase_result = self.workflow_state.phase_result;
+            self.workflow_state.status = WorkflowStatus::Running;
+            self.workflow_state.phase_result = PhaseResult::Pending;
+            self.workflow_state.last_updated_turn_seq = Some(turn_seq);
+            self.workflow_state.retry_state.entered_via = PhaseEntryKind::Normal;
+            self.emit_phase_result_update(old_phase_result, self.workflow_state.phase_result);
+            self.emit(AgentEvent::WorkflowStateChanged(self.workflow_state.clone()));
+            self.persist_workflow_state().await?;
         } else if self.workflow_state.workflow_name == DEFAULT_WORKFLOW
             && self.workflow_state.phase_name == DEFAULT_PHASE
         {
@@ -895,6 +914,17 @@ impl Agent {
                         .await?;
                     } else if matches!(tc.function.name.as_str(), "workflow_set_phase_result" | "set_phase_result") {
                         self.persist_workflow_state().await?;
+                        if self.workflow_state.status == WorkflowStatus::WaitingUser {
+                            self.record_transition(
+                                Some(turn_id),
+                                Some(turn_seq),
+                                Some(old_phase.clone()),
+                                old_phase,
+                                WorkflowTransitionKind::WaitingUser,
+                                Some("tool_result"),
+                            )
+                            .await?;
+                        }
                     } else if matches!(tc.function.name.as_str(), "workflow_complete" | "complete_workflow") {
                         self.persist_workflow_state().await?;
                         let kind = if self.workflow_state.status == WorkflowStatus::Failed {
@@ -939,6 +969,10 @@ impl Agent {
                     turn_end_reason = "workflow_failed".to_string();
                     break;
                 }
+                if self.workflow_state.status == WorkflowStatus::WaitingUser {
+                    turn_end_reason = "phase_waiting_user".to_string();
+                    break;
+                }
             }
 
             if self.workflow_state.status == WorkflowStatus::Completed {
@@ -947,6 +981,10 @@ impl Agent {
             }
             if self.workflow_state.status == WorkflowStatus::Failed {
                 turn_end_reason = "workflow_failed".to_string();
+                break;
+            }
+            if self.workflow_state.status == WorkflowStatus::WaitingUser {
+                turn_end_reason = "phase_waiting_user".to_string();
                 break;
             }
         }

@@ -158,11 +158,11 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "workflow_set_phase_result",
-                "description": "Set the current phase result to passed or failed before transitioning or completing the workflow.",
+                "description": "Set the current phase result to passed, failed, or user_feedback_required before transitioning or completing the workflow.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "result": { "type": "string", "enum": ["passed", "failed"] },
+                        "result": { "type": "string", "enum": ["passed", "failed", "user_feedback_required"] },
                         "reason": { "type": "string", "description": "Reason for this phase result." }
                     },
                     "required": ["result"]
@@ -383,12 +383,13 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             let result = match args["result"].as_str().ok_or_else(|| anyhow::anyhow!("missing result"))? {
                 "passed" => PhaseResult::Passed,
                 "failed" => PhaseResult::Failed,
+                "user_feedback_required" => PhaseResult::UserFeedbackRequired,
                 other => anyhow::bail!("invalid result: {other}"),
             };
             Ok(json!({
                 "workflow": state.workflow_name,
                 "phase": state.phase_name,
-                "status": state.status,
+                "status": if result == PhaseResult::UserFeedbackRequired { WorkflowStatus::WaitingUser } else { state.status },
                 "phase_result": result,
                 "agent": state.agent_name,
                 "reason": args["reason"].as_str(),
