@@ -60,6 +60,7 @@ enum Entry {
     Banner(String),
     ToolCall(String),
     ToolDone,
+    Status(String),
     TurnDone { summary: String, stats: String },
     Stats(String),
     Blank,
@@ -337,6 +338,9 @@ impl<'a> App<'a> {
             AgentEvent::ToolEnd => {
                 self.push(Entry::ToolDone);
                 self.set_agent_activity(AgentActivity::WaitingAfterTool);
+            }
+            AgentEvent::Status(text) => {
+                self.push(Entry::Status(text));
             }
             AgentEvent::WorkflowStateChanged(state) => {
                 self.workflow_state = state;
@@ -972,6 +976,12 @@ fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Lin
                 lines.push(Line::from(vec![Span::styled(
                     format!("   {}", detail),
                     Style::default().fg(Color::Yellow),
+                )]));
+            }
+            Entry::Status(text) => {
+                lines.push(Line::from(vec![Span::styled(
+                    format!("  󰇺 {}", text),
+                    Style::default().fg(Color::DarkGray),
                 )]));
             }
             Entry::ToolDone => {

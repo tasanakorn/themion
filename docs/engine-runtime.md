@@ -265,6 +265,28 @@ Each `run_loop(user_input)` call handles one user-submitted turn, including any 
 
 Themion currently caps this inner tool loop at 10 iterations per turn.
 
+## Runtime status events
+
+In addition to assistant text, tool-call rows, and final turn statistics, the harness emits explicit informational status events for a few runtime boundaries that are useful to see in the normal event stream.
+
+Current status-event coverage includes:
+
+- turn start
+- workflow transition
+- workflow phase transition
+- workflow phase-result update
+
+These are emitted by `themion-core` as structured `AgentEvent` values and rendered by the TUI as softer, neutral inline status rows rather than green success markers. Their purpose is to narrate state changes without implying that the workflow has completed successfully.
+
+Typical event text is compact, for example:
+
+- `turn 12 started`
+- `workflow changed: NORMAL -> LITE`
+- `phase changed: EXECUTE -> VALIDATE`
+- `phase result updated: pending -> passed`
+
+This event stream complements, rather than replaces, the statusline and persisted workflow state. The statusline shows current state; status events show when the state changed during the turn.
+
 ## Tool calling
 
 Themion uses OpenAI-style tool calling.
@@ -405,6 +427,7 @@ It is responsible for:
 - running the TUI or print mode
 - rendering streaming `AgentEvent` output
 - showing workflow and phase state in the statusline
+- rendering softer inline harness status events for turn starts and workflow-state transitions
 
 The core crate is responsible for:
 

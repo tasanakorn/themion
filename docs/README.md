@@ -20,6 +20,7 @@
 | PRD-008 | [Workflow Phase Retry and Recovery Policy](prd/prd-008-workflow-phase-retry-and-recovery-policy.md)         | Implemented   | v0.5.0  | `themion-core`, `themion-cli`, docs      |
 | PRD-009 | [Domain-Prefixed Tool Naming Convention](prd/prd-009-domain-prefixed-tool-naming-convention.md)             | Implemented   | v0.5.1  | `themion-core`, docs                     |
 | PRD-010 | [Rename Persistent Database File from `history.db` to `system.db`](prd/prd-010-rename-database-file-to-system-db.md) | Implemented | v0.5.2 | `themion-core`, `themion-cli`, docs      |
+| PRD-011 | [Softer, More Verbose Harness Status Events](prd/prd-011-softer-more-verbose-harness-status-events.md) | Implemented | v0.6.0 | `themion-core`, `themion-cli`, docs      |
 
 ## Roadmap note
 
