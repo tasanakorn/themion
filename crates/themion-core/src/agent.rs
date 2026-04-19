@@ -437,7 +437,7 @@ impl Agent {
         out.push(Message {
             role: "system".to_string(),
             content: Some(
-                "Workflow tools: use get_workflow_state to inspect state, set_workflow to activate a built-in workflow (which always resets phase to that workflow's start phase), set_workflow_phase for valid transitions within the current workflow, and complete_workflow to mark completed or failed."
+                "Workflow tools: use get_workflow_state to inspect state, set_workflow to activate a built-in workflow (which always resets phase to that workflow's start phase), set_workflow_phase for valid transitions within the current workflow, and complete_workflow to mark completed or failed. Workflow tools are internal runtime control actions, not user-facing output. Before ending the turn, always provide a normal assistant response to the user that clearly states the result, progress, or next question. Do not rely on set_phase_result or complete_workflow as a substitute for a user-facing message."
                     .to_string(),
             ),
             tool_calls: None,

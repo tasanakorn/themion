@@ -1,6 +1,6 @@
-# Core AI Engine Loop
+# Engine Runtime
 
-This document explains how Themion's core harness loop works: how prompt inputs are assembled, how context is built, how tool calls are executed, and how session history is stored.
+This document explains how Themion's core harness/runtime works: how prompt inputs are assembled, how context is built, how tool calls are executed, and how session history is stored.
 
 ## Scope
 
@@ -264,7 +264,7 @@ The core crate is responsible for:
 
 ## Practical mental model
 
-A useful way to think about Themion's engine is:
+A useful way to think about Themion's engine/runtime is:
 
 - **system prompt** defines default assistant behavior
 - **`AGENTS.md` and related instructions** define repository-local behavior
