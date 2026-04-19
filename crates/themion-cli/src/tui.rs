@@ -53,6 +53,7 @@ enum Entry {
     Banner(String),
     ToolCall(String),
     ToolDone,
+    TurnDone { summary: String, stats: String },
     Stats(String),
     Blank,
 }
@@ -328,7 +329,16 @@ impl<'a> App<'a> {
                 self.streaming_idx = None;
                 self.set_agent_activity(AgentActivity::Finishing);
                 self.clear_agent_activity();
-                self.push(Entry::Stats(format_stats(&stats)));
+                let stats_text = format_stats(&stats);
+                let stats_text = stats_text
+                    .strip_prefix("[stats: ")
+                    .and_then(|s| s.strip_suffix("]"))
+                    .unwrap_or(&stats_text)
+                    .to_string();
+                self.push(Entry::TurnDone {
+                    summary: "turn complete".to_string(),
+                    stats: stats_text,
+                });
                 self.push(Entry::Blank);
                 self.agent_busy = false;
                 self.last_ctx_tokens = stats.tokens_in;
@@ -887,6 +897,22 @@ fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Lin
                     spans.push(Span::styled("  ✓", Style::default().fg(Color::Green)));
                     *last = Line::from(spans);
                 }
+            }
+            Entry::TurnDone { summary, stats } => {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled("󰄬 ", Style::default().fg(Color::Green)),
+                    Span::styled(
+                        summary.to_string(),
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(" [stats: {}]", stats),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
             }
             Entry::Stats(s) => {
                 lines.push(Line::from(vec![Span::styled(

@@ -2,10 +2,12 @@
 
 Themion is a Rust AI agent with a Ratatui TUI, streaming token output, persistent SQLite history, and a tool-calling loop compatible with multiple OpenAI-style backends.
 
+For a focused walkthrough of the harness/runtime itself, including system prompt handling, `AGENTS.md` injection, context building, tool execution, and session storage, see [core-ai-engine-loop.md](core-ai-engine-loop.md).
+
 ## Workspace Layout
 
 - `crates/themion-core/`
-  - shared agent/runtime logic, provider backends, tool handling, and SQLite-backed history
+  - shared harness/runtime logic, provider backends, tool handling, and SQLite-backed history
   - look here first for prompt assembly, streaming, backend-specific request/response translation, and tool execution
 - `crates/themion-cli/`
   - terminal UI, config loading, login flows, startup wiring, and other user-facing local behavior
@@ -13,15 +15,15 @@ Themion is a Rust AI agent with a Ratatui TUI, streaming token output, persisten
 - `docs/`
   - project docs and behavior notes; keep this aligned with real behavior when flows or semantics change
 
-This separation is intentional: reusable runtime and provider behavior belongs in `themion-core`, while terminal/UI/config/filesystem-driven user flows belong in `themion-cli`.
+This separation is intentional: reusable harness/runtime and provider behavior belongs in `themion-core`, while terminal/UI/config/filesystem-driven user flows belong in `themion-cli`.
 
 ## Design Philosophy
 
-- **No framework dependencies** — the agent loop, HTTP client, tool dispatch, and TUI are all hand-rolled.
+- **No framework dependencies** — the harness loop, HTTP client, tool dispatch, and TUI are all hand-rolled.
 - **Stateful conversation, context-windowed** — `Agent` owns the full in-memory history but sends only the last N turns to the API. Older turns persist in SQLite and are reachable via tools.
 - **OpenAI-style tool calling** — tools are described as JSON function schemas; compatible providers can invoke them and return structured tool calls.
 - **Event-driven TUI** — `Agent` emits `AgentEvent` variants over an `mpsc` channel; the TUI renders each event as it arrives, giving streaming token display without blocking the input loop.
-- **Provider abstraction** — the core agent speaks through a `ChatBackend` trait so different transports and wire formats can be swapped at runtime.
+- **Provider abstraction** — the core harness speaks through a `ChatBackend` trait so different transports and wire formats can be swapped at runtime.
 - **Separated prompt inputs** — the base system prompt and contextual instruction files such as `AGENTS.md` are treated as distinct prompt inputs rather than merged into a single message.
 
 ## Component Map
@@ -73,7 +75,7 @@ DbHandle  (db.rs)
   └─ insert_session / begin_turn / append_message / finalize_turn / recall / search
 ```
 
-## Agent Loop (agent.rs)
+## Harness Loop (agent.rs)
 
 Each call to `run_loop(user_input)`:
 
@@ -276,7 +278,7 @@ Uses persisted OAuth credentials rather than an API key.
 
 ## Known Limitations
 
-- **No timeout on `bash`** — a hung subprocess blocks the agent indefinitely.
+- **No timeout on `bash`** — a hung subprocess blocks the harness indefinitely.
 - **No path sandboxing** — tools accept any absolute or relative path.
 - **Max 10 tool-call iterations per turn** — hardcoded in `agent.rs`.
 - **No user-configurable `window_turns`** — default of 5 is hardcoded; requires a code change.

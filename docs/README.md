@@ -2,7 +2,8 @@
 
 ## Architecture
 
-- [architecture.md](architecture.md) — component map, agent loop, context windowing, tool dispatch, TUI layout, build profiles.
+- [architecture.md](architecture.md) — component map, harness loop, context windowing, tool dispatch, TUI layout, build profiles.
+- [core-ai-engine-loop.md](core-ai-engine-loop.md) — detailed walkthrough of prompt inputs, `AGENTS.md` injection, context building, tool-calling flow, and SQLite session storage.
 
 ## Product Requirements Documents (PRDs)
 
