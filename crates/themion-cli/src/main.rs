@@ -17,14 +17,26 @@ pub fn format_duration(ms: u128) -> String {
     }
 }
 
+fn format_number(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
 pub fn format_stats(s: &TurnStats) -> String {
     format!(
         "[stats: rounds={} tools={} in={} out={} cached={} time={}]",
-        s.llm_rounds,
-        s.tool_calls,
-        s.tokens_in,
-        s.tokens_out,
-        s.tokens_cached,
+        format_number(s.llm_rounds.into()),
+        format_number(s.tool_calls.into()),
+        format_number(s.tokens_in),
+        format_number(s.tokens_out),
+        format_number(s.tokens_cached),
         format_duration(s.elapsed_ms)
     )
 }
