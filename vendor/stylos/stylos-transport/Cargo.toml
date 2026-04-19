@@ -1,0 +1,8 @@
+[package]
+name = "stylos-transport"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+stylos-common = { path = "../stylos-common" }
+stylos-config = { path = "../stylos-config" }

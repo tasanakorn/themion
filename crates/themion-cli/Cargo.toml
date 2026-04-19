@@ -34,9 +34,9 @@ tokio.workspace = true
 tokio-stream.workspace = true
 themion-core = { path = "../themion-core" }
 uuid.workspace = true
-stylos-session = { path = "../../../stele/apps/stylos/crates/stylos-session", optional = true }
-stylos-config = { path = "../../../stele/apps/stylos/crates/stylos-config", optional = true }
+stylos-session = { path = "../../vendor/stylos/stylos-session", optional = true }
+stylos-config = { path = "../../vendor/stylos/stylos-config", optional = true }
 hostname = { version = "0.4", optional = true }
 chrono = { version = "0.4", default-features = true, features = ["clock"], optional = true }
 tokio-util = { version = "0.7", optional = true }
-zenoh = { version = "=1.9.0", optional = true }
+zenoh = { workspace = true, optional = true }

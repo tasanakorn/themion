@@ -1248,6 +1248,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
     let session_id = Uuid::new_v4();
     let _ = db.insert_session(session_id, &project_dir, true);
 
+    #[cfg(feature = "stylos")]
     let stylos_cfg = cfg.stylos.clone();
     let session = Session::from_config(cfg);
     let (app_tx, mut app_rx) = mpsc::unbounded_channel::<AppEvent>();

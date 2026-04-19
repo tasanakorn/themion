@@ -2,6 +2,11 @@
 members = [
     "crates/themion-core",
     "crates/themion-cli",
+    "vendor/stylos/stylos-common",
+    "vendor/stylos/stylos-identity",
+    "vendor/stylos/stylos-config",
+    "vendor/stylos/stylos-transport",
+    "vendor/stylos/stylos-session",
 ]
 resolver = "2"
 
@@ -21,6 +26,13 @@ tui-textarea = { version = "0.7", features = ["crossterm"] }
 tokio-stream = "0.1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+json5 = "0.4"
+thiserror = "1"
+zenoh = "=1.9.0"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
 
 [profile.dev]
 debug = false

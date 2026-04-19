@@ -1,0 +1,9 @@
+[package]
+name = "stylos-identity"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+stylos-common = { path = "../stylos-common" }
+serde = { workspace = true }
+thiserror = { workspace = true }

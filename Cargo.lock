@@ -2917,7 +2917,7 @@ name = "stylos-common"
 version = "0.1.0"
 dependencies = [
  "json5",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2929,7 +2929,7 @@ dependencies = [
  "serde_json",
  "stylos-common",
  "stylos-identity",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2938,7 +2938,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "stylos-common",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
