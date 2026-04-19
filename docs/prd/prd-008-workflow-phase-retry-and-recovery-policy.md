@@ -1,10 +1,12 @@
 # PRD-008: Workflow Phase Retry and Recovery Policy
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Version:** v0.5.0
 - **Scope:** `themion-core` (workflow runtime, retry policy, persistence, workflow tools); `themion-cli` (statusline retry display); docs
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
 - **Date:** 2026-04-19
+
+> **Implementation note:** Bounded current-phase retry, bounded previous-phase recovery, persisted retry-state exposure in workflow state, and retry-aware statusline rendering are now implemented. Treat the current code and docs as the source of truth where they differ from the original proposed wording.
 
 ## Goals
 
@@ -158,7 +160,7 @@ Suggested trigger sources:
 Required behavior:
 
 - retrying the current phase keeps the same phase active and increments `current_phase_retries`
-- retrying to the previous phase transitions to that previous phase and increments `previous_phase_retries` for the failed phase context
+- retrying to the previous phase transitions to that previous phase and increments `previous_phase_retries`
 - when the workflow later returns to the failed phase after a previous-phase retry, the runtime should preserve enough state to know that one previous-phase recovery was already consumed
 - exhausting both retry modes marks the workflow failed and persists the exhaustion reason
 
@@ -259,7 +261,7 @@ These rules keep retry state bounded to the relevant workflow and phase context.
 | `crates/themion-cli/src/tui.rs` | Render retry progress in the `phase:` statusline segment when the active phase is on a retry attempt. |
 | `docs/core-ai-engine-loop.md` | Document retry-aware workflow progression, persisted retry state, and how the harness resumes bounded recovery across turns. |
 | `docs/architecture.md` | Document retry-aware workflow semantics and statusline presentation at a high level. |
-| `docs/README.md` | Add the PRD-008 row and note that it improves the workflow design proposed in PRD-007. |
+| `docs/README.md` | Mark PRD-008 as Implemented and keep the PRD table aligned with the landed retry and recovery behavior. |
 
 ## Edge Cases
 
