@@ -1384,15 +1384,15 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     )));
                 }
                 use crate::config::ProfileConfig;
-                app.session
-                    .profiles
-                    .entry("codex".to_string())
-                    .or_insert_with(|| ProfileConfig {
+                app.session.profiles.insert(
+                    "codex".to_string(),
+                    ProfileConfig {
                         provider: Some("openai-codex".to_string()),
                         model: Some("gpt-5.4".to_string()),
                         base_url: None,
                         api_key: None,
-                    });
+                    },
+                );
                 app.session.switch_profile("codex");
                 if let Err(e) = save_profiles(&app.session.active_profile, &app.session.profiles) {
                     app.push(Entry::Assistant(format!(
@@ -1413,6 +1413,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                             .db
                             .insert_session(new_session_id, &app.project_dir, true);
                         app.status_model_info = new_agent.model_info().cloned();
+                        app.workflow_state = new_agent.workflow_state().clone();
                         app.agents = vec![AgentHandle {
                             agent: Some(new_agent),
                             session_id: new_session_id,
@@ -1422,6 +1423,8 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                             "logged in as {} — switched to codex profile (gpt-5.4)",
                             auth.account_id
                         )));
+                        app.push(Entry::Blank);
+                        app.agent_busy = false;
                     }
                     Err(e) => {
                         app.push(Entry::Assistant(format!(
