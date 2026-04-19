@@ -31,10 +31,10 @@ themion is a Rust-powered AI agent with a full-featured TUI. Give it a task in p
 
 ### Install to `~/.local/bin`
 
-For normal use, install with Cargo in release mode:
+For normal use, install the CLI crate with Cargo in release mode:
 
 ```bash
-cargo install --path . --root ~/.local
+cargo install --path crates/themion-cli --root ~/.local
 ```
 
 That installs the binary to:
@@ -56,7 +56,7 @@ To make that permanent, add it to your shell config (for example `~/.bashrc` or 
 If you only want a local build from the repo, use a release build:
 
 ```bash
-cargo build --release
+cargo build --release -p themion-cli
 ./target/release/themion
 ```
 
