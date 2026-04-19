@@ -12,6 +12,7 @@ For a focused walkthrough of the harness/runtime itself, including system prompt
 - `crates/themion-cli/`
   - terminal UI, config loading, login flows, startup wiring, and other user-facing local behavior
   - look here first for file IO, TUI event handling, app/session orchestration, and local profile/auth flows
+  - optional Stylos support lives here behind the `stylos` cargo feature; when that feature is compiled, Stylos starts by default unless config overrides disable it
 - `docs/`
   - project docs and behavior notes; keep this aligned with real behavior when flows or semantics change
 

@@ -1,11 +1,22 @@
 [package]
 name = "themion-cli"
-version = "0.9.1"
+version = "0.10.0"
 edition = "2021"
 
 [[bin]]
 name = "themion"
 path = "src/main.rs"
+
+[features]
+default = []
+stylos = [
+    "dep:stylos-session",
+    "dep:stylos-config",
+    "dep:hostname",
+    "dep:chrono",
+    "dep:tokio-util",
+    "dep:zenoh",
+]
 
 [dependencies]
 anyhow.workspace = true
@@ -23,3 +34,9 @@ tokio.workspace = true
 tokio-stream.workspace = true
 themion-core = { path = "../themion-core" }
 uuid.workspace = true
+stylos-session = { path = "../../../stele/apps/stylos/crates/stylos-session", optional = true }
+stylos-config = { path = "../../../stele/apps/stylos/crates/stylos-config", optional = true }
+hostname = { version = "0.4", optional = true }
+chrono = { version = "0.4", default-features = true, features = ["clock"], optional = true }
+tokio-util = { version = "0.7", optional = true }
+zenoh = { version = "=1.9.0", optional = true }

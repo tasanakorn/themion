@@ -12,11 +12,36 @@ pub struct ProfileConfig {
     pub api_key: Option<String>,
 }
 
+#[derive(Deserialize, Serialize, Default, Clone)]
+pub struct StylosConfig {
+    pub enabled: Option<bool>,
+    pub mode: Option<String>,
+    pub realm: Option<String>,
+    pub instance: Option<String>,
+    #[serde(default)]
+    pub connect: Vec<String>,
+}
+
+impl StylosConfig {
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+
+    pub fn mode(&self) -> String {
+        self.mode.clone().unwrap_or_else(|| "peer".to_string())
+    }
+
+    pub fn realm(&self) -> String {
+        self.realm.clone().unwrap_or_else(|| "dev".to_string())
+    }
+}
+
 #[derive(Deserialize, Serialize, Default)]
 struct FileConfig {
     primary_llm_profile: Option<String>,
     system_prompt: Option<String>,
     profile: Option<HashMap<String, ProfileConfig>>,
+    stylos: Option<StylosConfig>,
 }
 
 pub struct Config {
@@ -27,6 +52,7 @@ pub struct Config {
     pub api_key: Option<String>,
     pub model: String,
     pub system_prompt: String,
+    pub stylos: StylosConfig,
 }
 
 const DEFAULT_SYSTEM_PROMPT: &str = r#"You are an expert coding assistant operating inside Themion, a terminal-based coding agent. You help users by reading files, executing commands, editing code, and writing new files.
@@ -95,13 +121,22 @@ provider = "openrouter"
 # provider = "llamacpp"
 # base_url = "http://localhost:8080/v1"
 # model    = "local"
+
+# Optional Stylos overrides. When compiled with the `stylos` feature,
+# Stylos starts automatically with built-in defaults.
+#
+# [stylos]
+# enabled = false
+# mode = "peer"
+# realm = "dev"
+# instance = "laptop-a"
+# connect = ["tcp/127.0.0.1:31747"]
 "#;
 
 fn config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("themion").join("config.toml"))
 }
 
-/// Resolve provider/base_url/api_key/model from a ProfileConfig, applying env overrides.
 pub fn resolve_profile(profile: &ProfileConfig) -> (String, String, Option<String>, String) {
     let provider = std::env::var("THEMION_PROVIDER")
         .ok()
@@ -137,7 +172,6 @@ pub fn resolve_profile(profile: &ProfileConfig) -> (String, String, Option<Strin
             (base_url, None, model)
         }
         _ => {
-            // Default: openrouter
             let base_url = std::env::var("OPENROUTER_BASE_URL")
                 .ok()
                 .filter(|s| !s.is_empty())
@@ -181,7 +215,6 @@ impl Config {
             }
         };
 
-        // Determine active profile name: env > file > "default"
         let active_profile = std::env::var("THEMION_PROFILE")
             .ok()
             .filter(|s| !s.is_empty())
@@ -189,13 +222,9 @@ impl Config {
             .unwrap_or_else(|| "default".to_string());
 
         let mut profiles = file_config.profile.unwrap_or_default();
-
         let profile = profiles.get(&active_profile).cloned().unwrap_or_default();
-
         let (provider, base_url, api_key, model) = resolve_profile(&profile);
 
-        // Always ensure the active profile exists in the map so it appears in listings.
-        // Use only file-level values here — never bake env-override values into the saved map.
         profiles
             .entry(active_profile.clone())
             .or_insert_with(|| ProfileConfig {
@@ -231,11 +260,11 @@ impl Config {
             api_key,
             model,
             system_prompt,
+            stylos: file_config.stylos.unwrap_or_default(),
         })
     }
 }
 
-/// Persist profiles and active profile selection back to the config file.
 pub fn save_profiles(
     active_profile: &str,
     profiles: &HashMap<String, ProfileConfig>,

@@ -6,6 +6,8 @@ This document explains how Themion's core harness/runtime works: how prompt inpu
 
 Most of the logic described here lives in `crates/themion-core/`. The CLI crate (`crates/themion-cli/`) is responsible for starting sessions, wiring the TUI, loading config, and passing the active project/session context into the core runtime.
 
+When the optional `stylos` cargo feature is enabled for `themion-cli`, Stylos session startup and shutdown remain CLI-local runtime wiring rather than part of the core harness loop. In feature-enabled builds, Stylos starts by default unless config overrides disable it.
+
 Relevant areas:
 
 - `crates/themion-core/src/agent.rs`

@@ -3,6 +3,8 @@ mod config;
 mod login_codex;
 mod paste_burst;
 mod tui;
+#[cfg(feature = "stylos")]
+mod stylos;
 use config::{Config, ProfileConfig};
 use std::collections::HashMap;
 use themion_core::agent::TurnStats;

@@ -1,5 +1,7 @@
 use crate::config::{save_profiles, Config, ProfileConfig};
 use crate::{format_stats, Session};
+#[cfg(feature = "stylos")]
+use crate::stylos::{StylosHandle, StylosRuntimeState};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode,
@@ -121,6 +123,8 @@ impl AgentActivity {
 }
 
 pub struct App<'a> {
+    #[cfg(feature = "stylos")]
+    stylos: Option<StylosHandle>,
     session: Session,
     entries: Vec<Entry>,
     pending: Option<String>,
@@ -154,6 +158,7 @@ impl<'a> App<'a> {
         db: Arc<DbHandle>,
         session_id: Uuid,
         project_dir: PathBuf,
+        #[cfg(feature = "stylos")] stylos: Option<StylosHandle>,
     ) -> Self {
         let agent = build_agent(&session, session_id, project_dir.clone(), db.clone())
             .expect("failed to build agent");
@@ -165,20 +170,16 @@ impl<'a> App<'a> {
         };
 
         let art = concat!(
-            "████████╗██╗  ██╗███████╗███╗   ███╗██╗ ██████╗ ███╗   ██╗
-",
-            "╚══██╔══╝██║  ██║██╔════╝████╗ ████║██║██╔═══██╗████╗  ██║
-",
-            "   ██║   ███████║█████╗  ██╔████╔██║██║██║   ██║██╔██╗ ██║
-",
-            "   ██║   ██╔══██║██╔══╝  ██║╚██╔╝██║██║██║   ██║██║╚██╗██║
-",
-            "   ██║   ██║  ██║███████╗██║ ╚═╝ ██║██║╚██████╔╝██║ ╚████║
-",
+            "████████╗██╗  ██╗███████╗███╗   ███╗██╗ ██████╗ ███╗   ██╗\n",
+            "╚══██╔══╝██║  ██║██╔════╝████╗ ████║██║██╔═══██╗████╗  ██║\n",
+            "   ██║   ███████║█████╗  ██╔████╔██║██║██║   ██║██╔██╗ ██║\n",
+            "   ██║   ██╔══██║██╔══╝  ██║╚██╔╝██║██║██║   ██║██║╚██╗██║\n",
+            "   ██║   ██║  ██║███████╗██║ ╚═╝ ██║██║╚██████╔╝██║ ╚████║\n",
             "   ╚═╝   ╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝",
         );
         let project_display = project_dir.display().to_string();
-        let initial_entries = vec![
+        #[allow(unused_mut)]
+        let mut initial_entries = vec![
             Entry::Blank,
             Entry::Banner(art.to_string()),
             Entry::Blank,
@@ -193,7 +194,22 @@ impl<'a> App<'a> {
             Entry::Blank,
         ];
 
+        #[cfg(feature = "stylos")]
+        if let Some(handle) = stylos.as_ref() {
+            match handle.state() {
+                StylosRuntimeState::Off => initial_entries.push(Entry::Status("stylos disabled".to_string())),
+                StylosRuntimeState::Active { mode, realm, instance } => initial_entries.push(Entry::Status(format!(
+                    "stylos ready: mode={} realm={} instance={}",
+                    mode, realm, instance
+                ))),
+                StylosRuntimeState::Error(err) => initial_entries.push(Entry::Status(format!("stylos start failed: {}", err))),
+            }
+            initial_entries.push(Entry::Blank);
+        }
+
         Self {
+            #[cfg(feature = "stylos")]
+            stylos,
             session,
             entries: initial_entries,
             pending: None,
@@ -1131,6 +1147,25 @@ fn draw(f: &mut Frame, app: &App) {
         .as_ref()
         .map(|a| a.status_bar(app.stream_chunks, app.stream_chars))
         .unwrap_or_else(|| "idle".to_string());
+    #[cfg(feature = "stylos")]
+    let stylos_status = match app.stylos.as_ref().map(|h| h.state()) {
+        Some(StylosRuntimeState::Off) => "stylos: off".to_string(),
+        Some(StylosRuntimeState::Active { mode, .. }) => format!("stylos: {}", mode),
+        Some(StylosRuntimeState::Error(_)) => "stylos: error".to_string(),
+        None => "stylos: off".to_string(),
+    };
+    #[cfg(feature = "stylos")]
+    let bar_top = format!(
+        " {} | {} | {} | {} | flow: {} | phase: {} | agent: {}",
+        app.session.active_profile,
+        app.session.model,
+        project_leaf,
+        stylos_status,
+        app.workflow_state.workflow_name,
+        app.workflow_state.phase_name,
+        activity,
+    );
+    #[cfg(not(feature = "stylos"))]
     let bar_top = format!(
         " {} | {} | {} | flow: {} | phase: {} | agent: {}",
         app.session.active_profile,
@@ -1213,6 +1248,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
     let session_id = Uuid::new_v4();
     let _ = db.insert_session(session_id, &project_dir, true);
 
+    let stylos_cfg = cfg.stylos.clone();
     let session = Session::from_config(cfg);
     let (app_tx, mut app_rx) = mpsc::unbounded_channel::<AppEvent>();
 
@@ -1246,7 +1282,17 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
         }
     });
 
-    let mut app = App::new(session, db, session_id, project_dir);
+    #[cfg(feature = "stylos")]
+    let stylos_handle = Some(crate::stylos::start(&stylos_cfg, &session).await);
+
+    let mut app = App::new(
+        session,
+        db,
+        session_id,
+        project_dir,
+        #[cfg(feature = "stylos")]
+        stylos_handle,
+    );
 
     while app.running {
         terminal.draw(|f| draw(f, &app))?;
@@ -1487,5 +1533,9 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
         LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;
+    #[cfg(feature = "stylos")]
+    if let Some(stylos) = app.stylos.take() {
+        stylos.shutdown().await;
+    }
     Ok(())
 }
