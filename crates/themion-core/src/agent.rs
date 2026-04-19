@@ -13,7 +13,10 @@ use crate::workflow::{
 use anyhow::Result;
 use serde_json::Value;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Instant;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -39,6 +42,25 @@ pub enum AgentEvent {
     Stats(String),
     WorkflowStateChanged(WorkflowState),
     TurnDone(TurnStats),
+}
+
+#[derive(Clone, Default)]
+pub struct TurnCancellation {
+    interrupted: Arc<AtomicBool>,
+}
+
+impl TurnCancellation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn interrupt(&self) {
+        self.interrupted.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_interrupted(&self) -> bool {
+        self.interrupted.load(Ordering::SeqCst)
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -568,7 +590,33 @@ impl Agent {
         }
     }
 
+    async fn interrupt_turn(&mut self, turn_id: i64, turn_seq: u32) -> Result<()> {
+        self.workflow_state.status = WorkflowStatus::Interrupted;
+        self.workflow_state.last_updated_turn_seq = Some(turn_seq);
+        self.emit_status("turn interrupted");
+        self.emit(AgentEvent::WorkflowStateChanged(self.workflow_state.clone()));
+        self.persist_workflow_state().await?;
+        self.record_transition(
+            Some(turn_id),
+            Some(turn_seq),
+            Some(self.workflow_state.phase_name.clone()),
+            self.workflow_state.phase_name.clone(),
+            WorkflowTransitionKind::WorkflowInterrupted,
+            Some("user_interrupt"),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn run_loop(&mut self, user_input: &str) -> Result<(String, TurnStats)> {
+        self.run_loop_with_cancellation(user_input, None).await
+    }
+
+    pub async fn run_loop_with_cancellation(
+        &mut self,
+        user_input: &str,
+        cancellation: Option<TurnCancellation>,
+    ) -> Result<(String, TurnStats)> {
         if self.model_info.is_none() {
             self.refresh_model_info().await;
         }
@@ -668,6 +716,12 @@ impl Agent {
         };
 
         for _ in 0..10 {
+            if cancellation.as_ref().is_some_and(|c| c.is_interrupted()) {
+                self.interrupt_turn(turn_id, turn_seq).await?;
+                turn_end_reason = "interrupted".to_string();
+                break;
+            }
+
             let mut msgs_with_system = vec![Message {
                 role: "system".to_string(),
                 content: Some(self.system_prompt.clone()),
@@ -719,6 +773,7 @@ impl Agent {
 
             self.emit(AgentEvent::LlmStart);
             let event_tx = self.event_tx.clone();
+            let cancellation_for_stream = cancellation.clone();
             let (response, usage, rate_limit_report) = self
                 .client
                 .chat_completion_stream(
@@ -726,12 +781,24 @@ impl Agent {
                     &msgs_with_system,
                     &tool_defs,
                     Box::new(move |chunk| {
+                        if cancellation_for_stream
+                            .as_ref()
+                            .is_some_and(|c| c.is_interrupted())
+                        {
+                            return;
+                        }
                         if let Some(ref tx) = event_tx {
                             let _ = tx.send(AgentEvent::AssistantChunk(chunk));
                         }
                     }),
                 )
                 .await?;
+
+            if cancellation.as_ref().is_some_and(|c| c.is_interrupted()) {
+                self.interrupt_turn(turn_id, turn_seq).await?;
+                turn_end_reason = "interrupted".to_string();
+                break;
+            }
 
             if let Some(report) = rate_limit_report {
                 if let Ok(text) = serde_json::to_string(&report) {
@@ -873,6 +940,12 @@ impl Agent {
             };
 
             for tc in &tool_calls_vec {
+                if cancellation.as_ref().is_some_and(|c| c.is_interrupted()) {
+                    self.interrupt_turn(turn_id, turn_seq).await?;
+                    turn_end_reason = "interrupted".to_string();
+                    break;
+                }
+
                 let detail = tool_call_detail(&tc.function.name, &tc.function.arguments);
                 self.emit(AgentEvent::ToolStart { detail });
                 let tool_ctx = crate::tools::ToolCtx {
@@ -886,6 +959,12 @@ impl Agent {
                     tools::call_tool(&tc.function.name, &tc.function.arguments, &tool_ctx).await;
                 self.emit(AgentEvent::ToolEnd);
                 tool_calls += 1;
+
+                if cancellation.as_ref().is_some_and(|c| c.is_interrupted()) {
+                    self.interrupt_turn(turn_id, turn_seq).await?;
+                    turn_end_reason = "interrupted".to_string();
+                    break;
+                }
 
                 let old_phase = self.workflow_state.phase_name.clone();
                 if self.apply_workflow_tool_result(&tc.function.name, &result, turn_seq)? {
@@ -975,6 +1054,10 @@ impl Agent {
                 }
             }
 
+            if self.workflow_state.status == WorkflowStatus::Interrupted {
+                turn_end_reason = "interrupted".to_string();
+                break;
+            }
             if self.workflow_state.status == WorkflowStatus::Completed {
                 turn_end_reason = "workflow_completed".to_string();
                 break;
@@ -996,7 +1079,8 @@ impl Agent {
                 Some("workflow_completion"),
             )
             .await?;
-        } else if self.workflow_state.workflow_name == DEFAULT_WORKFLOW
+        } else if self.workflow_state.status != WorkflowStatus::Interrupted
+            && self.workflow_state.workflow_name == DEFAULT_WORKFLOW
             && self.workflow_state.phase_name == "EXECUTE"
         {
             self.workflow_state.phase_result = PhaseResult::Passed;
@@ -1018,7 +1102,10 @@ impl Agent {
             .await?;
         }
 
-        let workflow_continues_after_turn = matches!(self.workflow_state.status, WorkflowStatus::WaitingUser);
+        let workflow_continues_after_turn = matches!(
+            self.workflow_state.status,
+            WorkflowStatus::WaitingUser | WorkflowStatus::Interrupted
+        );
         let stats = TurnStats {
             llm_rounds,
             tool_calls,

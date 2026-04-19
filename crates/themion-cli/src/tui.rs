@@ -22,7 +22,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use themion_core::agent::{Agent, AgentEvent, TurnStats};
+use themion_core::agent::{Agent, AgentEvent, TurnCancellation, TurnStats};
 use themion_core::workflow::WorkflowState;
 use themion_core::client::ChatClient;
 use themion_core::client_codex::{ApiCallRateLimitReport, CodexClient};
@@ -145,6 +145,7 @@ pub struct App<'a> {
     status_rate_limits: Option<ApiCallRateLimitReport>,
     status_model_info: Option<ModelInfo>,
     workflow_state: WorkflowState,
+    active_turn_cancellation: Option<TurnCancellation>,
 }
 
 
@@ -225,6 +226,7 @@ impl<'a> App<'a> {
             status_rate_limits: None,
             status_model_info: initial_model_info,
             workflow_state: WorkflowState::default(),
+            active_turn_cancellation: None,
         }
     }
 
@@ -289,6 +291,15 @@ impl<'a> App<'a> {
     fn reset_stream_counters(&mut self) {
         self.stream_chunks = 0;
         self.stream_chars = 0;
+    }
+
+    fn request_interrupt(&mut self) {
+        if let Some(cancel) = &self.active_turn_cancellation {
+            if !cancel.is_interrupted() {
+                cancel.interrupt();
+                self.push(Entry::Status("interrupt requested".to_string()));
+            }
+        }
     }
 
     fn on_tick(&mut self) {
@@ -358,6 +369,7 @@ impl<'a> App<'a> {
                 self.streaming_idx = None;
                 self.set_agent_activity(AgentActivity::Finishing);
                 self.clear_agent_activity();
+                let interrupted = self.workflow_state.status == themion_core::workflow::WorkflowStatus::Interrupted;
                 let stats_text = format_stats(&stats);
                 let stats_text = stats_text
                     .strip_prefix("[stats: ")
@@ -365,11 +377,16 @@ impl<'a> App<'a> {
                     .unwrap_or(&stats_text)
                     .to_string();
                 self.push(Entry::TurnDone {
-                    summary: "󰇺 Turn end".to_string(),
+                    summary: if interrupted {
+                        "󰜺 Turn interrupted".to_string()
+                    } else {
+                        "󰇺 Turn end".to_string()
+                    },
                     stats: stats_text,
                 });
                 self.push(Entry::Blank);
                 self.agent_busy = false;
+                self.active_turn_cancellation = None;
                 self.last_ctx_tokens = stats.tokens_in;
                 self.session_tokens.tokens_in += stats.tokens_in;
                 self.session_tokens.tokens_out += stats.tokens_out;
@@ -682,6 +699,9 @@ impl<'a> App<'a> {
         self.reset_stream_counters();
         self.set_agent_activity(AgentActivity::PreparingRequest);
 
+        let cancellation = TurnCancellation::new();
+        self.active_turn_cancellation = Some(cancellation.clone());
+
         let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let app_tx_relay = app_tx.clone();
         tokio::spawn(async move {
@@ -702,7 +722,7 @@ impl<'a> App<'a> {
 
         let app_tx_done = app_tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = agent.run_loop(&text).await {
+            if let Err(e) = agent.run_loop_with_cancellation(&text, Some(cancellation)).await {
                 let _ = app_tx_done.send(AppEvent::Agent(AgentEvent::AssistantText(format!(
                     "error: {e}"
                 ))));
@@ -925,7 +945,7 @@ fn make_input<'a>() -> TextArea<'a> {
     );
     ta.set_cursor_line_style(Style::default());
     ta.set_placeholder_text(
-        "message…  (Enter/Ctrl-S send | Shift-Enter/Ctrl-J newline | Ctrl-C quit)",
+        "message…  (Enter/Ctrl-S send | Shift-Enter/Ctrl-J newline | Esc interrupt | Ctrl-C quit)",
     );
     ta
 }
@@ -1312,6 +1332,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
 
                 match (key.code, key.modifiers) {
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.running = false,
+                    (KeyCode::Esc, _) if app.agent_busy => app.request_interrupt(),
                     (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
                         let tx = app_tx.clone();
                         app.submit_input(&tx);
@@ -1364,6 +1385,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     h.agent = Some(agent);
                 }
                 app.agent_busy = false;
+                app.active_turn_cancellation = None;
             }
             Some(AppEvent::LoginPrompt {
                 user_code,

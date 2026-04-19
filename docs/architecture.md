@@ -188,6 +188,7 @@ Key bindings:
 | `Alt+↑` / `Alt+↓`     | Scroll conversation pane  |
 | `PageUp` / `PageDown` | Scroll conversation pane  |
 | Mouse scroll          | Scroll conversation pane  |
+| `Esc`                 | Interrupt current turn    |
 | `Ctrl+C`              | Quit                      |
 
 ### Entry types

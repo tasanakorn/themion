@@ -456,6 +456,7 @@ It is responsible for:
 - rendering streaming `AgentEvent` output
 - showing workflow and phase state in the statusline
 - rendering softer inline harness status events for turn starts and workflow-state transitions
+- handling `Esc` as a best-effort interrupt request for the active in-progress TUI turn while keeping `Ctrl+C` as whole-app exit
 
 The core crate is responsible for:
 
