@@ -576,7 +576,7 @@ impl Agent {
         let mut tokens_in = 0u64;
         let mut tokens_out = 0u64;
         let mut tokens_cached = 0u64;
-        let mut turn_end_reason = "workflow_completed".to_string();
+        let mut turn_end_reason = "turn_end".to_string();
         let activation_source = if requested_workflow.is_some() {
             "user_input"
         } else {
