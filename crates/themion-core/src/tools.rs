@@ -1,4 +1,8 @@
 use crate::db::{DbHandle, RecallArgs, RecallDirection, SearchArgs};
+use crate::workflow::{
+    allowed_transitions, can_transition, normalize_workflow_name, phase_instructions,
+    start_phase_for_workflow, WorkflowState, WorkflowStatus, DEFAULT_AGENT,
+};
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::fs;
@@ -10,6 +14,8 @@ pub struct ToolCtx {
     pub db: Arc<DbHandle>,
     pub session_id: Uuid,
     pub project_dir: PathBuf,
+    pub workflow_state: Option<WorkflowState>,
+    pub turn_seq: Option<u32>,
 }
 
 pub fn tool_definitions() -> Value {
@@ -104,6 +110,63 @@ pub fn tool_definitions() -> Value {
                     "required": ["query"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_workflow_state",
+                "description": "Return the current workflow, phase, status, and allowed next transitions.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "set_workflow",
+                "description": "Activate a named built-in workflow. Resets the current phase to that workflow's start phase.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "workflow": { "type": "string", "description": "Built-in workflow name, such as NORMAL or LITE." },
+                        "reason": { "type": "string", "description": "Reason for switching workflows." }
+                    },
+                    "required": ["workflow"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "set_workflow_phase",
+                "description": "Request a phase transition within the currently active workflow.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "phase": { "type": "string", "description": "Next phase within the active workflow." },
+                        "reason": { "type": "string", "description": "Reason for changing phase." }
+                    },
+                    "required": ["phase"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "complete_workflow",
+                "description": "Mark the current workflow as passed/completed or failed.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "outcome": { "type": "string", "enum": ["completed", "failed"] },
+                        "reason": { "type": "string", "description": "Reason for completion/failure." }
+                    },
+                    "required": ["outcome"]
+                }
+            }
         }
     ])
 }
@@ -153,7 +216,6 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             let command = args["command"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing command"))?;
-            // TODO: add timeout
             let output = tokio::process::Command::new("sh")
                 .arg("-c")
                 .arg(command)
@@ -229,6 +291,83 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 .unwrap_or_default()),
                 Err(e) => Ok(format!("Error: {e}")),
             }
+        }
+        "get_workflow_state" => {
+            let state = ctx.workflow_state.clone().unwrap_or_else(WorkflowState::default);
+            Ok(json!({
+                "workflow": state.workflow_name,
+                "phase": state.phase_name,
+                "status": state.status,
+                "agent": state.agent_name,
+                "last_updated_turn_seq": state.last_updated_turn_seq,
+                "allowed_next_phases": allowed_transitions(&state.workflow_name, &state.phase_name),
+                "phase_instructions": phase_instructions(&state.workflow_name, &state.phase_name),
+            })
+            .to_string())
+        }
+        "set_workflow" => {
+            let workflow = args["workflow"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing workflow"))?;
+            let workflow = normalize_workflow_name(workflow)
+                .ok_or_else(|| anyhow::anyhow!("unknown workflow: {workflow}"))?;
+            let start_phase = start_phase_for_workflow(workflow)
+                .ok_or_else(|| anyhow::anyhow!("workflow missing start phase: {workflow}"))?;
+            Ok(json!({
+                "workflow": workflow,
+                "phase": start_phase,
+                "status": WorkflowStatus::Running,
+                "agent": DEFAULT_AGENT,
+                "reason": args["reason"].as_str(),
+            })
+            .to_string())
+        }
+        "set_workflow_phase" => {
+            let state = ctx
+                .workflow_state
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("workflow state unavailable"))?;
+            let phase = args["phase"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing phase"))?;
+            if !can_transition(&state.workflow_name, &state.phase_name, phase) {
+                anyhow::bail!(
+                    "invalid phase transition: {}:{} -> {}",
+                    state.workflow_name,
+                    state.phase_name,
+                    phase
+                );
+            }
+            Ok(json!({
+                "workflow": state.workflow_name,
+                "phase": phase,
+                "status": WorkflowStatus::Running,
+                "agent": state.agent_name,
+                "reason": args["reason"].as_str(),
+            })
+            .to_string())
+        }
+        "complete_workflow" => {
+            let state = ctx
+                .workflow_state
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("workflow state unavailable"))?;
+            let outcome = args["outcome"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing outcome"))?;
+            let status = match outcome {
+                "completed" => WorkflowStatus::Completed,
+                "failed" => WorkflowStatus::Failed,
+                _ => anyhow::bail!("invalid outcome: {outcome}"),
+            };
+            Ok(json!({
+                "workflow": state.workflow_name,
+                "phase": state.phase_name,
+                "status": status,
+                "agent": state.agent_name,
+                "reason": args["reason"].as_str(),
+            })
+            .to_string())
         }
         _ => Err(anyhow::anyhow!("unknown tool: {name}")),
     }

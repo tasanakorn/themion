@@ -1,3 +1,5 @@
+use serde::Serialize;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowState {
     pub workflow_name: String,
@@ -7,7 +9,8 @@ pub struct WorkflowState {
     pub last_updated_turn_seq: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WorkflowStatus {
     Running,
     WaitingUser,
@@ -61,9 +64,131 @@ impl WorkflowTransitionKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowPromptMode {
+    Default,
+    Clarify,
+    Execute,
+    Validate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkflowDefinition {
+    pub name: &'static str,
+    pub start_phase: &'static str,
+    pub prompt_mode: WorkflowPromptMode,
+}
+
 pub const DEFAULT_WORKFLOW: &str = "NORMAL";
 pub const DEFAULT_PHASE: &str = "IDLE";
 pub const DEFAULT_AGENT: &str = "main";
+pub const LITE_WORKFLOW: &str = "LITE";
+
+pub fn workflow_definition(name: &str) -> Option<WorkflowDefinition> {
+    match name {
+        DEFAULT_WORKFLOW => Some(WorkflowDefinition {
+            name: DEFAULT_WORKFLOW,
+            start_phase: "EXECUTE",
+            prompt_mode: WorkflowPromptMode::Default,
+        }),
+        LITE_WORKFLOW => Some(WorkflowDefinition {
+            name: LITE_WORKFLOW,
+            start_phase: "CLARIFY",
+            prompt_mode: WorkflowPromptMode::Clarify,
+        }),
+        _ => None,
+    }
+}
+
+pub fn normalize_workflow_name(name: &str) -> Option<&'static str> {
+    if name.eq_ignore_ascii_case(DEFAULT_WORKFLOW) {
+        Some(DEFAULT_WORKFLOW)
+    } else if name.eq_ignore_ascii_case(LITE_WORKFLOW) {
+        Some(LITE_WORKFLOW)
+    } else {
+        None
+    }
+}
+
+pub fn start_phase_for_workflow(name: &str) -> Option<&'static str> {
+    workflow_definition(name).map(|d| d.start_phase)
+}
+
+pub fn allowed_transitions(workflow: &str, phase: &str) -> Vec<&'static str> {
+    match (workflow, phase) {
+        (DEFAULT_WORKFLOW, "IDLE") => vec!["EXECUTE"],
+        (DEFAULT_WORKFLOW, "EXECUTE") => vec!["IDLE"],
+        (LITE_WORKFLOW, "CLARIFY") => vec!["EXECUTE"],
+        (LITE_WORKFLOW, "EXECUTE") => vec!["VALIDATE"],
+        (LITE_WORKFLOW, "VALIDATE") => vec![],
+        _ => vec![],
+    }
+}
+
+pub fn can_transition(workflow: &str, from_phase: &str, to_phase: &str) -> bool {
+    allowed_transitions(workflow, from_phase)
+        .into_iter()
+        .any(|phase| phase == to_phase)
+}
+
+pub fn activation_marker(input: &str) -> Option<&'static str> {
+    for raw in input.split_whitespace() {
+        let token = raw
+            .trim_matches(|c: char| c.is_ascii_punctuation() && c != ':')
+            .to_ascii_lowercase();
+        if token == "workflow:lite" || token == "workflow: lite" {
+            return Some(LITE_WORKFLOW);
+        }
+        if token == "workflow:normal" || token == "workflow: normal" {
+            return Some(DEFAULT_WORKFLOW);
+        }
+    }
+
+    let lower = input.to_ascii_lowercase();
+    if lower.contains("workflow: lite") {
+        Some(LITE_WORKFLOW)
+    } else if lower.contains("workflow: normal") {
+        Some(DEFAULT_WORKFLOW)
+    } else {
+        None
+    }
+}
+
+pub fn strip_activation_markers(input: &str) -> String {
+    input
+        .replace("workflow:lite", "")
+        .replace("workflow: lite", "")
+        .replace("Workflow:lite", "")
+        .replace("Workflow: lite", "")
+        .replace("workflow:normal", "")
+        .replace("workflow: normal", "")
+        .replace("Workflow:normal", "")
+        .replace("Workflow: normal", "")
+        .trim()
+        .to_string()
+}
+
+pub fn phase_instructions(workflow: &str, phase: &str) -> Vec<&'static str> {
+    match (workflow, phase) {
+        (LITE_WORKFLOW, "CLARIFY") => vec![
+            "Produce a compact brief with objective, assumptions, and success criteria.",
+            "Proceed without asking the user unless ambiguity is genuinely blocking.",
+            "If blocked by ambiguity, ask a concise clarification question and stop.",
+        ],
+        (LITE_WORKFLOW, "EXECUTE") => vec![
+            "Implement the smallest working slice that satisfies the clarify brief.",
+            "Keep changes narrow and avoid unrelated refactors.",
+            "When the slice is complete, advance to VALIDATE.",
+        ],
+        (LITE_WORKFLOW, "VALIDATE") => vec![
+            "Check the success criteria from CLARIFY.",
+            "Run a narrow smoke check and return pass or fail.",
+            "Do not silently continue implementation work after a failed validation.",
+        ],
+        (DEFAULT_WORKFLOW, "EXECUTE") => vec!["Solve the user's request directly using available tools as needed."],
+        _ => vec![],
+    }
+}
 
 impl Default for WorkflowState {
     fn default() -> Self {

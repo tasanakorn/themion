@@ -3,7 +3,7 @@
 ## Architecture
 
 - [architecture.md](architecture.md) — component map, harness loop, context windowing, tool dispatch, TUI layout, build profiles.
-- [core-ai-engine-loop.md](core-ai-engine-loop.md) — detailed walkthrough of prompt inputs, `AGENTS.md` injection, context building, tool-calling flow, and SQLite session storage.
+- [core-ai-engine-loop.md](core-ai-engine-loop.md) — detailed walkthrough of prompt inputs, `AGENTS.md` injection, context building, tool-calling flow, workflow runtime behavior, and SQLite session storage.
 - [codex-integration-guide.md](codex-integration-guide.md) — Codex provider integration contract, endpoint usage, auth, `/models` metadata parsing, `/responses` translation, and rate-limit extraction behavior.
 
 ## Product Requirements Documents (PRDs)
@@ -16,6 +16,7 @@
 | PRD-004 | [Direct Shell Command Prefix in the TUI](prd/prd-004-direct-shell-command-prefix.md)                        | Implemented   | v0.3.0  | `themion-cli`, docs                      |
 | PRD-005 | [Model Context Window Refresh and Statusline Display](prd/prd-005-model-context-window-refresh-and-statusline.md) | Implemented   | v0.3.0  | `themion-core`, `themion-cli`, docs      |
 | PRD-006 | [Workflow and Phase Model for the Harness Engine](prd/prd-006-workflow-and-phase-model-for-harness-engine.md) | Implemented   | v0.4.0  | `themion-core`, `themion-cli`, docs      |
+| PRD-007 | [Lite Workflow Activation and Runtime Structure](prd/prd-007-lite-workflow-activation-and-runtime-structure.md) | Implemented   | v0.5.0  | `themion-core`, `themion-cli`, docs      |
 
 ## Roadmap note
 
