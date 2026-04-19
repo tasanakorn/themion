@@ -61,7 +61,7 @@ When the in-memory conversation is longer than the configured context window, th
 
 Example shape:
 
-> Note: N earlier turn(s) (seq 1–N) are stored in history. Use `recall_history` to load a range or `search_history` to find a keyword.
+> Note: N earlier turn(s) (seq 1–N) are stored in history. Use `history_recall` to load a range or `history_search` to find a keyword.
 
 This gives the model a way to recover older context without sending the full conversation every time.
 
@@ -139,14 +139,21 @@ On each model request, the harness sends a JSON-schema-style description of the 
 
 When the model returns tool calls, the harness dispatches them through `call_tool(name, args, &ToolCtx)`.
 
-Available tools include:
+Available canonical tools include:
 
-- `read_file`
-- `write_file`
-- `list_directory`
-- `bash`
-- `recall_history`
-- `search_history`
+- `fs_read_file`
+- `fs_write_file`
+- `fs_list_directory`
+- `shell_run_command`
+- `history_recall`
+- `history_search`
+- `workflow_get_state`
+- `workflow_set_active`
+- `workflow_set_phase`
+- `workflow_set_phase_result`
+- `workflow_complete`
+
+Deprecated aliases for the older short names are still accepted internally during the transition period, but only the domain-prefixed names are exposed in tool definitions.
 
 ### Tool context
 
@@ -155,8 +162,10 @@ Each tool call receives a `ToolCtx` containing:
 - database handle
 - session ID
 - project directory
+- workflow state
+- current turn sequence
 
-Filesystem tools mostly ignore this context. History tools use it to query session-aware SQLite data.
+Filesystem tools mostly ignore this context. History tools use it to query session-aware SQLite data. Workflow tools use it to inspect or update runtime workflow state.
 
 ### Tool result handling
 
@@ -236,8 +245,8 @@ This has two effects:
 
 The two history tools serve different jobs:
 
-- `recall_history` loads known earlier turns or message ranges
-- `search_history` finds relevant older content by keyword or text match
+- `history_recall` loads known earlier turns or message ranges
+- `history_search` finds relevant older content by keyword or text match
 
 Together with the recall hint, these tools form the bridge between a bounded context window and long-lived session memory.
 
@@ -270,6 +279,7 @@ A useful way to think about Themion's engine/runtime is:
 - **`AGENTS.md` and related instructions** define repository-local behavior
 - **recent turns** provide immediate conversational context
 - **history tools** recover older context on demand
+- **workflow tools** let the model inspect and control workflow runtime state
 - **tool calls** let the model inspect and change the workspace
 - **SQLite** preserves the long-term memory that no longer fits in the active prompt window
 

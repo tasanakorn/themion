@@ -24,7 +24,7 @@ pub fn tool_definitions() -> Value {
         {
             "type": "function",
             "function": {
-                "name": "read_file",
+                "name": "fs_read_file",
                 "description": "Read file contents",
                 "parameters": {
                     "type": "object",
@@ -38,7 +38,7 @@ pub fn tool_definitions() -> Value {
         {
             "type": "function",
             "function": {
-                "name": "write_file",
+                "name": "fs_write_file",
                 "description": "Write content to a file",
                 "parameters": {
                     "type": "object",
@@ -53,7 +53,7 @@ pub fn tool_definitions() -> Value {
         {
             "type": "function",
             "function": {
-                "name": "list_directory",
+                "name": "fs_list_directory",
                 "description": "List directory entries",
                 "parameters": {
                     "type": "object",
@@ -67,7 +67,7 @@ pub fn tool_definitions() -> Value {
         {
             "type": "function",
             "function": {
-                "name": "bash",
+                "name": "shell_run_command",
                 "description": "Run a shell command, returns stdout+stderr",
                 "parameters": {
                     "type": "object",
@@ -81,7 +81,7 @@ pub fn tool_definitions() -> Value {
         {
             "type": "function",
             "function": {
-                "name": "recall_history",
+                "name": "history_recall",
                 "description": "Retrieve earlier conversation messages from persistent history.",
                 "parameters": {
                     "type": "object",
@@ -98,7 +98,7 @@ pub fn tool_definitions() -> Value {
         {
             "type": "function",
             "function": {
-                "name": "search_history",
+                "name": "history_search",
                 "description": "Full-text search across conversation history.",
                 "parameters": {
                     "type": "object",
@@ -115,7 +115,7 @@ pub fn tool_definitions() -> Value {
         {
             "type": "function",
             "function": {
-                "name": "get_workflow_state",
+                "name": "workflow_get_state",
                 "description": "Return the current workflow, phase, status, phase result, and allowed next transitions.",
                 "parameters": {
                     "type": "object",
@@ -127,7 +127,7 @@ pub fn tool_definitions() -> Value {
         {
             "type": "function",
             "function": {
-                "name": "set_workflow",
+                "name": "workflow_set_active",
                 "description": "Activate a named built-in workflow. Resets the current phase to that workflow's start phase.",
                 "parameters": {
                     "type": "object",
@@ -142,7 +142,7 @@ pub fn tool_definitions() -> Value {
         {
             "type": "function",
             "function": {
-                "name": "set_workflow_phase",
+                "name": "workflow_set_phase",
                 "description": "Request a phase transition within the currently active workflow.",
                 "parameters": {
                     "type": "object",
@@ -157,7 +157,7 @@ pub fn tool_definitions() -> Value {
         {
             "type": "function",
             "function": {
-                "name": "set_phase_result",
+                "name": "workflow_set_phase_result",
                 "description": "Set the current phase result to passed or failed before transitioning or completing the workflow.",
                 "parameters": {
                     "type": "object",
@@ -172,7 +172,7 @@ pub fn tool_definitions() -> Value {
         {
             "type": "function",
             "function": {
-                "name": "complete_workflow",
+                "name": "workflow_complete",
                 "description": "Mark the current workflow as passed/completed or failed. Completed requires current phase_result=passed.",
                 "parameters": {
                     "type": "object",
@@ -198,7 +198,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
     let args: Value = serde_json::from_str(args_json)?;
 
     match name {
-        "read_file" => {
+        "fs_read_file" | "read_file" => {
             let path = args["path"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing path"))?;
@@ -206,7 +206,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             let content = fs::read_to_string(path)?;
             Ok(content)
         }
-        "write_file" => {
+        "fs_write_file" | "write_file" => {
             let path = args["path"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing path"))?;
@@ -217,7 +217,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             fs::write(path, content)?;
             Ok(format!("Written"))
         }
-        "list_directory" => {
+        "fs_list_directory" | "list_directory" => {
             let path = args["path"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing path"))?;
@@ -228,7 +228,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 .collect();
             Ok(entries.join("\n"))
         }
-        "bash" => {
+        "shell_run_command" | "bash" => {
             let command = args["command"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing command"))?;
@@ -242,7 +242,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             let stderr = String::from_utf8_lossy(&output.stderr);
             Ok(format!("{stdout}{stderr}"))
         }
-        "recall_history" => {
+        "history_recall" | "recall_history" => {
             let session_id = args["session_id"]
                 .as_str()
                 .and_then(|s| Uuid::parse_str(s).ok())
@@ -277,7 +277,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 Err(e) => Ok(format!("Error: {e}")),
             }
         }
-        "search_history" => {
+        "history_search" | "search_history" => {
             let query = args["query"].as_str().unwrap_or("").to_string();
             let session_id = args["session_id"]
                 .as_str()
@@ -308,7 +308,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 Err(e) => Ok(format!("Error: {e}")),
             }
         }
-        "get_workflow_state" => {
+        "workflow_get_state" | "get_workflow_state" => {
             let state = ctx.workflow_state.clone().unwrap_or_else(WorkflowState::default);
             Ok(json!({
                 "workflow": state.workflow_name,
@@ -326,7 +326,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             })
             .to_string())
         }
-        "set_workflow" => {
+        "workflow_set_active" | "set_workflow" => {
             let workflow = args["workflow"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing workflow"))?;
@@ -345,7 +345,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             })
             .to_string())
         }
-        "set_workflow_phase" => {
+        "workflow_set_phase" | "set_workflow_phase" => {
             let state = ctx
                 .workflow_state
                 .as_ref()
@@ -375,7 +375,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             })
             .to_string())
         }
-        "set_phase_result" => {
+        "workflow_set_phase_result" | "set_phase_result" => {
             let state = ctx
                 .workflow_state
                 .as_ref()
@@ -396,7 +396,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             })
             .to_string())
         }
-        "complete_workflow" => {
+        "workflow_complete" | "complete_workflow" => {
             let state = ctx
                 .workflow_state
                 .as_ref()

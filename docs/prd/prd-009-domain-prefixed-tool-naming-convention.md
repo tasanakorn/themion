@@ -1,6 +1,6 @@
 # PRD-009: Domain-Prefixed Tool Naming Convention
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Version:** v0.5.1
 - **Scope:** `themion-core` (tool definitions, dispatch, prompt references, provider translation compatibility), docs
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
@@ -147,6 +147,8 @@ The following must remain stable except for the exposed name:
 
 Implementation may keep internal helper function names and module organization unchanged if that is the smallest clean change. The normative requirement is that the model-visible tool names, dispatch mapping, docs, and prompt guidance all use the new names consistently.
 
+Implementation note: canonical tool definitions now expose only the domain-prefixed names. Dispatch continues accepting the legacy names as deprecated aliases for compatibility during the transition window.
+
 **Alternative considered:** use the rename to also redesign argument schemas for consistency. Rejected: that would expand scope and mix naming cleanup with behavior changes that deserve separate review.
 
 ### Prompt and instruction references
@@ -188,17 +190,18 @@ If alias support is implemented, it should be internal-only and should not keep 
 
 | File | Change |
 | ---- | ------ |
-| `crates/themion-core/src/tools.rs` | Rename the canonical tool definitions to domain-prefixed names, update dispatch matching, and optionally preserve deprecated aliases internally for compatibility. |
-| `crates/themion-core/src/agent.rs` | Update workflow guidance, recall hints, and any tool-name-specific prompt text to reference the new canonical names. |
-| `crates/themion-core/src/client.rs` | Ensure any tests or request-shape assumptions that assert exact tool names are updated to the renamed contract. |
-| `crates/themion-core/src/client_codex.rs` | Ensure provider translation continues to pass through the renamed tool names correctly and update any tests that assert exact names. |
+| `crates/themion-core/src/tools.rs` | Rename the canonical tool definitions to domain-prefixed names, update dispatch matching, and preserve deprecated aliases internally for compatibility. |
+| `crates/themion-core/src/agent.rs` | Update workflow guidance, recall hints, and tool-name-specific prompt text to reference the new canonical names while still recognizing legacy aliases in local workflow-result handling and tool-call display labels. |
+| `crates/themion-core/src/client.rs` | Provider request shape continues to use `tool_definitions()` output, so renamed canonical names pass through without extra translation changes. |
+| `crates/themion-core/src/client_codex.rs` | Provider translation continues to pass through the renamed tool names correctly because it preserves function names from the canonical tool schema. |
+| `crates/themion-cli/src/config.rs` | Update the default system prompt guidance to reference `history_recall` and `history_search`. |
 | `docs/architecture.md` | Replace the documented built-in tool list with the domain-prefixed names and explain the grouping convention at a high level. |
-| `docs/engine-runtime.md` | Update the runtime/tool-calling documentation and any examples or recall hints that mention concrete tool names. |
-| `docs/README.md` | Add the new PRD row and keep tool-surface documentation references aligned with the renamed contract. |
+| `docs/engine-runtime.md` | Update the runtime/tool-calling documentation and examples to mention the renamed tools consistently. |
+| `docs/README.md` | Mark this PRD implemented and keep the docs index aligned with the landed contract. |
 
 ## Edge Cases
 
-- A model emits an old tool name such as `bash` during the transition window → handle it via deprecated alias mapping when compatibility mode is implemented, while exposing only `shell_run_command` in the canonical schema.
+- A model emits an old tool name such as `bash` during the transition window → handled via deprecated alias mapping while exposing only `shell_run_command` in the canonical schema.
 - A prompt or workflow instruction still references an old tool name after the rename → treat this as a documentation and prompt-assembly bug because it trains the model toward a stale contract.
 - Tool traces in the TUI or persisted history contain older names from earlier sessions → preserve them as historical records rather than rewriting old stored content.
 - Provider-specific request translation preserves tool names exactly → verify renamed names pass through unchanged and are not normalized unexpectedly.
@@ -215,7 +218,7 @@ User-facing transition expectations:
 - docs should switch to the new names immediately once implemented
 - new prompts and examples should use only the new names
 - old persisted transcripts may still contain historical tool names and should remain readable as-is
-- if deprecated alias handling is implemented, it should be considered transitional and may be removed in a later version once the new names are fully established
+- deprecated alias handling remains transitional and may be removed in a later version once the new names are fully established
 
 No SQLite schema change is required purely for the naming convention update.
 

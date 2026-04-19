@@ -64,9 +64,10 @@ CodexClient  (client_codex.rs)
 tools.rs
   ├─ tool_definitions() → JSON schema array (sent every request)
   ├─ call_tool(name, args, ctx: &ToolCtx) → String
-  │    ├─ read_file, write_file, list_directory, bash  (ignore ctx)
-  │    ├─ recall_history  ──► ctx.db.recall(RecallArgs)
-  │    └─ search_history  ──► ctx.db.search(SearchArgs)
+  │    ├─ fs_read_file, fs_write_file, fs_list_directory, shell_run_command  (ignore ctx)
+  │    ├─ history_recall  ──► ctx.db.recall(RecallArgs)
+  │    ├─ history_search  ──► ctx.db.search(SearchArgs)
+  │    └─ workflow_*  ──► workflow state inspection / transitions
   └─ ToolCtx { db: Arc<DbHandle>, session_id, project_dir }
 
 DbHandle  (db.rs)
@@ -102,7 +103,7 @@ Each call to `run_loop(user_input)`:
 
 The recall hint is a synthetic `role="system"` message:
 
-> "Note: N earlier turn(s) (seq 1–N) are stored in history. Use recall_history to load a range or search_history to find a keyword."
+> "Note: N earlier turn(s) (seq 1–N) are stored in history. Use history_recall to load a range or history_search to find a keyword."
 
 The full `messages` Vec is never trimmed — the in-memory copy is always complete. Windowing only affects what is sent over the wire.
 
@@ -120,16 +121,21 @@ Codex uses the OpenAI Responses API rather than Chat Completions. Its stream con
 
 ## Tools (tools.rs)
 
-All tools receive a `&ToolCtx` carrying the DB handle and session identity. Filesystem tools ignore it; history tools use it. Tool call display labels are truncated to 60 chars to keep TUI lines readable.
+All tools receive a `&ToolCtx` carrying the DB handle and session identity. Filesystem tools ignore it; history tools and workflow tools use it. Tool call display labels are truncated to 60 chars to keep TUI lines readable.
 
-| Tool             | Underlying call                       | Returns                           |
-| ---------------- | ------------------------------------- | --------------------------------- |
-| `read_file`      | `fs::read_to_string`                  | file contents                     |
-| `write_file`     | `fs::write`                           | confirmation line                 |
-| `list_directory` | `fs::read_dir`                        | newline-joined names              |
-| `bash`           | `tokio::process::Command` via `sh -c` | stdout + stderr                   |
-| `recall_history` | `DbHandle::recall`                    | JSON array of past messages       |
-| `search_history` | `DbHandle::search` (FTS5)             | JSON array of snippets + turn_seq |
+| Tool                        | Underlying call                       | Returns                           |
+| --------------------------- | ------------------------------------- | --------------------------------- |
+| `fs_read_file`              | `fs::read_to_string`                  | file contents                     |
+| `fs_write_file`             | `fs::write`                           | confirmation line                 |
+| `fs_list_directory`         | `fs::read_dir`                        | newline-joined names              |
+| `shell_run_command`         | `tokio::process::Command` via `sh -c` | stdout + stderr                   |
+| `history_recall`            | `DbHandle::recall`                    | JSON array of past messages       |
+| `history_search`            | `DbHandle::search` (FTS5)             | JSON array of snippets + turn_seq |
+| `workflow_get_state`        | workflow snapshot assembly            | JSON workflow state               |
+| `workflow_set_active`       | workflow activation logic             | JSON updated workflow state       |
+| `workflow_set_phase`        | workflow transition validation        | JSON updated workflow state       |
+| `workflow_set_phase_result` | workflow phase-result update          | JSON updated workflow state       |
+| `workflow_complete`         | workflow completion/failure logic     | JSON updated workflow state       |
 
 Tool errors are caught in `call_tool` and returned as `"Error: <message>"` strings — the model sees the error as a tool result and can react.
 
@@ -281,7 +287,7 @@ Uses persisted OAuth credentials rather than an API key.
 
 ## Known Limitations
 
-- **No timeout on `bash`** — a hung subprocess blocks the harness indefinitely.
+- **No timeout on `shell_run_command`** — a hung subprocess blocks the harness indefinitely.
 - **No timeout on direct `!<command>` execution** — a hung local subprocess blocks that TUI operation until completion.
 - **No path sandboxing** — tools accept any absolute or relative path.
 - **Max 10 tool-call iterations per turn** — hardcoded in `agent.rs`.

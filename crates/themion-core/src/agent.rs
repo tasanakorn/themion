@@ -51,19 +51,19 @@ fn tool_call_detail(name: &str, args_json: &str) -> String {
     let args: serde_json::Value = serde_json::from_str(args_json).unwrap_or_default();
     let t = |key: &str| truncate(args[key].as_str().unwrap_or("?"), 60);
     match name {
-        "bash" => format!("bash: {}", t("command")),
-        "read_file" => format!("read: {}", t("path")),
-        "write_file" => format!("write: {}", t("path")),
-        "list_directory" => format!("ls: {}", t("path")),
-        "recall_history" => format!(
-            "recall_history: session={}",
+        "shell_run_command" | "bash" => format!("shell: {}", t("command")),
+        "fs_read_file" | "read_file" => format!("read: {}", t("path")),
+        "fs_write_file" | "write_file" => format!("write: {}", t("path")),
+        "fs_list_directory" | "list_directory" => format!("ls: {}", t("path")),
+        "history_recall" | "recall_history" => format!(
+            "history_recall: session={}",
             truncate(args["session_id"].as_str().unwrap_or("current"), 60)
         ),
-        "search_history" => format!("search_history: {}", t("query")),
-        "get_workflow_state" => "workflow: inspect".to_string(),
-        "set_workflow" => format!("workflow: set {}", t("workflow")),
-        "set_workflow_phase" => format!("workflow: phase {}", t("phase")),
-        "complete_workflow" => format!("workflow: complete {}", t("outcome")),
+        "history_search" | "search_history" => format!("history_search: {}", t("query")),
+        "workflow_get_state" | "get_workflow_state" => "workflow: inspect".to_string(),
+        "workflow_set_active" | "set_workflow" => format!("workflow: set {}", t("workflow")),
+        "workflow_set_phase" | "set_workflow_phase" => format!("workflow: phase {}", t("phase")),
+        "workflow_complete" | "complete_workflow" => format!("workflow: complete {}", t("outcome")),
         _ => name.to_string(),
     }
 }
@@ -437,7 +437,7 @@ impl Agent {
         out.push(Message {
             role: "system".to_string(),
             content: Some(
-                "Workflow tools: use get_workflow_state to inspect state, set_workflow to activate a built-in workflow (which always resets phase to that workflow's start phase), set_workflow_phase for valid transitions within the current workflow, and complete_workflow to mark completed or failed. Workflow tools are internal runtime control actions, not user-facing output. Before ending the turn, always provide a normal assistant response to the user that clearly states the result, progress, or next question. Do not rely on set_phase_result or complete_workflow as a substitute for a user-facing message."
+                "Workflow tools: use workflow_get_state to inspect state, workflow_set_active to activate a built-in workflow (which always resets phase to that workflow's start phase), workflow_set_phase for valid transitions within the current workflow, and workflow_complete to mark completed or failed. Workflow tools are internal runtime control actions, not user-facing output. Before ending the turn, always provide a normal assistant response to the user that clearly states the result, progress, or next question. Do not rely on workflow_set_phase_result or workflow_complete as a substitute for a user-facing message."
                     .to_string(),
             ),
             tool_calls: None,
@@ -455,7 +455,7 @@ impl Agent {
             Err(_) => return Ok(false),
         };
         match tool_name {
-            "set_workflow" => {
+            "workflow_set_active" | "set_workflow" => {
                 let workflow = parsed["workflow"].as_str().unwrap_or(DEFAULT_WORKFLOW);
                 let phase = parsed["phase"].as_str().unwrap_or(DEFAULT_PHASE);
                 self.workflow_state.workflow_name = workflow.to_string();
@@ -467,7 +467,7 @@ impl Agent {
                 self.reset_retry_state();
                 Ok(true)
             }
-            "set_workflow_phase" => {
+            "workflow_set_phase" | "set_workflow_phase" => {
                 let phase = parsed["phase"].as_str().ok_or_else(|| anyhow::anyhow!("missing phase"))?;
                 self.workflow_state.phase_name = phase.to_string();
                 self.workflow_state.status = WorkflowStatus::Running;
@@ -476,7 +476,7 @@ impl Agent {
                 self.reset_retry_state();
                 Ok(true)
             }
-            "set_phase_result" => {
+            "workflow_set_phase_result" | "set_phase_result" => {
                 self.workflow_state.phase_result = match parsed["phase_result"].as_str().unwrap_or("pending") {
                     "passed" => PhaseResult::Passed,
                     "failed" => PhaseResult::Failed,
@@ -485,7 +485,7 @@ impl Agent {
                 self.workflow_state.last_updated_turn_seq = Some(turn_seq);
                 Ok(true)
             }
-            "complete_workflow" => {
+            "workflow_complete" | "complete_workflow" => {
                 self.workflow_state.status = match parsed["status"].as_str().unwrap_or("running") {
                     "completed" => WorkflowStatus::Completed,
                     "failed" => WorkflowStatus::Failed,
@@ -607,7 +607,7 @@ impl Agent {
                 msgs_with_system.push(Message {
                     role: "system".to_string(),
                     content: Some(format!(
-                        "Note: {} earlier turn(s) (seq 1–{}) are stored in history. Use recall_history to load a range or search_history to find a keyword.",
+                        "Note: {} earlier turn(s) (seq 1–{}) are stored in history. Use history_recall to load a range or history_search to find a keyword.",
                         omitted, omitted
                     )),
                     tool_calls: None,
@@ -784,7 +784,7 @@ impl Agent {
                 let old_phase = self.workflow_state.phase_name.clone();
                 if self.apply_workflow_tool_result(&tc.function.name, &result, turn_seq)? {
                     let parsed: Value = serde_json::from_str(&result).unwrap_or_default();
-                    if tc.function.name == "set_workflow" {
+                    if matches!(tc.function.name.as_str(), "workflow_set_active" | "set_workflow") {
                         self.persist_workflow_state().await?;
                         self.record_transition(
                             Some(turn_id),
@@ -795,7 +795,7 @@ impl Agent {
                             Some("tool_result"),
                         )
                         .await?;
-                    } else if tc.function.name == "set_workflow_phase" {
+                    } else if matches!(tc.function.name.as_str(), "workflow_set_phase" | "set_workflow_phase") {
                         self.persist_workflow_state().await?;
                         self.record_transition(
                             Some(turn_id),
@@ -806,9 +806,9 @@ impl Agent {
                             Some("tool_result"),
                         )
                         .await?;
-                    } else if tc.function.name == "set_phase_result" {
+                    } else if matches!(tc.function.name.as_str(), "workflow_set_phase_result" | "set_phase_result") {
                         self.persist_workflow_state().await?;
-                    } else if tc.function.name == "complete_workflow" {
+                    } else if matches!(tc.function.name.as_str(), "workflow_complete" | "complete_workflow") {
                         self.persist_workflow_state().await?;
                         let kind = if self.workflow_state.status == WorkflowStatus::Failed {
                             WorkflowTransitionKind::WorkflowFailed
