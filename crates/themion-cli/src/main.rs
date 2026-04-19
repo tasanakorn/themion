@@ -85,8 +85,51 @@ impl Session {
     }
 }
 
+#[derive(Debug, PartialEq)]
+enum EarlyExit {
+    Version,
+    Help,
+    None,
+}
+
+fn handle_early_args(args: &[String]) -> EarlyExit {
+    for arg in &args[1..] {
+        match arg.as_str() {
+            "--version" | "-V" => return EarlyExit::Version,
+            "--help" | "-h" => return EarlyExit::Help,
+            _ => {}
+        }
+    }
+    EarlyExit::None
+}
+
+const HELP_TEXT: &str = "\
+Usage: themion [OPTIONS] [PROMPT]
+
+Options:
+  --dir <DIR>     Project directory (default: current directory)
+  --version, -V   Print version and exit
+  --help, -h      Print this help and exit
+
+When PROMPT is given, runs in print mode and exits.
+Otherwise, launches the interactive TUI.
+
+First run? Start the TUI and type /login codex.";
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    match handle_early_args(&std::env::args().collect::<Vec<_>>()) {
+        EarlyExit::Version => {
+            println!("themion {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        EarlyExit::Help => {
+            print!("{HELP_TEXT}");
+            return Ok(());
+        }
+        EarlyExit::None => {}
+    }
+
     let cfg = Config::load()?;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -164,4 +207,56 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_flag_detected() {
+        let args = vec!["themion".to_string(), "--version".to_string()];
+        assert_eq!(handle_early_args(&args), EarlyExit::Version);
+    }
+
+    #[test]
+    fn version_short_flag_detected() {
+        let args = vec!["themion".to_string(), "-V".to_string()];
+        assert_eq!(handle_early_args(&args), EarlyExit::Version);
+    }
+
+    #[test]
+    fn help_flag_detected() {
+        let args = vec!["themion".to_string(), "--help".to_string()];
+        assert_eq!(handle_early_args(&args), EarlyExit::Help);
+    }
+
+    #[test]
+    fn help_short_flag_detected() {
+        let args = vec!["themion".to_string(), "-h".to_string()];
+        assert_eq!(handle_early_args(&args), EarlyExit::Help);
+    }
+
+    #[test]
+    fn no_early_exit() {
+        let args = vec!["themion".to_string(), "some prompt".to_string()];
+        assert_eq!(handle_early_args(&args), EarlyExit::None);
+    }
+
+    #[test]
+    fn version_flag_with_other_args() {
+        let args = vec![
+            "themion".to_string(),
+            "--dir".to_string(),
+            "/tmp".to_string(),
+            "--version".to_string(),
+        ];
+        assert_eq!(handle_early_args(&args), EarlyExit::Version);
+    }
+
+    #[test]
+    fn empty_args() {
+        let args = vec!["themion".to_string()];
+        assert_eq!(handle_early_args(&args), EarlyExit::None);
+    }
 }
