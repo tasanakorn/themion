@@ -16,6 +16,7 @@ stylos = [
     "dep:chrono",
     "dep:tokio-util",
     "dep:zenoh",
+    "dep:serde_cbor",
 ]
 
 [dependencies]
@@ -40,3 +41,4 @@ hostname = { version = "0.4", optional = true }
 chrono = { version = "0.4", default-features = true, features = ["clock"], optional = true }
 tokio-util = { version = "0.7", optional = true }
 zenoh = { workspace = true, optional = true }
+serde_cbor = { version = "0.11", optional = true }

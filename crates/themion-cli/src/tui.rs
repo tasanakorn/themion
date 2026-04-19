@@ -120,6 +120,10 @@ impl AgentActivity {
             AgentActivity::Finishing => "finalizing".to_string(),
         }
     }
+
+    fn stylos_status_value(&self, stream_chunks: u64, stream_chars: u64) -> String {
+        self.status_bar(stream_chunks, stream_chars)
+    }
 }
 
 pub struct App<'a> {
@@ -296,11 +300,13 @@ impl<'a> App<'a> {
     fn set_agent_activity(&mut self, activity: AgentActivity) {
         self.agent_activity = Some(activity);
         self.pending = Some(self.pending_str());
+        self.refresh_stylos_status();
     }
 
     fn clear_agent_activity(&mut self) {
         self.agent_activity = None;
         self.pending = None;
+        self.refresh_stylos_status();
     }
 
     fn reset_stream_counters(&mut self) {
@@ -326,6 +332,34 @@ impl<'a> App<'a> {
 
     fn push(&mut self, entry: Entry) {
         self.entries.push(entry);
+    }
+
+    fn refresh_stylos_status(&self) {
+        #[cfg(feature = "stylos")]
+        if let Some(handle) = self.stylos.as_ref() {
+            let snapshot = handle.status_snapshot();
+            let workflow = self.workflow_state.clone();
+            let activity_status = self
+                .agent_activity
+                .as_ref()
+                .map(|a| a.stylos_status_value(self.stream_chunks, self.stream_chars))
+                .unwrap_or_else(|| "idle".to_string());
+            let project_dir = self.project_dir.display().to_string();
+            let provider = self.session.provider.clone();
+            let model = self.session.model.clone();
+            let active_profile = self.session.active_profile.clone();
+            let rate_limits = self.status_rate_limits.clone();
+            tokio::spawn(async move {
+                let mut guard = snapshot.write().await;
+                guard.workflow = workflow;
+                guard.activity_status = activity_status;
+                guard.project_dir = project_dir;
+                guard.provider = provider;
+                guard.model = model;
+                guard.active_profile = active_profile;
+                guard.rate_limits = rate_limits;
+            });
+        }
     }
 
     fn handle_agent_event(&mut self, ev: AgentEvent) {
@@ -370,11 +404,13 @@ impl<'a> App<'a> {
             }
             AgentEvent::WorkflowStateChanged(state) => {
                 self.workflow_state = state;
+                self.refresh_stylos_status();
             }
             AgentEvent::Stats(text) => {
                 if let Some(json) = text.strip_prefix("[rate-limit] ") {
                     if let Ok(report) = serde_json::from_str::<ApiCallRateLimitReport>(json) {
                         self.status_rate_limits = Some(report);
+                        self.refresh_stylos_status();
                     }
                     return;
                 }
@@ -1284,7 +1320,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
     });
 
     #[cfg(feature = "stylos")]
-    let stylos_handle = Some(crate::stylos::start(&stylos_cfg, &session).await);
+    let stylos_handle = Some(crate::stylos::start(&stylos_cfg, &session, &project_dir).await);
 
     let mut app = App::new(
         session,
@@ -1294,6 +1330,8 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
         #[cfg(feature = "stylos")]
         stylos_handle,
     );
+
+    app.refresh_stylos_status();
 
     while app.running {
         terminal.draw(|f| draw(f, &app))?;

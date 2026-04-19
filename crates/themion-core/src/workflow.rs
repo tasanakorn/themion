@@ -76,7 +76,7 @@ impl PhaseEntryKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorkflowState {
     pub workflow_name: String,
     pub phase_name: String,
