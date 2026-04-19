@@ -2,6 +2,10 @@ use crate::agents_md;
 use crate::client::{ChatBackend, Message, ModelInfo};
 use crate::db::DbHandle;
 use crate::tools;
+use crate::workflow::{
+    WorkflowState, WorkflowStatus, WorkflowTransitionKind, DEFAULT_AGENT, DEFAULT_PHASE,
+    DEFAULT_WORKFLOW,
+};
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,6 +31,7 @@ pub enum AgentEvent {
     AssistantChunk(String),
     AssistantText(String),
     Stats(String),
+    WorkflowStateChanged(WorkflowState),
     TurnDone(TurnStats),
 }
 
@@ -69,6 +74,7 @@ pub struct Agent {
     turn_boundaries: Vec<usize>,
     turn_seq_counter: u32,
     model_info: Option<ModelInfo>,
+    workflow_state: WorkflowState,
 }
 
 impl Agent {
@@ -90,6 +96,7 @@ impl Agent {
             turn_boundaries: Vec::new(),
             turn_seq_counter: 0,
             model_info: None,
+            workflow_state: WorkflowState::default(),
         }
     }
 
@@ -98,20 +105,7 @@ impl Agent {
         model: String,
         system_prompt: String,
     ) -> Self {
-        Self {
-            client,
-            model,
-            system_prompt,
-            messages: Vec::new(),
-            event_tx: None,
-            session_id: Uuid::new_v4(),
-            project_dir: PathBuf::new(),
-            db: DbHandle::open_in_memory().expect("in-memory db"),
-            window_turns: 5,
-            turn_boundaries: Vec::new(),
-            turn_seq_counter: 0,
-            model_info: None,
-        }
+        Self::new(client, model, system_prompt)
     }
 
     pub fn new_with_events(
@@ -120,20 +114,9 @@ impl Agent {
         system_prompt: String,
         tx: mpsc::UnboundedSender<AgentEvent>,
     ) -> Self {
-        Self {
-            client,
-            model,
-            system_prompt,
-            messages: Vec::new(),
-            event_tx: Some(tx),
-            session_id: Uuid::new_v4(),
-            project_dir: PathBuf::new(),
-            db: DbHandle::open_in_memory().expect("in-memory db"),
-            window_turns: 5,
-            turn_boundaries: Vec::new(),
-            turn_seq_counter: 0,
-            model_info: None,
-        }
+        let mut agent = Self::new(client, model, system_prompt);
+        agent.event_tx = Some(tx);
+        agent
     }
 
     pub fn new_with_db(
@@ -144,6 +127,11 @@ impl Agent {
         project_dir: PathBuf,
         db: Arc<DbHandle>,
     ) -> Self {
+        let workflow_state = db
+            .get_session_workflow_state(session_id)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         Self {
             client,
             model,
@@ -157,6 +145,7 @@ impl Agent {
             turn_boundaries: Vec::new(),
             turn_seq_counter: 0,
             model_info: None,
+            workflow_state,
         }
     }
 
@@ -177,6 +166,10 @@ impl Agent {
         self.model_info.as_ref()
     }
 
+    pub fn workflow_state(&self) -> &WorkflowState {
+        &self.workflow_state
+    }
+
     fn emit(&self, event: AgentEvent) {
         if let Some(tx) = &self.event_tx {
             let _ = tx.send(event);
@@ -191,11 +184,49 @@ impl Agent {
         self.turn_seq_counter += 1;
         let turn_seq = self.turn_seq_counter;
         self.turn_boundaries.push(self.messages.len());
+
+        self.workflow_state.workflow_name = DEFAULT_WORKFLOW.to_string();
+        self.workflow_state.phase_name = "EXECUTE".to_string();
+        self.workflow_state.status = WorkflowStatus::Running;
+        self.workflow_state.agent_name = DEFAULT_AGENT.to_string();
+        self.workflow_state.last_updated_turn_seq = Some(turn_seq);
+        self.emit(AgentEvent::WorkflowStateChanged(self.workflow_state.clone()));
+
+        {
+            let db = self.db.clone();
+            let sid = self.session_id;
+            let state = self.workflow_state.clone();
+            tokio::task::spawn_blocking(move || db.update_session_workflow_state(sid, &state))
+                .await??;
+        }
+
         let turn_id = {
             let db = self.db.clone();
             let sid = self.session_id;
-            tokio::task::spawn_blocking(move || db.begin_turn(sid, turn_seq)).await??
+            let workflow = self.workflow_state.clone();
+            tokio::task::spawn_blocking(move || db.begin_turn(sid, turn_seq, &workflow)).await??
         };
+
+        {
+            let db = self.db.clone();
+            let sid = self.session_id;
+            let workflow = self.workflow_state.clone();
+            tokio::task::spawn_blocking(move || {
+                db.record_workflow_transition(
+                    sid,
+                    Some(turn_id),
+                    Some(turn_seq),
+                    &workflow.workflow_name,
+                    None,
+                    &workflow.phase_name,
+                    workflow.status.as_str(),
+                    WorkflowTransitionKind::WorkflowStarted,
+                    Some("user_input"),
+                    None,
+                )
+            })
+            .await??;
+        }
 
         self.messages.push(Message {
             role: "user".to_string(),
@@ -209,7 +240,8 @@ impl Agent {
             let sid = self.session_id;
             let msg = self.messages.last().unwrap().clone();
             let seq = self.messages.len() as u32;
-            tokio::task::spawn_blocking(move || db.append_message(turn_id, sid, seq, &msg))
+            let workflow = self.workflow_state.clone();
+            tokio::task::spawn_blocking(move || db.append_message(turn_id, sid, seq, &msg, &workflow))
                 .await??;
         }
 
@@ -222,6 +254,7 @@ impl Agent {
         let mut tokens_in = 0u64;
         let mut tokens_out = 0u64;
         let mut tokens_cached = 0u64;
+        let turn_end_reason = "workflow_completed".to_string();
 
         for _ in 0..10 {
             let mut msgs_with_system = vec![Message {
@@ -239,6 +272,19 @@ impl Agent {
                     tool_call_id: None,
                 });
             }
+
+            msgs_with_system.push(Message {
+                role: "system".to_string(),
+                content: Some(format!(
+                    "Workflow context: flow={} phase={} status={} agent={}",
+                    self.workflow_state.workflow_name,
+                    self.workflow_state.phase_name,
+                    self.workflow_state.status.as_str(),
+                    self.workflow_state.agent_name,
+                )),
+                tool_calls: None,
+                tool_call_id: None,
+            });
 
             let window_start = if self.turn_boundaries.len() > self.window_turns {
                 let omitted = self.turn_boundaries.len() - self.window_turns;
@@ -306,7 +352,8 @@ impl Agent {
                 let sid = self.session_id;
                 let msg = self.messages.last().unwrap().clone();
                 let seq = self.messages.len() as u32;
-                tokio::task::spawn_blocking(move || db.append_message(turn_id, sid, seq, &msg))
+                let workflow = self.workflow_state.clone();
+                tokio::task::spawn_blocking(move || db.append_message(turn_id, sid, seq, &msg, &workflow))
                     .await??;
             }
 
@@ -342,10 +389,44 @@ impl Agent {
                     let sid = self.session_id;
                     let msg = self.messages.last().unwrap().clone();
                     let seq = self.messages.len() as u32;
-                    tokio::task::spawn_blocking(move || db.append_message(turn_id, sid, seq, &msg))
+                    let workflow = self.workflow_state.clone();
+                    tokio::task::spawn_blocking(move || db.append_message(turn_id, sid, seq, &msg, &workflow))
                         .await??;
                 }
             }
+        }
+
+        self.workflow_state.phase_name = DEFAULT_PHASE.to_string();
+        self.workflow_state.status = WorkflowStatus::Completed;
+        self.workflow_state.last_updated_turn_seq = Some(turn_seq);
+        self.emit(AgentEvent::WorkflowStateChanged(self.workflow_state.clone()));
+
+        {
+            let db = self.db.clone();
+            let sid = self.session_id;
+            let workflow = self.workflow_state.clone();
+            tokio::task::spawn_blocking(move || db.update_session_workflow_state(sid, &workflow))
+                .await??;
+        }
+        {
+            let db = self.db.clone();
+            let sid = self.session_id;
+            let workflow = self.workflow_state.clone();
+            tokio::task::spawn_blocking(move || {
+                db.record_workflow_transition(
+                    sid,
+                    Some(turn_id),
+                    Some(turn_seq),
+                    &workflow.workflow_name,
+                    Some(&workflow.phase_name),
+                    &workflow.phase_name,
+                    workflow.status.as_str(),
+                    WorkflowTransitionKind::WorkflowCompleted,
+                    Some("model_completion"),
+                    None,
+                )
+            })
+            .await??;
         }
 
         let stats = TurnStats {
@@ -359,7 +440,11 @@ impl Agent {
         {
             let db = self.db.clone();
             let s = stats.clone();
-            tokio::task::spawn_blocking(move || db.finalize_turn(turn_id, &s)).await??;
+            let workflow = self.workflow_state.clone();
+            tokio::task::spawn_blocking(move || {
+                db.finalize_turn(turn_id, &s, &workflow, false, &turn_end_reason)
+            })
+            .await??;
         }
         self.emit(AgentEvent::TurnDone(stats.clone()));
         Ok((final_response, stats))

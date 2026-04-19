@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use themion_core::agent::{Agent, AgentEvent, TurnStats};
+use themion_core::workflow::WorkflowState;
 use themion_core::client::ChatClient;
 use themion_core::client_codex::{ApiCallRateLimitReport, CodexClient};
 use themion_core::db::DbHandle;
@@ -103,17 +104,17 @@ impl AgentActivity {
 
     fn status_bar(&self, stream_chunks: u64, stream_chars: u64) -> String {
         match self {
-            AgentActivity::PreparingRequest => "agent: preparing".to_string(),
-            AgentActivity::WaitingForModel => "agent: waiting-model".to_string(),
+            AgentActivity::PreparingRequest => "preparing".to_string(),
+            AgentActivity::WaitingForModel => "waiting-model".to_string(),
             AgentActivity::StreamingResponse => {
-                format!("agent: streaming c:{} ch:{}", stream_chunks, stream_chars)
+                format!("streaming c:{} ch:{}", stream_chunks, stream_chars)
             }
-            AgentActivity::RunningTool(_) => "agent: running-tool".to_string(),
-            AgentActivity::WaitingAfterTool => "agent: waiting-after-tool".to_string(),
-            AgentActivity::LoginStarting => "agent: login-start".to_string(),
-            AgentActivity::WaitingForLoginBrowser => "agent: login-wait".to_string(),
-            AgentActivity::RunningShellCommand => "agent: shell".to_string(),
-            AgentActivity::Finishing => "agent: finalizing".to_string(),
+            AgentActivity::RunningTool(_) => "running-tool".to_string(),
+            AgentActivity::WaitingAfterTool => "waiting-after-tool".to_string(),
+            AgentActivity::LoginStarting => "login-start".to_string(),
+            AgentActivity::WaitingForLoginBrowser => "login-wait".to_string(),
+            AgentActivity::RunningShellCommand => "shell".to_string(),
+            AgentActivity::Finishing => "finalizing".to_string(),
         }
     }
 }
@@ -142,7 +143,9 @@ pub struct App<'a> {
     stream_chars: u64,
     status_rate_limits: Option<ApiCallRateLimitReport>,
     status_model_info: Option<ModelInfo>,
+    workflow_state: WorkflowState,
 }
+
 
 impl<'a> App<'a> {
     pub fn new(
@@ -220,6 +223,7 @@ impl<'a> App<'a> {
             stream_chars: 0,
             status_rate_limits: None,
             status_model_info: initial_model_info,
+            workflow_state: WorkflowState::default(),
         }
     }
 
@@ -333,6 +337,9 @@ impl<'a> App<'a> {
             AgentEvent::ToolEnd => {
                 self.push(Entry::ToolDone);
                 self.set_agent_activity(AgentActivity::WaitingAfterTool);
+            }
+            AgentEvent::WorkflowStateChanged(state) => {
+                self.workflow_state = state;
             }
             AgentEvent::Stats(text) => {
                 if let Some(json) = text.strip_prefix("[rate-limit] ") {
@@ -1082,7 +1089,7 @@ fn draw(f: &mut Frame, app: &App) {
         .project_dir
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("?");
+        .unwrap_or("/");
     let fmt = |n: u64| -> String {
         let s = n.to_string();
         let mut out = String::new();
@@ -1098,10 +1105,15 @@ fn draw(f: &mut Frame, app: &App) {
         .agent_activity
         .as_ref()
         .map(|a| a.status_bar(app.stream_chunks, app.stream_chars))
-        .unwrap_or_else(|| "agent: idle".to_string());
+        .unwrap_or_else(|| "idle".to_string());
     let bar_top = format!(
-        " {} | {} | {} | {}",
-        project_leaf, app.session.active_profile, app.session.model, activity,
+        " {} | {} | {} | flow: {} | phase: {} | agent: {}",
+        app.session.active_profile,
+        app.session.model,
+        project_leaf,
+        app.workflow_state.workflow_name,
+        app.workflow_state.phase_name,
+        activity,
     );
     let bar_bottom = format!(
         " {} | in:{} out:{} cached:{} | ctx:{}",
@@ -1346,6 +1358,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
             Some(AppEvent::AgentReady(agent, sid)) => {
                 let agent = *agent;
                 app.status_model_info = agent.model_info().cloned();
+                app.workflow_state = agent.workflow_state().clone();
                 if let Some(h) = app.agents.iter_mut().find(|h| h.session_id == sid) {
                     h.agent = Some(agent);
                 }
