@@ -84,7 +84,10 @@ pub async fn start(settings: &StylosConfig, session: &Session) -> StylosHandle {
 }
 
 async fn start_inner(settings: &StylosConfig, session: &Session) -> Result<StylosHandle, String> {
-    let instance = derive_instance(settings.instance.as_deref()).unwrap_or_else(|| "themion".to_string());
+    let hostname = derive_hostname().unwrap_or_else(|| "themion".to_string());
+    let process_id = std::process::id();
+    let identity_instance = hostname.clone();
+    let key_instance = format!("{hostname}/{process_id}");
     let realm = settings.realm();
     let mode = settings.mode();
 
@@ -92,7 +95,7 @@ async fn start_inner(settings: &StylosConfig, session: &Session) -> Result<Stylo
         stylos: IdentitySection {
             realm: realm.clone(),
             role: "themion".to_string(),
-            instance: instance.clone(),
+            instance: identity_instance.clone(),
         },
         zenoh: ZenohSection {
             mode: mode.clone(),
@@ -121,7 +124,7 @@ async fn start_inner(settings: &StylosConfig, session: &Session) -> Result<Stylo
     let ct = CancellationToken::new();
     let hb_ct = ct.clone();
     let hb_session = session_handle.clone();
-    let hb_key = format!("stylos/{}/themion/{}/heartbeat", realm, instance);
+    let hb_key = format!("stylos/{}/themion/{}/heartbeat", realm, key_instance);
     let heartbeat_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -141,10 +144,10 @@ async fn start_inner(settings: &StylosConfig, session: &Session) -> Result<Stylo
 
     let q_ct = ct.clone();
     let q_session = session_handle.clone();
-    let q_key = format!("stylos/{}/themion/{}/info", realm, instance);
+    let q_key = format!("stylos/{}/themion/{}/info", realm, key_instance);
     let info = ThemionInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        instance: instance.clone(),
+        instance: key_instance.clone(),
         realm: realm.clone(),
         mode: mode.clone(),
         profile: session.active_profile.clone(),
@@ -173,21 +176,14 @@ async fn start_inner(settings: &StylosConfig, session: &Session) -> Result<Stylo
     });
 
     Ok(StylosHandle {
-        state: StylosRuntimeState::Active { mode, realm, instance },
+        state: StylosRuntimeState::Active { mode, realm, instance: key_instance },
         session: Some(session_handle),
         heartbeat_task: Some(heartbeat_task),
         queryable_task: Some(queryable_task),
     })
 }
 
-fn derive_instance(override_id: Option<&str>) -> Option<String> {
-    if let Some(value) = override_id {
-        let value = value.trim();
-        if is_valid_segment(value) {
-            return Some(value.to_string());
-        }
-    }
-
+fn derive_hostname() -> Option<String> {
     let hostname = hostname::get().ok()?.to_string_lossy().to_lowercase();
     let mapped: String = hostname
         .chars()
