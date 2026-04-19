@@ -20,6 +20,7 @@ Instructions for coding agents working in this repository.
   - look here first for file IO, TUI event handling, and app/session orchestration
 - `docs/`
   - project docs and behavior notes; consult relevant docs before changing documented flows
+  - PRDs live in `docs/prd/`; when creating or updating a PRD, follow `docs/prd/README.md`
 - crate-local tests and inline module tests
   - prefer keeping tests close to the code they cover unless the crate already uses a different pattern
 
@@ -80,6 +81,17 @@ Typical checks:
 - `cargo test -p themion-cli`
 
 If you changed only one crate, prefer checking that crate first.
+
+## When writing PRDs
+
+- Follow `docs/prd/README.md` for PRD authoring conventions in this repository.
+- Before writing, read the most recent 2–3 PRDs in `docs/prd/` and match their structure, heading style, and prose voice.
+- Keep PRDs docs-first: ground the document in existing behavior described in `docs/`, then read source only where documentation leaves gaps.
+- Use sequential filenames `prd-NNN-<slug>.md` and update the PRD table in `docs/README.md` with the new entry.
+- Keep canonical top-level sections in this order when they are relevant: Goals, Non-goals, Background & Motivation, Design, Changes by Component, Edge Cases, Migration, Testing.
+- Omit sections that would contain only placeholders.
+- In Testing, write each outcome as `step → verify:`.
+- For major design choices, include a brief inline `Alternative considered` note in the relevant design subsection instead of adding a standalone alternatives section.
 
 ## Git discipline
 
