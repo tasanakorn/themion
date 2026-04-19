@@ -361,7 +361,7 @@ impl<'a> App<'a> {
                     .unwrap_or(&stats_text)
                     .to_string();
                 self.push(Entry::TurnDone {
-                    summary: "turn complete".to_string(),
+                    summary: "󰇺 Turn end".to_string(),
                     stats: stats_text,
                 });
                 self.push(Entry::Blank);
@@ -970,7 +970,7 @@ fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Lin
             }
             Entry::ToolCall(detail) => {
                 lines.push(Line::from(vec![Span::styled(
-                    format!("  ↳ {}", detail),
+                    format!("   {}", detail),
                     Style::default().fg(Color::Yellow),
                 )]));
             }
@@ -984,7 +984,7 @@ fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Lin
             Entry::TurnDone { summary, stats } => {
                 lines.push(Line::from(vec![
                     Span::raw("  "),
-                    Span::styled("󰄬 ", Style::default().fg(Color::Green)),
+                    Span::styled("", Style::default().fg(Color::Green)),
                     Span::styled(
                         summary.to_string(),
                         Style::default()
