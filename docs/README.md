@@ -4,6 +4,7 @@
 
 - [architecture.md](architecture.md) — component map, harness loop, context windowing, tool dispatch, TUI layout, build profiles.
 - [core-ai-engine-loop.md](core-ai-engine-loop.md) — detailed walkthrough of prompt inputs, `AGENTS.md` injection, context building, tool-calling flow, and SQLite session storage.
+- [codex-integration-guide.md](codex-integration-guide.md) — Codex provider integration contract, endpoint usage, auth, `/models` metadata parsing, `/responses` translation, and rate-limit extraction behavior.
 
 ## Product Requirements Documents (PRDs)
 
