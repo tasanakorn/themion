@@ -3,7 +3,7 @@
 - **Status:** Implemented
 - **Version:** v0.3.0
 - **Scope:** `themion-cli` (input handling, TUI command execution, output rendering); docs
-- **Author:** Tasanakorn (design) + Claude Code (PRD authoring)
+- **Author:** Tasanakorn (design) + Themion (PRD authoring)
 - **Date:** 2026-04-19
 
 ## Goals

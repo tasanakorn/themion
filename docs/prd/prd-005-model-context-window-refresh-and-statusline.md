@@ -3,7 +3,7 @@
 - **Status:** Implemented
 - **Version:** v0.3.0
 - **Scope:** `themion-core` (model metadata refresh, provider model info handling, session/runtime state); `themion-cli` (status line rendering and model-switch wiring); docs
-- **Author:** Tasanakorn (design) + Claude Code (PRD authoring)
+- **Author:** Tasanakorn (design) + Themion (PRD authoring)
 - **Date:** 2026-04-19
 
 > **Implementation note:** The landed implementation refreshes model metadata through the backend abstraction and stores active model info on the agent/session path. The TUI status line now renders `ctx:<used>/<limit>`, where `<used>` is the last turn's prompt token count and `<limit>` prefers `max_context_window`, falling back to `context_window` when needed. Treat the code and current docs as the source of truth where they differ from the original proposed display wording.

@@ -1416,14 +1416,12 @@ dependencies = [
 
 [[package]]
 name = "themion-cli"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
- "base64",
  "crossterm",
  "dirs",
  "ratatui",
- "reqwest",
  "serde",
  "serde_json",
  "themion-core",
@@ -1431,22 +1429,23 @@ dependencies = [
  "tokio-stream",
  "toml",
  "tui-textarea",
- "urlencoding",
  "uuid",
 ]
 
 [[package]]
 name = "themion-core"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "chrono",
  "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
  "tokio",
+ "urlencoding",
  "uuid",
 ]
 

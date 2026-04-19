@@ -37,7 +37,7 @@ Start each PRD with a title and metadata block like the existing PRDs:
 - `- **Status:** <status>`
 - `- **Version:** vX.Y.Z`
 - `- **Scope:** <affected crates / areas>`
-- `- **Author:** <name> (design) + Claude Code (PRD authoring)`
+- `- **Author:** <name> (design) + <tool/agent name> (PRD authoring)`
 - `- **Date:** YYYY-MM-DD`
 
 Default status should be `Proposed` unless there is a clear reason to use another status.

@@ -3,7 +3,7 @@
 - **Status:** Implemented
 - **Version:** v0.4.0
 - **Scope:** `themion-core` (harness loop, turn lifecycle, persisted turn metadata, runtime state); `themion-cli` (status display and session wiring); docs
-- **Author:** Tasanakorn (design) + Claude Code (PRD authoring)
+- **Author:** Tasanakorn (design) + Themion (PRD authoring)
 - **Date:** 2026-04-19
 
 > **Implementation note:** The landed implementation introduces explicit workflow runtime state and SQLite persistence for workflow/session/turn metadata, but it currently implements only the built-in default workflow path. The default workflow is `NORMAL`, with built-in phases `IDLE` and `EXECUTE`. Sessions begin in `IDLE`, switch to `EXECUTE` while a turn is actively running, and return to `IDLE` when that workflow completes for the turn. The TUI status line now renders `<profile> | <model> | <leaf_project_dir> | flow: <workflow> | phase: <phase> | agent: <agent_state>`, where the `agent:` field shows live runtime activity such as `idle`, `waiting-model`, or `running-tool` rather than a stable agent name. Treat the code and current docs as the source of truth where they differ from the original proposed wording.
