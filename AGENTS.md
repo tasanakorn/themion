@@ -21,6 +21,9 @@ Instructions for coding agents working in this repository.
 - `docs/`
   - project docs and behavior notes; consult relevant docs before changing documented flows
   - PRDs live in `docs/prd/`; when creating or updating a PRD, follow `docs/prd/README.md`
+- `scripts/`
+  - repository maintenance helpers
+  - use `scripts/bump_version.py <semver>` to update crate package versions consistently
 - crate-local tests and inline module tests
   - prefer keeping tests close to the code they cover unless the crate already uses a different pattern
 

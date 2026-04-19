@@ -712,19 +712,22 @@ impl<'a> App<'a> {
     }
 }
 
+fn format_human_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{}m", n / 1_000_000)
+    } else if n >= 1_000 {
+        format!("{}k", n / 1_000)
+    } else {
+        n.to_string()
+    }
+}
+
 fn build_context_statusline(last_ctx_tokens: u64, info: Option<&ModelInfo>) -> String {
-    let fmt = |n: u64| -> String {
-        if n >= 1000 {
-            format!("{}k", n / 1000)
-        } else {
-            n.to_string()
-        }
-    };
     let max_part = info
         .and_then(|info| info.max_context_window.or(info.context_window))
-        .map(fmt)
+         .map(format_human_count)
         .unwrap_or_else(|| "?".to_string());
-    format!("{}/{}", fmt(last_ctx_tokens), max_part)
+    format!("{}/{}", format_human_count(last_ctx_tokens), max_part)
 }
 
 fn build_rate_limit_statusline(report: Option<&ApiCallRateLimitReport>) -> String {
@@ -1100,17 +1103,6 @@ fn draw(f: &mut Frame, app: &App) {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("/");
-    let fmt = |n: u64| -> String {
-        let s = n.to_string();
-        let mut out = String::new();
-        for (i, ch) in s.chars().rev().enumerate() {
-            if i > 0 && i % 3 == 0 {
-                out.push(',');
-            }
-            out.push(ch);
-        }
-        out.chars().rev().collect()
-    };
     let activity = app
         .agent_activity
         .as_ref()
@@ -1128,9 +1120,9 @@ fn draw(f: &mut Frame, app: &App) {
     let bar_bottom = format!(
         " {} | in:{} out:{} cached:{} | ctx:{}",
         build_rate_limit_statusline(app.status_rate_limits.as_ref()),
-        fmt(app.session_tokens.tokens_in),
-        fmt(app.session_tokens.tokens_out),
-        fmt(app.session_tokens.tokens_cached),
+        format_human_count(app.session_tokens.tokens_in),
+        format_human_count(app.session_tokens.tokens_out),
+        format_human_count(app.session_tokens.tokens_cached),
         build_context_statusline(app.last_ctx_tokens, app.status_model_info.as_ref()),
     );
     f.render_widget(Clear, chunks[2]);

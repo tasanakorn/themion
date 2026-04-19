@@ -173,7 +173,7 @@ Layout (top to bottom):
 └───────────────────────────────────────────────────────────────────┘
 ```
 
-Token counts in the status bar are formatted with thousands separators. `ctx` shows `tokens_in` from the last completed turn (actual context sent to the API).
+Token counts in the status bar use compact human-friendly units such as `2k` and `1m`. `ctx` shows `tokens_in` from the last completed turn (actual context sent to the API).
 
 Key bindings:
 
