@@ -1,6 +1,6 @@
 # PRD-017: Press `Esc` to Interrupt an In-Progress Agent Turn
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Version:** v0.9.0
 - **Scope:** `themion-cli`, `themion-core`, docs
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
@@ -180,6 +180,9 @@ If persisted turn-end reason or workflow-state serialization currently treats in
 No config migration is required.
 
 ## Testing
+
+Implementation status: landed in code and docs. The interrupt path now propagates turn-level cancellation through the TUI, agent loop, and streaming backends, and interrupted turns reset cleanly for the next successful turn instead of remaining stuck in `Interrupted`.
+
 
 - start a long-running model turn and press `Esc` → verify: the turn stops without quitting the TUI and input becomes available again.
 - start a turn that is actively streaming assistant text and press `Esc` → verify: streaming stops promptly, partial output remains visible if already rendered, and the turn is marked interrupted.

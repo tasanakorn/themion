@@ -26,7 +26,7 @@
 | PRD-014 | [Codex CLI Web-Search Instruction Injection](prd/prd-014-codex-cli-web-search-instruction-injection.md) | Implemented | v0.8.0 | `themion-core`, docs |
 | PRD-015 | [User-Feedback-Required Phase Result](prd/prd-015-user-feedback-required-phase-result.md) | Proposed | v0.8.0 | `themion-core`, `themion-cli`, docs |
 | PRD-016 | [Commit-When-Asked Guardrail for Useful Brief Commit Messages](prd/prd-016-commit-when-asked-brief-summary-guardrail.md) | Implemented | v0.8.1 | `themion-core`, docs |
-| PRD-017 | [Press `Esc` to Interrupt an In-Progress Agent Turn](prd/prd-017-press-esc-to-interrupt-agent.md) | Proposed | v0.9.0 | `themion-cli`, `themion-core`, docs |
+| PRD-017 | [Press `Esc` to Interrupt an In-Progress Agent Turn](prd/prd-017-press-esc-to-interrupt-agent.md) | Implemented | v0.9.0 | `themion-cli`, `themion-core`, docs |
 
 ## Roadmap note
 
