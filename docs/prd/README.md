@@ -23,6 +23,7 @@ Use this guide whenever you create or update a PRD.
 - Use the next sequential number in `docs/prd/`.
 - Zero-pad the number to 3 digits.
 - Keep the slug kebab-case and concise.
+- Detect the highest existing `NNN` in `docs/prd/` and increment it by 1 for the new PRD.
 
 Current examples:
 - `prd-001-config-and-repl-feedback.md`
@@ -41,6 +42,16 @@ Start each PRD with a title and metadata block like the existing PRDs:
 - `- **Date:** YYYY-MM-DD`
 
 Default status should be `Proposed` unless there is a clear reason to use another status.
+
+### Short semver guideline
+
+Use the PRD `Version` field to record the intended release target using semantic versioning:
+
+- Patch (`vX.Y.Z` → `vX.Y.(Z+1)`): bug fixes, wording-only doc corrections, or small behavior adjustments that do not materially expand user-facing capability.
+- Minor (`vX.Y.Z` → `vX.(Y+1).0`): new user-visible features, meaningful workflow changes, or additive capabilities that remain backward compatible.
+- Major (`vX.Y.Z` → `v(X+1).0.0`): breaking changes, removals, or incompatible behavior/config changes.
+
+When updating a PRD for newly implemented work, detect whether the change is patch, minor, or major scope and increment the version number accordingly instead of always bumping the minor version.
 
 ## Canonical section order
 
