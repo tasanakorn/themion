@@ -24,7 +24,7 @@ This separation is intentional: reusable harness/runtime and provider behavior b
 - **OpenAI-style tool calling** — tools are described as JSON function schemas; compatible providers can invoke them and return structured tool calls.
 - **Event-driven TUI** — `Agent` emits `AgentEvent` variants over an `mpsc` channel; the TUI renders each event as it arrives, giving streaming token display without blocking the input loop.
 - **Provider abstraction** — the core harness speaks through a `ChatBackend` trait so different transports and wire formats can be swapped at runtime.
-- **Separated prompt inputs** — the base system prompt and contextual instruction files such as `AGENTS.md` are treated as distinct prompt inputs rather than merged into a single message.
+- **Separated prompt inputs** — the base system prompt, predefined coding guardrails, and contextual instruction files such as `AGENTS.md` are treated as distinct prompt inputs rather than merged into a single message.
 
 ## Component Map
 
@@ -96,7 +96,9 @@ Each call to `run_loop(user_input)`:
 
 ```text
 [system_prompt]
+[predefined coding guardrails]
 [injected contextual instructions such as AGENTS.md, when available]
+[workflow context + phase instructions]
 [recall hint — only when turn_boundaries.len() > window_turns]
 [messages from turn (current − window_turns) … now]
 ```

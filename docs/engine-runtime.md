@@ -25,6 +25,7 @@ A single user turn follows this shape:
 3. The harness records a new turn and persists the user message.
 4. The harness builds the model input from:
    - the base system prompt
+   - predefined built-in coding guardrails
    - injected contextual instructions such as `AGENTS.md`
    - workflow context and phase instructions
    - an optional history recall hint
@@ -46,7 +47,20 @@ The base system prompt comes from configuration. It establishes the assistant's 
 
 This is the top-level instruction layer.
 
-### 2. Contextual instruction files
+### 2. Predefined coding guardrails
+
+Themion injects a short built-in coding-guardrail instruction layer after the base system prompt and before repository-local instructions. This layer is inspired by the commonly shared “Karpathy's `CLAUDE.md`” idea set, but Themion adopts only a minimal behavioral subset rather than Anthropic's full Claude Code mechanism.
+
+The built-in topics are:
+
+- avoid making important assumptions silently
+- prefer the simplest solution that cleanly solves the task
+- make targeted changes and avoid unrelated refactors
+- run the narrowest useful validation and report the result
+
+This layer remains separate from both the base system prompt and repository-local instruction files.
+
+### 3. Contextual instruction files
 
 Repository or workspace instructions such as `AGENTS.md` are treated as separate injected prompt inputs, not as text concatenated into the base system prompt.
 
@@ -58,7 +72,7 @@ That separation matters because:
 
 In practice, the model sees both the base system prompt and the injected contextual instructions, but they remain separate prompt components.
 
-### 3. Workflow context and phase instructions
+### 4. Workflow context and phase instructions
 
 Workflow runtime state is injected as another separate prompt component.
 
@@ -83,7 +97,7 @@ The runtime also injects phase-specific guidance from `workflow.rs`. For the bui
 - `EXECUTE` tells the model to implement the smallest working slice and keep scope narrow
 - `VALIDATE` tells the model to check success criteria and return pass or fail
 
-### 4. Recall hint for trimmed history
+### 5. Recall hint for trimmed history
 
 When the in-memory conversation is longer than the configured context window, the harness adds a synthetic system message explaining that earlier turns are still available in persistent history.
 
@@ -113,6 +127,7 @@ For each model request, the harness constructs a smaller prompt window. Conceptu
 
 ```text
 [system prompt]
+[predefined coding guardrails]
 [injected contextual instructions, e.g. AGENTS.md]
 [workflow context + phase instructions]
 [recall hint, if older turns were omitted]
@@ -443,6 +458,7 @@ The core crate is responsible for:
 A useful way to think about Themion's engine/runtime is:
 
 - **system prompt** defines default assistant behavior
+- **predefined coding guardrails** add a built-in coding baseline before repository-local instructions
 - **`AGENTS.md` and related instructions** define repository-local behavior
 - **workflow context** tells the model what state machine it is currently operating inside
 - **recent turns** provide immediate conversational context

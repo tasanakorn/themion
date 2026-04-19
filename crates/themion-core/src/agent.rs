@@ -1,6 +1,7 @@
 use crate::agents_md;
 use crate::client::{ChatBackend, Message, ModelInfo};
 use crate::db::DbHandle;
+use crate::predefined_guardrails::PREDEFINED_GUARDRAILS;
 use crate::tools;
 use crate::workflow::{
     activation_marker, allowed_transitions, can_transition, normalize_workflow_name,
@@ -653,6 +654,13 @@ impl Agent {
                 tool_calls: None,
                 tool_call_id: None,
             }];
+
+            msgs_with_system.push(Message {
+                role: "system".to_string(),
+                content: Some(PREDEFINED_GUARDRAILS.to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            });
 
             if let Some(agents_md_message) = agents_md::build_agents_md_message(&self.project_dir) {
                 msgs_with_system.push(Message {
