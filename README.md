@@ -15,12 +15,13 @@ themion is a Rust-powered AI agent with a full-featured TUI. Give it a task in p
 
 ## Features
 
+- **First-class Codex login** — Sign in with `/login codex` and use your ChatGPT / Codex subscription directly, without managing an API key
 - **Full TUI** — Ratatui-powered interface with streaming output, scroll, mouse support, and a braille spinner while thinking
 - **Agentic tool use** — Reads files, writes files, lists directories, runs shell commands; loops until done
 - **Direct shell shortcut** — Run local commands instantly from the TUI with `!<command>` and see the output in the conversation pane
 - **Persistent session history** — SQLite-backed conversation history with windowed context and keyword search
 - **Multi-profile support** — Switch between providers and models on the fly with `/config profile use`
-- **Multi-model** — Works with any OpenRouter model: Claude, GPT-4o, Gemini, Mistral, and more
+- **Flexible backends** — Codex is the recommended default, with OpenRouter and local OpenAI-compatible servers like llama.cpp, Ollama, or LM Studio as alternatives
 - **Print mode** — Pipe a single prompt and get a result; perfect for scripting
 - **Single binary** — Ships as one statically-linked executable with no runtime dependencies
 
@@ -36,13 +37,21 @@ After `0.2.0`, themion will use themion to help develop itself.
 # Build a release binary
 cargo build --release
 
-# Set your API key (uses OpenRouter)
-export OPENROUTER_API_KEY=sk-or-...
-
 # Launch the TUI
 ./target/release/themion
+```
 
-# Or fire a one-shot prompt (print mode)
+Recommended first run inside the TUI:
+
+```text
+/login codex
+```
+
+That starts the built-in Codex login flow and switches you to the Codex-backed profile after authentication.
+
+Or use a one-shot prompt in print mode:
+
+```bash
 ./target/release/themion "summarise the files in this directory"
 ```
 
@@ -58,18 +67,29 @@ Inside the TUI, prefix input with `!` to run a local shell command immediately:
 
 No environment variables are required. All settings are managed with `/config` inside the TUI and saved to `~/.config/themion/config.toml`.
 
-### OpenRouter (default)
+### Codex (recommended)
 
+```text
+/login codex
 ```
+
+This is the easiest setup path. It uses your existing ChatGPT / Codex subscription, stores auth in `~/.config/themion/auth.json`, and avoids API-key setup entirely.
+
+### OpenRouter (alternative)
+
+```text
+/config profile create openrouter
+/config profile set provider=openrouter
 /config profile set api_key=sk-or-v1-...
 /config profile set model=anthropic/claude-3.5-sonnet
+/config profile use openrouter
 ```
 
-Get a free API key at [openrouter.ai](https://openrouter.ai). Gives access to Claude, GPT-4o, Gemini, Mistral, and hundreds of other models.
+Get an API key at [openrouter.ai](https://openrouter.ai) if you want access to Claude, GPT-4o, Gemini, Mistral, and many other hosted models.
 
-### Local (llama.cpp / Ollama / LM Studio)
+### Local OpenAI-compatible server (alternative: llama.cpp / Ollama / LM Studio)
 
-```
+```text
 /config profile create local
 /config profile set provider=llamacpp
 /config profile set endpoint=http://localhost:8080/v1
@@ -80,7 +100,7 @@ No API key needed — just point `endpoint` at any running OpenAI-compatible ser
 
 ### Profile management
 
-```
+```text
 /config profile list              # show all profiles
 /config profile create <name>     # create from current settings
 /config profile use <name>        # switch profiles
@@ -95,7 +115,7 @@ No API key needed — just point `endpoint` at any running OpenAI-compatible ser
 | `OPENROUTER_API_KEY`  | profile `api_key`  | —                              |
 | `OPENROUTER_MODEL`    | profile `model`    | `minimax/minimax-m2.7`         |
 | `LLAMACPP_BASE_URL`   | profile `base_url` | `http://localhost:8080/v1`     |
-| `SYSTEM_PROMPT`       | system prompt      | generic assistant             |
+| `SYSTEM_PROMPT`       | system prompt      | generic assistant              |
 
 ## TUI Key Bindings
 
@@ -113,11 +133,13 @@ No API key needed — just point `endpoint` at any running OpenAI-compatible ser
 crates/
 ├── themion-core/
 │   ├── agent.rs    # Agent loop: LLM → tools → repeat (windowed context, SQLite history)
-│   ├── client.rs   # OpenRouter API client (streaming + non-streaming)
+│   ├── client.rs   # Chat backend abstraction + OpenRouter/OpenAI-compatible client
+│   ├── client_codex.rs # Codex Responses API client (OAuth + streaming)
 │   └── tools.rs    # Tool registry: bash, read_file, write_file, list_directory, recall/search history
 └── themion-cli/
     ├── main.rs     # Entry point — TUI mode or print mode
     ├── tui.rs      # Ratatui TUI: layout, events, spinner animation
+    ├── login_codex.rs # `/login codex` device flow
     └── config.rs   # XDG config file, profile management
 ```
 
