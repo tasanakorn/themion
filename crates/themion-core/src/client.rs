@@ -16,6 +16,14 @@ pub struct Message {
     pub tool_call_id: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ModelInfo {
+    pub id: String,
+    pub display_name: Option<String>,
+    pub context_window: Option<u64>,
+    pub max_context_window: Option<u64>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ToolCall {
     pub id: String,
@@ -58,8 +66,6 @@ pub struct ResponseMessage {
     pub tool_calls: Option<Vec<ToolCall>>,
 }
 
-// ── SSE / streaming types (private) ──────────────────────────────────────────
-
 #[derive(Deserialize, Default)]
 struct StreamDelta {
     content: Option<String>,
@@ -96,8 +102,6 @@ struct ToolCallAccum {
     arguments: String,
 }
 
-// ── ChatBackend trait ─────────────────────────────────────────────────────────
-
 #[async_trait::async_trait]
 pub trait ChatBackend: Send + Sync {
     async fn chat_completion_stream(
@@ -111,9 +115,12 @@ pub trait ChatBackend: Send + Sync {
         Option<Usage>,
         Option<ApiCallRateLimitReport>,
     )>;
-}
 
-// ── Client ────────────────────────────────────────────────────────────────────
+    async fn fetch_model_info(&self, model: &str) -> Result<Option<ModelInfo>> {
+        let _ = model;
+        Ok(None)
+    }
+}
 
 pub struct ChatClient {
     client: Client,
@@ -189,9 +196,6 @@ impl ChatClient {
         Ok((message, chat_response.usage))
     }
 
-    /// Streaming chat completion. Calls `on_chunk` with each text delta as it
-    /// arrives, and returns the fully-assembled `ResponseMessage` + `Usage`
-    /// once the stream is complete.
     pub async fn chat_completion_stream(
         &self,
         model: &str,
@@ -231,15 +235,11 @@ impl ChatClient {
             };
             buf.extend_from_slice(&bytes);
 
-            // Process all complete lines (\n-terminated) from the buffer.
-            // Splitting on the 0x0A byte is safe: LF cannot appear as a UTF-8
-            // continuation byte, so we never split a multi-byte character.
             loop {
                 let Some(pos) = buf.iter().position(|&b| b == b'\n') else {
                     break;
                 };
                 let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
-                // Strip trailing CRLF or LF
                 let line_bytes = line_bytes
                     .strip_suffix(b"\r\n")
                     .or_else(|| line_bytes.strip_suffix(b"\n"))

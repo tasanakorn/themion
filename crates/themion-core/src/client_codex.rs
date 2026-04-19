@@ -7,7 +7,7 @@ use tokio::sync::RwLock;
 
 use crate::auth::CodexAuth;
 use crate::client::{
-    ChatBackend, FunctionCall, Message, ResponseMessage, ToolCall, Usage, UsageDetails,
+    ChatBackend, FunctionCall, Message, ModelInfo, ResponseMessage, ToolCall, Usage, UsageDetails,
 };
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -71,6 +71,21 @@ pub struct CodexClient {
     base_url: String,
     auth: Arc<RwLock<CodexAuth>>,
     auth_writer: Box<dyn Fn(&CodexAuth) -> Result<()> + Send + Sync>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelsResponse {
+    data: Option<Vec<CodexModelInfo>>,
+    models: Option<Vec<CodexModelInfo>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexModelInfo {
+    id: Option<String>,
+    slug: Option<String>,
+    display_name: Option<String>,
+    context_window: Option<u64>,
+    max_context_window: Option<u64>,
 }
 
 impl CodexClient {
@@ -140,13 +155,14 @@ impl CodexClient {
         Ok(())
     }
 
-    pub async fn get_rate_limits(&self) -> Result<RateLimitSnapshot> {
+    async fn auth_headers(&self) -> Result<(String, String)> {
         self.ensure_fresh_token().await?;
+        let guard = self.auth.read().await;
+        Ok((guard.access_token.clone(), guard.account_id.clone()))
+    }
 
-        let (access_token, account_id) = {
-            let guard = self.auth.read().await;
-            (guard.access_token.clone(), guard.account_id.clone())
-        };
+    pub async fn get_rate_limits(&self) -> Result<RateLimitSnapshot> {
+        let (access_token, account_id) = self.auth_headers().await?;
 
         let response = self
             .http
@@ -703,12 +719,7 @@ impl ChatBackend for CodexClient {
         Option<Usage>,
         Option<ApiCallRateLimitReport>,
     )> {
-        self.ensure_fresh_token().await?;
-
-        let (access_token, account_id) = {
-            let guard = self.auth.read().await;
-            (guard.access_token.clone(), guard.account_id.clone())
-        };
+        let (access_token, account_id) = self.auth_headers().await?;
 
         let (instructions, input_items) = translate_messages(messages);
         let translated_tools = translate_tools(tools);
@@ -906,5 +917,37 @@ impl ChatBackend for CodexClient {
         };
 
         Ok((message, usage, rate_limit_report))
+    }
+
+    async fn fetch_model_info(&self, model: &str) -> Result<Option<ModelInfo>> {
+        let (access_token, account_id) = self.auth_headers().await?;
+        let response = self
+            .http
+            .get(format!("{}/models", self.base_url))
+            .query(&[("client_version", "1.0.0")])
+            .header("Authorization", format!("Bearer {}", access_token))
+            .header("chatgpt-account-id", &account_id)
+            .header("originator", "pi")
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await?;
+            return Err(anyhow!("Codex models error {status}: {text}"));
+        }
+
+        let payload: ModelsResponse = response.json().await?;
+        let models = payload.data.or(payload.models).unwrap_or_default();
+        let found = models.into_iter().find(|m| {
+            m.id.as_deref() == Some(model) || m.slug.as_deref() == Some(model)
+        });
+
+        Ok(found.map(|m| ModelInfo {
+            id: m.id.or(m.slug).unwrap_or_else(|| model.to_string()),
+            display_name: m.display_name,
+            context_window: m.context_window,
+            max_context_window: m.max_context_window,
+        }))
     }
 }

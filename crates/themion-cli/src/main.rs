@@ -6,6 +6,7 @@ mod tui;
 use config::{Config, ProfileConfig};
 use std::collections::HashMap;
 use themion_core::agent::TurnStats;
+use themion_core::ModelInfo;
 
 pub fn format_duration(ms: u128) -> String {
     if ms < 1000 {
@@ -50,6 +51,7 @@ pub struct Session {
     pub api_key: Option<String>,
     pub model: String,
     pub system_prompt: String,
+    pub model_info: Option<ModelInfo>,
 }
 
 impl Session {
@@ -62,6 +64,7 @@ impl Session {
             api_key: cfg.api_key,
             model: cfg.model,
             system_prompt: cfg.system_prompt,
+            model_info: None,
         }
     }
 
@@ -77,6 +80,7 @@ impl Session {
         self.api_key = api_key;
         self.model = model;
         self.active_profile = name.to_string();
+        self.model_info = None;
         true
     }
 }
@@ -154,6 +158,7 @@ async fn main() -> anyhow::Result<()> {
             project_dir,
             db,
         );
+        agent.refresh_model_info().await;
         let (result, stats) = agent.run_loop(&prompt).await?;
         println!("{result}");
         eprintln!("{}", format_stats(&stats));

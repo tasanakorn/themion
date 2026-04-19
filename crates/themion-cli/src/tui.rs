@@ -1,5 +1,6 @@
 use crate::config::{save_profiles, Config, ProfileConfig};
 use crate::{format_stats, Session};
+use themion_core::ModelInfo;
 use crossterm::{
     event::{
         self, DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode,
@@ -140,6 +141,7 @@ pub struct App<'a> {
     stream_chunks: u64,
     stream_chars: u64,
     status_rate_limits: Option<ApiCallRateLimitReport>,
+    status_model_info: Option<ModelInfo>,
 }
 
 impl<'a> App<'a> {
@@ -151,6 +153,7 @@ impl<'a> App<'a> {
     ) -> Self {
         let agent = build_agent(&session, session_id, project_dir.clone(), db.clone())
             .expect("failed to build agent");
+        let initial_model_info = session.model_info.clone();
         let handle = AgentHandle {
             agent: Some(agent),
             session_id,
@@ -216,6 +219,7 @@ impl<'a> App<'a> {
             stream_chunks: 0,
             stream_chars: 0,
             status_rate_limits: None,
+            status_model_info: initial_model_info,
         }
     }
 
@@ -487,6 +491,7 @@ impl<'a> App<'a> {
                                 let db = self.db.clone();
                                 let pdir = self.project_dir.clone();
                                 let _ = db.insert_session(new_session_id, &pdir, true);
+                                self.status_model_info = new_agent.model_info().cloned();
                                 self.agents = vec![AgentHandle {
                                     agent: Some(new_agent),
                                     session_id: new_session_id,
@@ -694,6 +699,21 @@ impl<'a> App<'a> {
             let _ = app_tx_done.send(AppEvent::AgentReady(Box::new(agent), handle_session_id));
         });
     }
+}
+
+fn build_context_statusline(last_ctx_tokens: u64, info: Option<&ModelInfo>) -> String {
+    let fmt = |n: u64| -> String {
+        if n >= 1000 {
+            format!("{}k", n / 1000)
+        } else {
+            n.to_string()
+        }
+    };
+    let max_part = info
+        .and_then(|info| info.max_context_window.or(info.context_window))
+        .map(fmt)
+        .unwrap_or_else(|| "?".to_string());
+    format!("{}/{}", fmt(last_ctx_tokens), max_part)
 }
 
 fn build_rate_limit_statusline(report: Option<&ApiCallRateLimitReport>) -> String {
@@ -1113,7 +1133,7 @@ fn draw(f: &mut Frame, app: &App) {
         fmt(app.session_tokens.tokens_in),
         fmt(app.session_tokens.tokens_out),
         fmt(app.session_tokens.tokens_cached),
-        fmt(app.last_ctx_tokens),
+        build_context_statusline(app.last_ctx_tokens, app.status_model_info.as_ref()),
     );
     f.render_widget(Clear, chunks[2]);
     f.render_widget(
@@ -1348,8 +1368,10 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
             Some(AppEvent::Tick) => app.on_tick(),
             Some(AppEvent::Agent(ev)) => app.handle_agent_event(ev),
             Some(AppEvent::AgentReady(agent, sid)) => {
+                let agent = *agent;
+                app.status_model_info = agent.model_info().cloned();
                 if let Some(h) = app.agents.iter_mut().find(|h| h.session_id == sid) {
-                    h.agent = Some(*agent);
+                    h.agent = Some(agent);
                 }
                 app.agent_busy = false;
             }
@@ -1395,10 +1417,12 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     app.project_dir.clone(),
                     app.db.clone(),
                 ) {
-                    Ok(new_agent) => {
+                    Ok(mut new_agent) => {
+                        new_agent.refresh_model_info().await;
                         let _ = app
                             .db
                             .insert_session(new_session_id, &app.project_dir, true);
+                        app.status_model_info = new_agent.model_info().cloned();
                         app.agents = vec![AgentHandle {
                             agent: Some(new_agent),
                             session_id: new_session_id,

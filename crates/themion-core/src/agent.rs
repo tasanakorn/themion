@@ -1,5 +1,5 @@
 use crate::agents_md;
-use crate::client::{ChatBackend, Message};
+use crate::client::{ChatBackend, Message, ModelInfo};
 use crate::db::DbHandle;
 use crate::tools;
 use anyhow::Result;
@@ -68,6 +68,7 @@ pub struct Agent {
     pub window_turns: usize,
     turn_boundaries: Vec<usize>,
     turn_seq_counter: u32,
+    model_info: Option<ModelInfo>,
 }
 
 impl Agent {
@@ -88,6 +89,7 @@ impl Agent {
             window_turns: 5,
             turn_boundaries: Vec::new(),
             turn_seq_counter: 0,
+            model_info: None,
         }
     }
 
@@ -108,6 +110,7 @@ impl Agent {
             window_turns: 5,
             turn_boundaries: Vec::new(),
             turn_seq_counter: 0,
+            model_info: None,
         }
     }
 
@@ -129,6 +132,7 @@ impl Agent {
             window_turns: 5,
             turn_boundaries: Vec::new(),
             turn_seq_counter: 0,
+            model_info: None,
         }
     }
 
@@ -152,6 +156,7 @@ impl Agent {
             window_turns: 5,
             turn_boundaries: Vec::new(),
             turn_seq_counter: 0,
+            model_info: None,
         }
     }
 
@@ -164,6 +169,14 @@ impl Agent {
         self.turn_boundaries.clear();
     }
 
+    pub async fn refresh_model_info(&mut self) {
+        self.model_info = self.client.fetch_model_info(&self.model).await.ok().flatten();
+    }
+
+    pub fn model_info(&self) -> Option<&ModelInfo> {
+        self.model_info.as_ref()
+    }
+
     fn emit(&self, event: AgentEvent) {
         if let Some(tx) = &self.event_tx {
             let _ = tx.send(event);
@@ -171,6 +184,10 @@ impl Agent {
     }
 
     pub async fn run_loop(&mut self, user_input: &str) -> Result<(String, TurnStats)> {
+        if self.model_info.is_none() {
+            self.refresh_model_info().await;
+        }
+
         self.turn_seq_counter += 1;
         let turn_seq = self.turn_seq_counter;
         self.turn_boundaries.push(self.messages.len());
