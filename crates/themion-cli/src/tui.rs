@@ -1176,8 +1176,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
 
     let db = match dirs::data_dir() {
         Some(d) => {
-            let db_path = d.join("themion").join("history.db");
-            DbHandle::open(&db_path).unwrap_or_else(|e| {
+            themion_core::db::open_default_in_data_dir(&d).unwrap_or_else(|e| {
                 eprintln!("warning: history persistence disabled: {}", e);
                 DbHandle::open_in_memory().expect("in-memory db")
             })

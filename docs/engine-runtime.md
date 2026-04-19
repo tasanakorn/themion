@@ -204,8 +204,8 @@ Themion stores persistent history in SQLite so older context can be recalled acr
 
 History is stored at:
 
-- `$XDG_DATA_HOME/themion/history.db`
-- typically `~/.local/share/themion/history.db`
+- `$XDG_DATA_HOME/themion/system.db`
+- typically `~/.local/share/themion/system.db`
 
 ### Main tables
 

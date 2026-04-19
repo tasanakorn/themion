@@ -1,6 +1,6 @@
 use anyhow::Result;
 use rusqlite::Connection;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -169,6 +169,73 @@ fn init_schema(conn: &Connection, fts5: bool) -> Result<()> {
         conn.execute_batch(SCHEMA_FTS5)?;
     }
     Ok(())
+}
+
+fn sidecar_paths(path: &Path) -> [PathBuf; 2] {
+    [
+        PathBuf::from(format!("{}-wal", path.display())),
+        PathBuf::from(format!("{}-shm", path.display())),
+    ]
+}
+
+fn migrate_db_file(old_path: &Path, new_path: &Path) -> Result<()> {
+    if !old_path.exists() || new_path.exists() {
+        return Ok(());
+    }
+
+    let rename_attempt = || -> std::io::Result<()> {
+        std::fs::rename(old_path, new_path)?;
+        for (old_sidecar, new_sidecar) in sidecar_paths(old_path).into_iter().zip(sidecar_paths(new_path)) {
+            if old_sidecar.exists() {
+                std::fs::rename(old_sidecar, new_sidecar)?;
+            }
+        }
+        Ok(())
+    };
+
+    if rename_attempt().is_ok() {
+        return Ok(());
+    }
+
+    std::fs::copy(old_path, new_path)?;
+    for (old_sidecar, new_sidecar) in sidecar_paths(old_path).into_iter().zip(sidecar_paths(new_path)) {
+        if old_sidecar.exists() {
+            std::fs::copy(&old_sidecar, &new_sidecar)?;
+        }
+    }
+    std::fs::remove_file(old_path)?;
+    for old_sidecar in sidecar_paths(old_path) {
+        if old_sidecar.exists() {
+            std::fs::remove_file(old_sidecar)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn default_db_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("themion").join("system.db")
+}
+
+pub fn open_default_in_data_dir(data_dir: &Path) -> Result<Arc<DbHandle>> {
+    let themion_dir = data_dir.join("themion");
+    let new_path = themion_dir.join("system.db");
+    let old_path = themion_dir.join("history.db");
+
+    std::fs::create_dir_all(&themion_dir)?;
+
+    if new_path.exists() {
+        if old_path.exists() {
+            eprintln!(
+                "warning: ignoring legacy database {} because canonical {} already exists",
+                old_path.display(),
+                new_path.display()
+            );
+        }
+    } else if old_path.exists() {
+        migrate_db_file(&old_path, &new_path)?;
+    }
+
+    DbHandle::open(new_path)
 }
 
 impl DbHandle {

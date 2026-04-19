@@ -35,7 +35,7 @@ main.rs
        └─ TUI mode    ──► tui::run(cfg, dir_override)
 
 tui::run  (tui.rs)
-  ├─ opens DbHandle at $XDG_DATA_HOME/themion/history.db
+  ├─ opens DbHandle at $XDG_DATA_HOME/themion/system.db
   ├─ generates session_id (UUID v4), inserts agent_sessions row
   ├─ builds App { agents: Vec<AgentHandle>, db, project_dir, session_tokens, … }
   └─ event loop: keyboard / mouse / AgentEvent / AgentReady / Tick (150 ms)
@@ -141,7 +141,7 @@ Tool errors are caught in `call_tool` and returned as `"Error: <message>"` strin
 
 ## Persistent History (db.rs)
 
-Database path: `$XDG_DATA_HOME/themion/history.db` (default `~/.local/share/themion/history.db`). Created on first run; WAL mode enabled on every open for safe multi-process access.
+Database path: `$XDG_DATA_HOME/themion/system.db` (default `~/.local/share/themion/system.db`). Created on first run; WAL mode enabled on every open for safe multi-process access.
 
 Schema:
 
