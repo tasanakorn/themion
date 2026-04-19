@@ -1419,9 +1419,11 @@ name = "themion-cli"
 version = "0.5.0"
 dependencies = [
  "anyhow",
+ "base64",
  "crossterm",
  "dirs",
  "ratatui",
+ "reqwest",
  "serde",
  "serde_json",
  "themion-core",
@@ -1429,6 +1431,7 @@ dependencies = [
  "tokio-stream",
  "toml",
  "tui-textarea",
+ "urlencoding",
  "uuid",
 ]
 
