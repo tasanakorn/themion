@@ -5,7 +5,7 @@
 - **Scope:** `themion-cli`, `themion-core`, docs
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
 - **Date:** 2026-04-20
-- **Implementation status note:** Discovery queryables, per-instance queryables, git remote normalization, in-memory task lifecycle lookup, strict remote `agent_id` execution targeting for the current CLI-local agent set, and feature-gated agent-injected Stylos tool adapters have landed. The harness tool schemas now bridge into the existing CLI-local Stylos runtime/query implementation so the documented query surface and injected tools stay aligned.
+- **Implementation status note:** Discovery queryables, per-instance queryables, git remote normalization including no-scheme comparable repo identities such as `github.com/owner/repo`, in-memory task lifecycle lookup, strict remote `agent_id` execution targeting for the current CLI-local agent set, and feature-gated agent-injected Stylos tool adapters have landed. The harness tool schemas now bridge into the existing CLI-local Stylos runtime/query implementation so the documented query surface and injected tools stay aligned.
 
 ## Goals
 
@@ -95,6 +95,7 @@ In real usage, the same repository may appear under multiple equivalent remote s
 - `ssh://git@github.com/owner/repo.git`
 - `https://github.com/owner/repo.git`
 - `https://github.com/owner/repo`
+- `github.com/owner/repo`
 
 and similarly for GitLab and Bitbucket.
 
@@ -333,11 +334,13 @@ Recommended request forms:
 - empty request or omitted body → who has any git-backed project?
 - `{ "remote": "git@github.com:owner/repo.git" }` → who has this repo?
 - `{ "remote": "https://github.com/owner/repo" }` → who has this repo, regardless of local ssh/https form?
+- `{ "remote": "github.com/owner/repo" }` → who has this repo by canonical comparable identity?
 
 Normalization requirements for matching:
 
 - normalize common GitHub, GitLab, and Bitbucket ssh and https remote formats to a canonical comparable host/path identity
-- treat equivalent forms such as `git@github.com:owner/repo.git` and `https://github.com/owner/repo.git` as the same repository identity
+- support direct comparable repo identity strings such as `github.com/owner/repo` in addition to common ssh and https remote formats for supported hosts
+- treat equivalent forms such as `git@github.com:owner/repo.git`, `https://github.com/owner/repo.git`, and `github.com/owner/repo` as the same repository identity
 - ignore a trailing `.git` suffix when normalizing comparable identity
 - host matching should be case-insensitive
 - path matching should preserve owner/repo semantics after normalization
@@ -608,6 +611,7 @@ Normative behavior:
 - continue returning the original `git_remotes` values for transparency and debugging
 - add normalized `git_repo_keys` to query responses when available so callers can cache and compare repo identity directly
 - normalization should explicitly support common GitHub, GitLab, and Bitbucket ssh/https mappings in the first version
+- normalization should also accept direct canonical comparable repo identities such as `github.com/example/themion`
 - normalization should not silently rewrite unknown hosts into guessed identities
 
 Recommended canonical comparable form:
@@ -621,6 +625,7 @@ Examples:
 - `git@github.com:example/themion.git` → `github.com/example/themion`
 - `ssh://git@github.com/example/themion.git` → `github.com/example/themion`
 - `https://github.com/example/themion.git` → `github.com/example/themion`
+- `github.com/example/themion` → `github.com/example/themion`
 - `https://gitlab.com/group/proj.git` → `gitlab.com/group/proj`
 - `git@bitbucket.org:team/repo.git` → `bitbucket.org/team/repo`
 
@@ -726,6 +731,7 @@ No database or provider migration is required for the initial implementation.
 - place one agent in `idle` or `nap` and another in a busy state, then query `stylos/<realm>/themion/query/agents/free` → verify: only the idle/nap agent appears in each responding instance's reply.
 - start feature-enabled Themion in a git repo and query `stylos/<realm>/themion/query/agents/git` with no body → verify: only agents with `project_dir_is_git_repo = true` are returned and their `git_remotes` values are included.
 - query `stylos/<realm>/themion/query/agents/git` with `{"remote":"git@github.com:example/themion.git"}` while the responding clone reports `https://github.com/example/themion` → verify: the agent still matches and the reply includes normalized `git_repo_keys`.
+- query `stylos/<realm>/themion/query/agents/git` with `{"remote":"github.com/example/themion"}` while the responding clone reports ssh or https forms → verify: the agent matches by canonical normalized repo identity and the reply includes normalized `git_repo_keys`.
 - query `stylos/<realm>/themion/query/agents/git` with equivalent ssh and https forms for GitHub, GitLab, and Bitbucket test repos → verify: matching works across supported forms.
 - query `stylos/<realm>/themion/query/agents/git` with an unknown or unsupported host syntax → verify: the implementation falls back to exact raw matching rather than producing a false normalized match.
 - query `stylos/<realm>/themion/<instance>/query/status` with no filter → verify: the full current process snapshot for the addressed instance is returned.
@@ -740,7 +746,7 @@ No database or provider migration is required for the initial implementation.
 - send a `tasks/request` while the selected local execution path is already busy → verify: the response lifecycle reaches a terminal `failed` state with reason `agent_busy`.
 - send a `tasks/request` when no free agent on the addressed instance matches the filters → verify: the response is a structured rejection such as `no_available_agent`.
 - run focused tests for free-agent filtering and deterministic candidate selection → verify: `idle` and `nap` are treated as free and the selected agent is stable for the same snapshot order.
-- run focused tests for git remote normalization and repo-key derivation → verify: supported ssh/https remote variants normalize to the same comparable repo key and unsupported forms do not collide incorrectly.
+- run focused tests for git remote normalization and repo-key derivation → verify: supported ssh/https remote variants and direct canonical repo identity strings normalize to the same comparable repo key and unsupported forms do not collide incorrectly.
 - run focused tests for task lifecycle transitions and timeout handling → verify: accepted tasks move through expected states and timed waits produce the documented non-error pending reply.
 - verify CBOR request and reply encoding for all new queryables → verify: payloads round-trip cleanly and match the documented logical shapes.
 - run `cargo check -p themion-core -p themion-cli --features stylos` → verify: the harness can register the feature-gated Stylos tool definitions without breaking the core/CLI boundary.

@@ -973,19 +973,7 @@ async fn build_git_reply(
     let mut agents = build_queryable_agents(snapshot.agents);
     let requested = req.and_then(|r| r.remote);
     let requested_key = requested.as_deref().and_then(normalize_git_remote);
-    agents.retain(|agent| {
-        if !agent.project_dir_is_git_repo {
-            return false;
-        }
-        match (requested.as_ref(), requested_key.as_ref()) {
-            (None, _) => true,
-            (Some(raw), Some(key)) => {
-                agent.git_repo_keys.iter().any(|candidate| candidate == key)
-                    || agent.git_remotes.iter().any(|remote| remote == raw)
-            }
-            (Some(raw), None) => agent.git_remotes.iter().any(|remote| remote == raw),
-        }
-    });
+    agents.retain(|agent| git_agent_matches_request(agent, requested.as_deref(), requested_key.as_deref()));
     Some(DiscoveryReply {
         instance: instance.to_string(),
         session_id: session_id.to_string(),
@@ -1310,6 +1298,24 @@ fn build_queryable_agents(agents: Vec<StylosAgentStatusSnapshot>) -> Vec<StylosQ
         .collect()
 }
 
+fn git_agent_matches_request(
+    agent: &StylosQueryableAgentSnapshot,
+    requested: Option<&str>,
+    requested_key: Option<&str>,
+) -> bool {
+    if !agent.project_dir_is_git_repo {
+        return false;
+    }
+    match (requested, requested_key) {
+        (None, _) => true,
+        (Some(raw), Some(key)) => {
+            agent.git_repo_keys.iter().any(|candidate| candidate == key)
+                || agent.git_remotes.iter().any(|remote| remote == raw)
+        }
+        (Some(raw), None) => agent.git_remotes.iter().any(|remote| remote == raw),
+    }
+}
+
 fn derive_git_repo_keys(remotes: &[String]) -> Vec<String> {
     let mut keys = BTreeSet::new();
     for remote in remotes {
@@ -1336,12 +1342,10 @@ fn normalize_git_remote(remote: &str) -> Option<String> {
         .strip_prefix("https://")
         .or_else(|| trimmed.strip_prefix("http://"))
         .or_else(|| trimmed.strip_prefix("ssh://git@"))
-        .or_else(|| trimmed.strip_prefix("ssh://"));
+        .or_else(|| trimmed.strip_prefix("ssh://"))
+        .unwrap_or(trimmed);
 
-    let Some(rest) = without_scheme else {
-        return None;
-    };
-    let (host, path) = rest.split_once('/')?;
+    let (host, path) = without_scheme.split_once('/')?;
     normalize_known_host_path(host, path)
 }
 
@@ -1486,6 +1490,82 @@ mod tests {
     #[test]
     fn unsupported_hosts_do_not_normalize() {
         assert_eq!(normalize_git_remote("git@example.com:repo.git"), None);
+    }
+
+    #[test]
+    fn normalizes_repo_key_without_scheme() {
+        assert_eq!(
+            normalize_git_remote("github.com/example/themion").as_deref(),
+            Some("github.com/example/themion")
+        );
+    }
+
+    fn test_git_agent(remotes: &[&str], is_repo: bool) -> StylosQueryableAgentSnapshot {
+        let git_remotes: Vec<String> = remotes.iter().map(|remote| (*remote).to_string()).collect();
+        StylosQueryableAgentSnapshot {
+            agent_id: "main".to_string(),
+            label: "main".to_string(),
+            roles: vec!["main".to_string()],
+            session_id: "session".to_string(),
+            activity_status: "idle".to_string(),
+            activity_status_changed_at_ms: 0,
+            project_dir: "/tmp/repo".to_string(),
+            project_dir_is_git_repo: is_repo,
+            git_repo_keys: derive_git_repo_keys(&git_remotes),
+            git_remotes,
+            provider: "provider".to_string(),
+            model: "model".to_string(),
+            active_profile: "profile".to_string(),
+            workflow: WorkflowState::default(),
+            rate_limits: None,
+        }
+    }
+
+    #[test]
+    fn git_query_matches_equivalent_remote_forms() {
+        let agent = test_git_agent(&["git@github.com:example/themion.git"], true);
+        assert!(git_agent_matches_request(
+            &agent,
+            Some("git@github.com:example/themion.git"),
+            normalize_git_remote("git@github.com:example/themion.git").as_deref(),
+        ));
+        assert!(git_agent_matches_request(
+            &agent,
+            Some("https://github.com/example/themion"),
+            normalize_git_remote("https://github.com/example/themion").as_deref(),
+        ));
+        assert!(git_agent_matches_request(
+            &agent,
+            Some("github.com/example/themion"),
+            normalize_git_remote("github.com/example/themion").as_deref(),
+        ));
+    }
+
+    #[test]
+    fn git_query_rejects_non_matching_repo() {
+        let agent = test_git_agent(&["git@github.com:example/themion.git"], true);
+        assert!(!git_agent_matches_request(
+            &agent,
+            Some("github.com/example/other"),
+            normalize_git_remote("github.com/example/other").as_deref(),
+        ));
+    }
+
+    #[test]
+    fn git_query_falls_back_to_exact_raw_match_when_query_cannot_normalize() {
+        let agent = test_git_agent(&["file:///tmp/themion"], true);
+        assert!(git_agent_matches_request(&agent, Some("file:///tmp/themion"), None));
+        assert!(!git_agent_matches_request(&agent, Some("file:///tmp/other"), None));
+    }
+
+    #[test]
+    fn git_query_excludes_non_git_agents() {
+        let agent = test_git_agent(&["git@github.com:example/themion.git"], false);
+        assert!(!git_agent_matches_request(
+            &agent,
+            Some("github.com/example/themion"),
+            normalize_git_remote("github.com/example/themion").as_deref(),
+        ));
     }
 
     #[tokio::test]
