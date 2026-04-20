@@ -1,6 +1,8 @@
 #![cfg(feature = "stylos")]
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,27 +38,15 @@ pub struct StylosStatusSnapshot {
     pub rate_limits: Option<ApiCallRateLimitReport>,
 }
 
-impl StylosStatusSnapshot {
-    pub fn new(session: &Session, project_dir: &PathBuf) -> Self {
-        Self {
-            workflow: WorkflowState::default(),
-            activity_status: "idle".to_string(),
-            project_dir: project_dir.display().to_string(),
-            provider: session.provider.clone(),
-            model: session.model.clone(),
-            active_profile: session.active_profile.clone(),
-            rate_limits: None,
-        }
-    }
-}
+type StylosSnapshotFuture = Pin<Box<dyn Future<Output = StylosStatusSnapshot> + Send>>;
+type StylosSnapshotProvider = Arc<dyn Fn() -> StylosSnapshotFuture + Send + Sync>;
 
 pub struct StylosHandle {
     state: StylosRuntimeState,
     session: Option<Arc<zenoh::Session>>,
-    heartbeat_task: Option<JoinHandle<()>>,
     status_task: Option<JoinHandle<()>>,
     queryable_task: Option<JoinHandle<()>>,
-    status_snapshot: Arc<RwLock<StylosStatusSnapshot>>,
+    snapshot_provider: Arc<RwLock<Option<StylosSnapshotProvider>>>,
 }
 
 impl StylosHandle {
@@ -64,18 +54,9 @@ impl StylosHandle {
         Self {
             state: StylosRuntimeState::Off,
             session: None,
-            heartbeat_task: None,
             status_task: None,
             queryable_task: None,
-            status_snapshot: Arc::new(RwLock::new(StylosStatusSnapshot {
-                workflow: WorkflowState::default(),
-                activity_status: "idle".to_string(),
-                project_dir: String::new(),
-                provider: String::new(),
-                model: String::new(),
-                active_profile: String::new(),
-                rate_limits: None,
-            })),
+            snapshot_provider: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -83,15 +64,11 @@ impl StylosHandle {
         &self.state
     }
 
-    pub fn status_snapshot(&self) -> Arc<RwLock<StylosStatusSnapshot>> {
-        self.status_snapshot.clone()
+    pub async fn set_snapshot_provider(&self, provider: StylosSnapshotProvider) {
+        *self.snapshot_provider.write().await = Some(provider);
     }
 
     pub async fn shutdown(self) {
-        if let Some(task) = self.heartbeat_task {
-            task.abort();
-            let _ = task.await;
-        }
         if let Some(task) = self.status_task {
             task.abort();
             let _ = task.await;
@@ -145,10 +122,9 @@ pub async fn start(
         Err(err) => StylosHandle {
             state: StylosRuntimeState::Error(err),
             session: None,
-            heartbeat_task: None,
             status_task: None,
             queryable_task: None,
-            status_snapshot: Arc::new(RwLock::new(StylosStatusSnapshot::new(session, project_dir))),
+            snapshot_provider: Arc::new(RwLock::new(None)),
         },
     }
 }
@@ -195,33 +171,14 @@ async fn start_inner(
             .map_err(|e| e.to_string())?,
     );
 
-    let status_snapshot = Arc::new(RwLock::new(StylosStatusSnapshot::new(session, project_dir)));
-
     let ct = CancellationToken::new();
-    let hb_ct = ct.clone();
-    let hb_session = session_handle.clone();
-    let hb_key = format!("stylos/{}/themion/{}/heartbeat", realm, key_instance);
-    let heartbeat_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(10));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                _ = hb_ct.cancelled() => break,
-                _ = interval.tick() => {
-                    let _ = hb_session
-                        .put(&hb_key, b"alive".to_vec())
-                        .encoding(Encoding::APPLICATION_OCTET_STREAM)
-                        .congestion_control(CongestionControl::Drop)
-                        .await;
-                }
-            }
-        }
-    });
+    let snapshot_provider = Arc::new(RwLock::new(None::<StylosSnapshotProvider>));
 
     let status_ct = ct.clone();
     let status_session = session_handle.clone();
     let status_key = format!("stylos/{}/themion/{}/status", realm, key_instance);
-    let status_snapshot_reader = status_snapshot.clone();
+    let status_snapshot_provider = snapshot_provider.clone();
+    let initial_project_dir = project_dir.display().to_string();
     let status_profile = session.active_profile.clone();
     let status_provider = session.provider.clone();
     let status_model = session.model.clone();
@@ -235,15 +192,27 @@ async fn start_inner(
             tokio::select! {
                 _ = status_ct.cancelled() => break,
                 _ = interval.tick() => {
-                    let snapshot = status_snapshot_reader.read().await.clone();
+                    let provider = status_snapshot_provider.read().await.clone();
+                    let snapshot = match provider {
+                        Some(provider) => provider().await,
+                        None => StylosStatusSnapshot {
+                            workflow: WorkflowState::default(),
+                            activity_status: "idle".to_string(),
+                            project_dir: initial_project_dir.clone(),
+                            provider: status_provider.clone(),
+                            model: status_model.clone(),
+                            active_profile: status_profile.clone(),
+                            rate_limits: None,
+                        },
+                    };
                     let payload = ThemionStatusPayload {
                         version: env!("CARGO_PKG_VERSION").to_string(),
                         instance: status_instance.clone(),
                         realm: status_realm.clone(),
                         mode: status_mode.clone(),
-                        profile: status_profile.clone(),
-                        provider: status_provider.clone(),
-                        model: status_model.clone(),
+                        profile: snapshot.active_profile,
+                        provider: snapshot.provider,
+                        model: snapshot.model,
                         project_dir: snapshot.project_dir,
                         workflow: snapshot.workflow,
                         activity_status: snapshot.activity_status,
@@ -297,10 +266,9 @@ async fn start_inner(
     Ok(StylosHandle {
         state: StylosRuntimeState::Active { mode, realm, instance: key_instance },
         session: Some(session_handle),
-        heartbeat_task: Some(heartbeat_task),
         status_task: Some(status_task),
         queryable_task: Some(queryable_task),
-        status_snapshot,
+        snapshot_provider,
     })
 }
 

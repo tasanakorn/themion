@@ -22,7 +22,7 @@ use ratatui::{
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use themion_core::agent::{Agent, AgentEvent, TurnCancellation, TurnStats};
 use themion_core::client::ChatClient;
 use themion_core::client_codex::{ApiCallRateLimitReport, CodexClient};
@@ -121,9 +121,6 @@ impl AgentActivity {
         }
     }
 
-    fn stylos_status_value(&self, stream_chunks: u64, stream_chars: u64) -> String {
-        self.status_bar(stream_chunks, stream_chars)
-    }
 }
 
 pub struct App<'a> {
@@ -148,6 +145,7 @@ pub struct App<'a> {
     session_tokens: TurnStats,
     last_ctx_tokens: u64,
     agent_activity: Option<AgentActivity>,
+    idle_since: Option<Instant>,
     stream_chunks: u64,
     stream_chars: u64,
     status_rate_limits: Option<ApiCallRateLimitReport>,
@@ -240,6 +238,7 @@ impl<'a> App<'a> {
             },
             last_ctx_tokens: 0,
             agent_activity: None,
+            idle_since: Some(Instant::now()),
             stream_chunks: 0,
             stream_chars: 0,
             status_rate_limits: None,
@@ -299,12 +298,14 @@ impl<'a> App<'a> {
 
     fn set_agent_activity(&mut self, activity: AgentActivity) {
         self.agent_activity = Some(activity);
+        self.idle_since = None;
         self.pending = Some(self.pending_str());
         self.refresh_stylos_status();
     }
 
     fn clear_agent_activity(&mut self) {
         self.agent_activity = None;
+        self.idle_since = Some(Instant::now());
         self.pending = None;
         self.refresh_stylos_status();
     }
@@ -334,30 +335,65 @@ impl<'a> App<'a> {
         self.entries.push(entry);
     }
 
+    fn activity_status_value(&self) -> String {
+        const NAP_AFTER: Duration = Duration::from_secs(5 * 60);
+
+        if let Some(activity) = self.agent_activity.as_ref() {
+            return activity.status_bar(self.stream_chunks, self.stream_chars);
+        }
+
+        match self.idle_since {
+            Some(idle_since) if idle_since.elapsed() > NAP_AFTER => "nap".to_string(),
+            _ => "idle".to_string(),
+        }
+    }
+
+
     fn refresh_stylos_status(&self) {
         #[cfg(feature = "stylos")]
         if let Some(handle) = self.stylos.as_ref() {
-            let snapshot = handle.status_snapshot();
             let workflow = self.workflow_state.clone();
-            let activity_status = self
-                .agent_activity
-                .as_ref()
-                .map(|a| a.stylos_status_value(self.stream_chunks, self.stream_chars))
-                .unwrap_or_else(|| "idle".to_string());
             let project_dir = self.project_dir.display().to_string();
-            let provider = self.session.provider.clone();
+            let provider_name = self.session.provider.clone();
             let model = self.session.model.clone();
             let active_profile = self.session.active_profile.clone();
             let rate_limits = self.status_rate_limits.clone();
-            tokio::spawn(async move {
-                let mut guard = snapshot.write().await;
-                guard.workflow = workflow;
-                guard.activity_status = activity_status;
-                guard.project_dir = project_dir;
-                guard.provider = provider;
-                guard.model = model;
-                guard.active_profile = active_profile;
-                guard.rate_limits = rate_limits;
+            let idle_since = self.idle_since;
+            let agent_activity = self.agent_activity.clone();
+            let stream_chunks = self.stream_chunks;
+            let stream_chars = self.stream_chars;
+            let provider = std::sync::Arc::new(move || {
+                let workflow = workflow.clone();
+                let project_dir = project_dir.clone();
+                let provider_name = provider_name.clone();
+                let model = model.clone();
+                let active_profile = active_profile.clone();
+                let rate_limits = rate_limits.clone();
+                let agent_activity = agent_activity.clone();
+                Box::pin(async move {
+                    let activity_status = if let Some(activity) = agent_activity.as_ref() {
+                        activity.status_bar(stream_chunks, stream_chars)
+                    } else {
+                        const NAP_AFTER: Duration = Duration::from_secs(5 * 60);
+                        match idle_since {
+                            Some(idle_since) if idle_since.elapsed() > NAP_AFTER => "nap".to_string(),
+                            _ => "idle".to_string(),
+                        }
+                    };
+                    crate::stylos::StylosStatusSnapshot {
+                        workflow,
+                        activity_status,
+                        project_dir,
+                        provider: provider_name,
+                        model,
+                        active_profile,
+                        rate_limits,
+                    }
+                })
+                    as std::pin::Pin<Box<dyn std::future::Future<Output = crate::stylos::StylosStatusSnapshot> + Send>>
+            });
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(handle.set_snapshot_provider(provider));
             });
         }
     }
@@ -1178,11 +1214,7 @@ fn draw(f: &mut Frame, app: &App) {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("/");
-    let activity = app
-        .agent_activity
-        .as_ref()
-        .map(|a| a.status_bar(app.stream_chunks, app.stream_chars))
-        .unwrap_or_else(|| "idle".to_string());
+    let activity = app.activity_status_value();
     #[cfg(feature = "stylos")]
     let stylos_status = match app.stylos.as_ref().map(|h| h.state()) {
         Some(StylosRuntimeState::Off) => "stylos: off".to_string(),
