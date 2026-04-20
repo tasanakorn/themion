@@ -1,10 +1,11 @@
 #![cfg(feature = "stylos")]
 
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use stylos_config::{Endpoints, IdentitySection, StylosConfig as SessionConfig, ZenohSection};
@@ -17,22 +18,30 @@ use tokio_util::sync::CancellationToken;
 use zenoh::bytes::Encoding;
 use zenoh::qos::CongestionControl;
 
-use crate::Session;
 use crate::config::StylosConfig;
+use crate::Session;
+
+const GIT_STATUS_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug)]
 pub enum StylosRuntimeState {
     Off,
-    Active { mode: String, realm: String, instance: String },
+    Active {
+        mode: String,
+        realm: String,
+        instance: String,
+    },
     Error(String),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct StylosStatusSnapshot {
     pub workflow: WorkflowState,
     pub activity_status: String,
     pub activity_status_changed_at: u64,
     pub project_dir: String,
+    pub project_dir_is_git_repo: bool,
+    pub git_remotes: Vec<String>,
     pub provider: String,
     pub model: String,
     pub active_profile: String,
@@ -104,10 +113,46 @@ struct ThemionStatusPayload {
     provider: String,
     model: String,
     project_dir: String,
+    project_dir_is_git_repo: bool,
+    git_remotes: Vec<String>,
     workflow: WorkflowState,
     activity_status: String,
     activity_status_changed_at: u64,
     rate_limits: Option<ApiCallRateLimitReport>,
+}
+
+#[derive(Clone, Debug)]
+pub struct GitStatusCache {
+    project_dir: PathBuf,
+    state: Arc<std::sync::Mutex<CachedGitStatus>>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedGitStatus {
+    last_refresh: Instant,
+    value: GitProjectStatus,
+}
+
+impl GitStatusCache {
+    pub fn new(project_dir: PathBuf) -> Self {
+        let value = inspect_git_project(&project_dir);
+        Self {
+            project_dir,
+            state: Arc::new(std::sync::Mutex::new(CachedGitStatus {
+                last_refresh: Instant::now(),
+                value,
+            })),
+        }
+    }
+
+    pub fn snapshot(&self) -> GitProjectStatus {
+        let mut state = self.state.lock().expect("git status cache lock");
+        if state.last_refresh.elapsed() >= GIT_STATUS_TTL {
+            state.value = inspect_git_project(&self.project_dir);
+            state.last_refresh = Instant::now();
+        }
+        state.value.clone()
+    }
 }
 
 pub async fn start(
@@ -137,6 +182,7 @@ async fn start_inner(
     project_dir: &PathBuf,
 ) -> Result<StylosHandle, String> {
     let hostname = derive_hostname().unwrap_or_else(|| "themion".to_string());
+    let git_status = inspect_git_project(project_dir);
     let process_id = std::process::id();
     let identity_instance = hostname.clone();
     let key_instance = format!("{hostname}/{process_id}");
@@ -181,6 +227,8 @@ async fn start_inner(
     let status_key = format!("stylos/{}/themion/{}/status", realm, key_instance);
     let status_snapshot_provider = snapshot_provider.clone();
     let initial_project_dir = project_dir.display().to_string();
+    let initial_project_dir_is_git_repo = git_status.is_repo;
+    let initial_git_remotes = git_status.remotes.clone();
     let status_profile = session.active_profile.clone();
     let status_provider = session.provider.clone();
     let status_model = session.model.clone();
@@ -200,8 +248,10 @@ async fn start_inner(
                         None => StylosStatusSnapshot {
                             workflow: WorkflowState::default(),
                             activity_status: "idle".to_string(),
-                            activity_status_changed_at: unix_epoch_now_secs(),
+                            activity_status_changed_at: unix_epoch_now_ms(),
                             project_dir: initial_project_dir.clone(),
+                            project_dir_is_git_repo: initial_project_dir_is_git_repo,
+                            git_remotes: initial_git_remotes.clone(),
                             provider: status_provider.clone(),
                             model: status_model.clone(),
                             active_profile: status_profile.clone(),
@@ -217,6 +267,8 @@ async fn start_inner(
                         provider: snapshot.provider,
                         model: snapshot.model,
                         project_dir: snapshot.project_dir,
+                        project_dir_is_git_repo: snapshot.project_dir_is_git_repo,
+                        git_remotes: snapshot.git_remotes,
                         workflow: snapshot.workflow,
                         activity_status: snapshot.activity_status,
                         activity_status_changed_at: snapshot.activity_status_changed_at,
@@ -268,12 +320,73 @@ async fn start_inner(
     });
 
     Ok(StylosHandle {
-        state: StylosRuntimeState::Active { mode, realm, instance: key_instance },
+        state: StylosRuntimeState::Active {
+            mode,
+            realm,
+            instance: key_instance,
+        },
         session: Some(session_handle),
         status_task: Some(status_task),
         queryable_task: Some(queryable_task),
         snapshot_provider,
     })
+}
+
+#[derive(Clone, Debug)]
+pub struct GitProjectStatus {
+    pub is_repo: bool,
+    pub remotes: Vec<String>,
+}
+
+fn inspect_git_project(project_dir: &Path) -> GitProjectStatus {
+    let inside = std::process::Command::new("git")
+        .arg("rev-parse")
+        .arg("--is-inside-work-tree")
+        .current_dir(project_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+
+    let is_repo = match inside {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim() == "true"
+        }
+        _ => false,
+    };
+
+    let remotes = if is_repo {
+        collect_git_remote_urls(project_dir)
+    } else {
+        Vec::new()
+    };
+
+    GitProjectStatus { is_repo, remotes }
+}
+
+fn collect_git_remote_urls(project_dir: &Path) -> Vec<String> {
+    let output = match std::process::Command::new("git")
+        .arg("remote")
+        .arg("-v")
+        .current_dir(project_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+
+    let mut urls = std::collections::BTreeSet::<String>::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut parts = line.split_whitespace();
+        let _name = parts.next();
+        let Some(url) = parts.next() else {
+            continue;
+        };
+        urls.insert(url.to_string());
+    }
+
+    urls.into_iter().collect()
 }
 
 fn derive_hostname() -> Option<String> {
@@ -306,9 +419,9 @@ fn is_valid_segment(s: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-fn unix_epoch_now_secs() -> u64 {
+fn unix_epoch_now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
+        .as_millis() as u64
 }

@@ -1,7 +1,7 @@
 use crate::config::{save_profiles, Config, ProfileConfig};
-use crate::{format_stats, Session};
 #[cfg(feature = "stylos")]
 use crate::stylos::{StylosHandle, StylosRuntimeState};
+use crate::{format_stats, Session};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode,
@@ -120,7 +120,6 @@ impl AgentActivity {
             AgentActivity::Finishing => "finalizing".to_string(),
         }
     }
-
 }
 
 pub struct App<'a> {
@@ -201,12 +200,20 @@ impl<'a> App<'a> {
         #[cfg(feature = "stylos")]
         if let Some(handle) = stylos.as_ref() {
             match handle.state() {
-                StylosRuntimeState::Off => initial_entries.push(Entry::Status("stylos disabled".to_string())),
-                StylosRuntimeState::Active { mode, realm, instance } => initial_entries.push(Entry::Status(format!(
+                StylosRuntimeState::Off => {
+                    initial_entries.push(Entry::Status("stylos disabled".to_string()))
+                }
+                StylosRuntimeState::Active {
+                    mode,
+                    realm,
+                    instance,
+                } => initial_entries.push(Entry::Status(format!(
                     "stylos ready: mode={} realm={} instance={}",
                     mode, realm, instance
                 ))),
-                StylosRuntimeState::Error(err) => initial_entries.push(Entry::Status(format!("stylos start failed: {}", err))),
+                StylosRuntimeState::Error(err) => {
+                    initial_entries.push(Entry::Status(format!("stylos start failed: {}", err)))
+                }
             }
             initial_entries.push(Entry::Blank);
         }
@@ -363,12 +370,12 @@ impl<'a> App<'a> {
         }
     }
 
-
     fn refresh_stylos_status(&self) {
         #[cfg(feature = "stylos")]
         if let Some(handle) = self.stylos.as_ref() {
             let workflow = self.workflow_state.clone();
             let project_dir = self.project_dir.display().to_string();
+            let git_status_cache = crate::stylos::GitStatusCache::new(self.project_dir.clone());
             let provider_name = self.session.provider.clone();
             let model = self.session.model.clone();
             let active_profile = self.session.active_profile.clone();
@@ -382,6 +389,7 @@ impl<'a> App<'a> {
             let provider = std::sync::Arc::new(move || {
                 let workflow = workflow.clone();
                 let project_dir = project_dir.clone();
+                let git_status = git_status_cache.snapshot();
                 let provider_name = provider_name.clone();
                 let model = model.clone();
                 let active_profile = active_profile.clone();
@@ -389,36 +397,45 @@ impl<'a> App<'a> {
                 let agent_activity = agent_activity.clone();
                 let agent_activity_changed_at = agent_activity_changed_at;
                 Box::pin(async move {
-                    let (activity_status, activity_status_changed_at) = if let Some(activity) = agent_activity.as_ref() {
-                        (
-                            activity.status_bar(stream_chunks, stream_chars),
-                            agent_activity_changed_at.unwrap_or_else(unix_epoch_now_ms),
-                        )
-                    } else {
-                        const NAP_AFTER: Duration = Duration::from_secs(5 * 60);
-                        match idle_since {
-                            Some(idle_since) if idle_since.elapsed() > NAP_AFTER => (
-                                "nap".to_string(),
-                                idle_status_changed_at.unwrap_or_else(unix_epoch_now_ms) + NAP_AFTER.as_millis() as u64,
-                            ),
-                            _ => (
-                                "idle".to_string(),
-                                idle_status_changed_at.unwrap_or_else(unix_epoch_now_ms),
-                            ),
-                        }
-                    };
+                    let (activity_status, activity_status_changed_at) =
+                        if let Some(activity) = agent_activity.as_ref() {
+                            (
+                                activity.status_bar(stream_chunks, stream_chars),
+                                agent_activity_changed_at.unwrap_or_else(unix_epoch_now_ms),
+                            )
+                        } else {
+                            const NAP_AFTER: Duration = Duration::from_secs(5 * 60);
+                            match idle_since {
+                                Some(idle_since) if idle_since.elapsed() > NAP_AFTER => (
+                                    "nap".to_string(),
+                                    idle_status_changed_at.unwrap_or_else(unix_epoch_now_ms)
+                                        + NAP_AFTER.as_millis() as u64,
+                                ),
+                                _ => (
+                                    "idle".to_string(),
+                                    idle_status_changed_at.unwrap_or_else(unix_epoch_now_ms),
+                                ),
+                            }
+                        };
                     crate::stylos::StylosStatusSnapshot {
                         workflow,
                         activity_status,
                         activity_status_changed_at,
                         project_dir,
+                        project_dir_is_git_repo: git_status.is_repo,
+                        git_remotes: git_status.remotes,
                         provider: provider_name,
                         model,
                         active_profile,
                         rate_limits,
                     }
                 })
-                    as std::pin::Pin<Box<dyn std::future::Future<Output = crate::stylos::StylosStatusSnapshot> + Send>>
+                    as std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<Output = crate::stylos::StylosStatusSnapshot>
+                                + Send,
+                        >,
+                    >
             });
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(handle.set_snapshot_provider(provider));
