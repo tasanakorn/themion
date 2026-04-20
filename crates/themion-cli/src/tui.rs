@@ -22,7 +22,7 @@ use ratatui::{
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use themion_core::agent::{Agent, AgentEvent, TurnCancellation, TurnStats};
 use themion_core::client::ChatClient;
 use themion_core::client_codex::{ApiCallRateLimitReport, CodexClient};
@@ -146,6 +146,8 @@ pub struct App<'a> {
     last_ctx_tokens: u64,
     agent_activity: Option<AgentActivity>,
     idle_since: Option<Instant>,
+    idle_status_changed_at: Option<u64>,
+    agent_activity_changed_at: Option<u64>,
     stream_chunks: u64,
     stream_chars: u64,
     status_rate_limits: Option<ApiCallRateLimitReport>,
@@ -239,6 +241,8 @@ impl<'a> App<'a> {
             last_ctx_tokens: 0,
             agent_activity: None,
             idle_since: Some(Instant::now()),
+            idle_status_changed_at: Some(unix_epoch_now_ms()),
+            agent_activity_changed_at: None,
             stream_chunks: 0,
             stream_chars: 0,
             status_rate_limits: None,
@@ -297,15 +301,26 @@ impl<'a> App<'a> {
     }
 
     fn set_agent_activity(&mut self, activity: AgentActivity) {
+        let activity_changed = self
+            .agent_activity
+            .as_ref()
+            .map(|current| std::mem::discriminant(current) != std::mem::discriminant(&activity))
+            .unwrap_or(true);
         self.agent_activity = Some(activity);
+        if activity_changed {
+            self.agent_activity_changed_at = Some(unix_epoch_now_ms());
+        }
         self.idle_since = None;
+        self.idle_status_changed_at = None;
         self.pending = Some(self.pending_str());
         self.refresh_stylos_status();
     }
 
     fn clear_agent_activity(&mut self) {
         self.agent_activity = None;
+        self.agent_activity_changed_at = None;
         self.idle_since = Some(Instant::now());
+        self.idle_status_changed_at = Some(unix_epoch_now_ms());
         self.pending = None;
         self.refresh_stylos_status();
     }
@@ -359,7 +374,9 @@ impl<'a> App<'a> {
             let active_profile = self.session.active_profile.clone();
             let rate_limits = self.status_rate_limits.clone();
             let idle_since = self.idle_since;
+            let idle_status_changed_at = self.idle_status_changed_at;
             let agent_activity = self.agent_activity.clone();
+            let agent_activity_changed_at = self.agent_activity_changed_at;
             let stream_chunks = self.stream_chunks;
             let stream_chars = self.stream_chars;
             let provider = std::sync::Arc::new(move || {
@@ -370,19 +387,30 @@ impl<'a> App<'a> {
                 let active_profile = active_profile.clone();
                 let rate_limits = rate_limits.clone();
                 let agent_activity = agent_activity.clone();
+                let agent_activity_changed_at = agent_activity_changed_at;
                 Box::pin(async move {
-                    let activity_status = if let Some(activity) = agent_activity.as_ref() {
-                        activity.status_bar(stream_chunks, stream_chars)
+                    let (activity_status, activity_status_changed_at) = if let Some(activity) = agent_activity.as_ref() {
+                        (
+                            activity.status_bar(stream_chunks, stream_chars),
+                            agent_activity_changed_at.unwrap_or_else(unix_epoch_now_ms),
+                        )
                     } else {
                         const NAP_AFTER: Duration = Duration::from_secs(5 * 60);
                         match idle_since {
-                            Some(idle_since) if idle_since.elapsed() > NAP_AFTER => "nap".to_string(),
-                            _ => "idle".to_string(),
+                            Some(idle_since) if idle_since.elapsed() > NAP_AFTER => (
+                                "nap".to_string(),
+                                idle_status_changed_at.unwrap_or_else(unix_epoch_now_ms) + NAP_AFTER.as_millis() as u64,
+                            ),
+                            _ => (
+                                "idle".to_string(),
+                                idle_status_changed_at.unwrap_or_else(unix_epoch_now_ms),
+                            ),
                         }
                     };
                     crate::stylos::StylosStatusSnapshot {
                         workflow,
                         activity_status,
+                        activity_status_changed_at,
                         project_dir,
                         provider: provider_name,
                         model,
@@ -1609,4 +1637,11 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
         stylos.shutdown().await;
     }
     Ok(())
+}
+
+fn unix_epoch_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
