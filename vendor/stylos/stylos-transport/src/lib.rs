@@ -11,9 +11,12 @@ pub fn walk_available_port(start: u16, cap: u16) -> Result<u16> {
     for p in start..start.saturating_add(cap) {
         let tcp_ok = TcpListener::bind(("0.0.0.0", p)).is_ok();
         let udp_ok = UdpSocket::bind(("0.0.0.0", p)).is_ok();
-        if tcp_ok && udp_ok { return Ok(p); }
+        if tcp_ok && udp_ok {
+            return Ok(p);
+        }
     }
     Err(StylosError::Transport(format!(
-        "no free port in [{start}, {}) for TCP+UDP dual bind", start.saturating_add(cap)
+        "no free port in [{start}, {}) for TCP+UDP dual bind",
+        start.saturating_add(cap)
     )))
 }

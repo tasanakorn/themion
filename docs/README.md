@@ -2,8 +2,8 @@
 
 ## Architecture
 
-- [architecture.md](architecture.md) — workspace structure, core design philosophy, component map, harness loop, context windowing, streaming, tools, persistent history, and TUI behavior.
-- [engine-runtime.md](engine-runtime.md) — detailed walkthrough of prompt inputs, `AGENTS.md` injection, context building, tool-calling flow, workflow runtime behavior, and SQLite session storage.
+- [architecture.md](architecture.md) — workspace structure, core design philosophy, component map, harness loop, context windowing, streaming, tools, persistent history, TUI behavior, and Stylos multi-agent status shape.
+- [engine-runtime.md](engine-runtime.md) — detailed walkthrough of prompt inputs, `AGENTS.md` injection, context building, tool-calling flow, workflow runtime behavior, SQLite session storage, and the boundary between CLI-local agent roles and core harness state.
 - [codex-integration-guide.md](codex-integration-guide.md) — Codex provider integration contract, endpoint usage, auth, `/models` metadata parsing, `/responses` translation, and rate-limit extraction behavior.
 
 ## Product Requirements Documents (PRDs)
@@ -30,6 +30,7 @@
 | PRD-018 | [Stronger Short Commit-Message Guardrail](prd/prd-018-stronger-short-commit-message-guardrail.md) | Proposed | v0.9.1 | `themion-core`, docs |
 | PRD-019 | [Basic Stylos Support in `themion-cli`](prd/prd-019-basic-stylos-support-in-themion-cli.md) | Implemented | v0.10.0 | `themion-cli`, docs |
 | PRD-020 | [Stylos Git Metadata Cache and Remote URL Simplification](prd/prd-020-stylos-git-metadata-cache-and-remote-url-simplification.md) | Implemented | v0.10.1 | `themion-cli`, docs |
+| PRD-021 | [Single-Process Multi-Agent Runtime and Multi-Agent Stylos Status Reporting](prd/prd-021-single-process-multi-agent-runtime-and-stylos-reporting.md) | Implemented | v0.11.0 | `themion-core`, `themion-cli`, docs |
 
 ## Roadmap note
 

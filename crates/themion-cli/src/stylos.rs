@@ -7,12 +7,12 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use stylos_config::{Endpoints, IdentitySection, StylosConfig as SessionConfig, ZenohSection};
 use stylos_session::SessionOverrides;
 use themion_core::client_codex::ApiCallRateLimitReport;
 use themion_core::workflow::WorkflowState;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use zenoh::bytes::Encoding;
@@ -35,10 +35,14 @@ pub enum StylosRuntimeState {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct StylosStatusSnapshot {
+pub struct StylosAgentStatusSnapshot {
+    pub agent_id: String,
+    pub label: String,
+    pub roles: Vec<String>,
+    pub session_id: String,
     pub workflow: WorkflowState,
     pub activity_status: String,
-    pub activity_status_changed_at: u64,
+    pub activity_status_changed_at_ms: u64,
     pub project_dir: String,
     pub project_dir_is_git_repo: bool,
     pub git_remotes: Vec<String>,
@@ -46,6 +50,17 @@ pub struct StylosStatusSnapshot {
     pub model: String,
     pub active_profile: String,
     pub rate_limits: Option<ApiCallRateLimitReport>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StylosStatusSnapshot {
+    pub startup_project_dir: String,
+    pub agents: Vec<StylosAgentStatusSnapshot>,
+}
+
+#[derive(Clone, Debug)]
+pub struct StylosCmdRequest {
+    pub prompt: String,
 }
 
 type StylosSnapshotFuture = Pin<Box<dyn Future<Output = StylosStatusSnapshot> + Send>>;
@@ -56,6 +71,8 @@ pub struct StylosHandle {
     session: Option<Arc<zenoh::Session>>,
     status_task: Option<JoinHandle<()>>,
     queryable_task: Option<JoinHandle<()>>,
+    cmd_task: Option<JoinHandle<()>>,
+    cmd_rx: Option<mpsc::UnboundedReceiver<StylosCmdRequest>>,
     snapshot_provider: Arc<RwLock<Option<StylosSnapshotProvider>>>,
 }
 
@@ -66,12 +83,18 @@ impl StylosHandle {
             session: None,
             status_task: None,
             queryable_task: None,
+            cmd_task: None,
+            cmd_rx: None,
             snapshot_provider: Arc::new(RwLock::new(None)),
         }
     }
 
     pub fn state(&self) -> &StylosRuntimeState {
         &self.state
+    }
+
+    pub fn take_cmd_rx(&mut self) -> Option<mpsc::UnboundedReceiver<StylosCmdRequest>> {
+        self.cmd_rx.take()
     }
 
     pub async fn set_snapshot_provider(&self, provider: StylosSnapshotProvider) {
@@ -84,6 +107,10 @@ impl StylosHandle {
             let _ = task.await;
         }
         if let Some(task) = self.queryable_task {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = self.cmd_task {
             task.abort();
             let _ = task.await;
         }
@@ -109,16 +136,14 @@ struct ThemionStatusPayload {
     instance: String,
     realm: String,
     mode: String,
-    profile: String,
-    provider: String,
-    model: String,
-    project_dir: String,
-    project_dir_is_git_repo: bool,
-    git_remotes: Vec<String>,
-    workflow: WorkflowState,
-    activity_status: String,
-    activity_status_changed_at: u64,
-    rate_limits: Option<ApiCallRateLimitReport>,
+    startup_project_dir: String,
+    agents: Vec<StylosAgentStatusSnapshot>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ThemionCmdPayload {
+    r#type: String,
+    prompt: String,
 }
 
 #[derive(Clone, Debug)]
@@ -171,6 +196,8 @@ pub async fn start(
             session: None,
             status_task: None,
             queryable_task: None,
+            cmd_task: None,
+            cmd_rx: None,
             snapshot_provider: Arc::new(RwLock::new(None)),
         },
     }
@@ -232,6 +259,7 @@ async fn start_inner(
     let status_profile = session.active_profile.clone();
     let status_provider = session.provider.clone();
     let status_model = session.model.clone();
+    let status_session_id = session.id.to_string();
     let status_mode = mode.clone();
     let status_realm = realm.clone();
     let status_instance = key_instance.clone();
@@ -246,16 +274,23 @@ async fn start_inner(
                     let snapshot = match provider {
                         Some(provider) => provider().await,
                         None => StylosStatusSnapshot {
-                            workflow: WorkflowState::default(),
-                            activity_status: "idle".to_string(),
-                            activity_status_changed_at: unix_epoch_now_ms(),
-                            project_dir: initial_project_dir.clone(),
-                            project_dir_is_git_repo: initial_project_dir_is_git_repo,
-                            git_remotes: initial_git_remotes.clone(),
-                            provider: status_provider.clone(),
-                            model: status_model.clone(),
-                            active_profile: status_profile.clone(),
-                            rate_limits: None,
+                            startup_project_dir: initial_project_dir.clone(),
+                            agents: vec![StylosAgentStatusSnapshot {
+                                agent_id: "main".to_string(),
+                                label: "main".to_string(),
+                                roles: vec!["main".to_string(), "interactive".to_string()],
+                                session_id: status_session_id.clone(),
+                                workflow: WorkflowState::default(),
+                                activity_status: "idle".to_string(),
+                                activity_status_changed_at_ms: unix_epoch_now_ms(),
+                                project_dir: initial_project_dir.clone(),
+                                project_dir_is_git_repo: initial_project_dir_is_git_repo,
+                                git_remotes: initial_git_remotes.clone(),
+                                provider: status_provider.clone(),
+                                model: status_model.clone(),
+                                active_profile: status_profile.clone(),
+                                rate_limits: None,
+                            }],
                         },
                     };
                     let payload = ThemionStatusPayload {
@@ -263,16 +298,8 @@ async fn start_inner(
                         instance: status_instance.clone(),
                         realm: status_realm.clone(),
                         mode: status_mode.clone(),
-                        profile: snapshot.active_profile,
-                        provider: snapshot.provider,
-                        model: snapshot.model,
-                        project_dir: snapshot.project_dir,
-                        project_dir_is_git_repo: snapshot.project_dir_is_git_repo,
-                        git_remotes: snapshot.git_remotes,
-                        workflow: snapshot.workflow,
-                        activity_status: snapshot.activity_status,
-                        activity_status_changed_at: snapshot.activity_status_changed_at,
-                        rate_limits: snapshot.rate_limits,
+                        startup_project_dir: snapshot.startup_project_dir,
+                        agents: snapshot.agents,
                     };
                     if let Ok(bytes) = serde_cbor::to_vec(&payload) {
                         let _ = status_session
@@ -319,6 +346,38 @@ async fn start_inner(
         }
     });
 
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let cmd_ct = ct.clone();
+    let cmd_session = session_handle.clone();
+    let cmd_key = format!("stylos/{}/themion/{}/cmd", realm, key_instance);
+    let cmd_task = tokio::spawn(async move {
+        let subscriber = match cmd_session.declare_subscriber(&cmd_key).await {
+            Ok(sub) => sub,
+            Err(_) => return,
+        };
+        loop {
+            tokio::select! {
+                _ = cmd_ct.cancelled() => break,
+                res = subscriber.recv_async() => match res {
+                    Ok(sample) => {
+                        let Ok(payload) = serde_cbor::from_slice::<ThemionCmdPayload>(sample.payload().to_bytes().as_ref()) else {
+                            continue;
+                        };
+                        if payload.r#type != "text_prompt" {
+                            continue;
+                        }
+                        let prompt = payload.prompt.trim().to_string();
+                        if prompt.is_empty() {
+                            continue;
+                        }
+                        let _ = cmd_tx.send(StylosCmdRequest { prompt });
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    });
+
     Ok(StylosHandle {
         state: StylosRuntimeState::Active {
             mode,
@@ -328,6 +387,8 @@ async fn start_inner(
         session: Some(session_handle),
         status_task: Some(status_task),
         queryable_task: Some(queryable_task),
+        cmd_task: Some(cmd_task),
+        cmd_rx: Some(cmd_rx),
         snapshot_provider,
     })
 }

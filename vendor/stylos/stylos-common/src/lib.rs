@@ -26,7 +26,9 @@ pub enum StylosError {
 }
 
 impl From<json5::Error> for StylosError {
-    fn from(e: json5::Error) -> Self { StylosError::Json5(e.to_string()) }
+    fn from(e: json5::Error) -> Self {
+        StylosError::Json5(e.to_string())
+    }
 }
 
 pub type Result<T> = std::result::Result<T, StylosError>;

@@ -46,6 +46,7 @@ pub fn format_stats(s: &TurnStats) -> String {
 
 #[derive(Clone)]
 pub struct Session {
+    pub id: uuid::Uuid,
     pub active_profile: String,
     pub profiles: HashMap<String, ProfileConfig>,
     pub provider: String,
@@ -59,6 +60,7 @@ pub struct Session {
 impl Session {
     pub fn from_config(cfg: Config) -> Self {
         Self {
+            id: uuid::Uuid::new_v4(),
             active_profile: cfg.active_profile,
             profiles: cfg.profiles,
             provider: cfg.provider,

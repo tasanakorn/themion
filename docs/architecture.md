@@ -13,6 +13,7 @@ For a focused walkthrough of the harness/runtime itself, including system prompt
   - terminal UI, config loading, login flows, startup wiring, and other user-facing local behavior
   - look here first for file IO, TUI event handling, app/session orchestration, and local profile/auth flows
   - optional Stylos support lives here behind the `stylos` cargo feature; when that feature is compiled, Stylos starts by default unless config overrides disable it
+  - the CLI runtime owns process-local agent descriptors such as `agent_id`, `label`, and `roles`, while each core `Agent` continues to own its own session/workflow state
 - `docs/`
   - project docs and behavior notes; keep this aligned with real behavior when flows or semantics change
 
@@ -27,6 +28,7 @@ This separation is intentional: reusable harness/runtime and provider behavior b
 - **Provider abstraction** — the core harness speaks through a `ChatBackend` trait so different transports and wire formats can be swapped at runtime.
 - **Separated prompt inputs** — the base system prompt, predefined coding guardrails, a predefined Codex CLI web-search instruction, and contextual instruction files such as `AGENTS.md` are treated as distinct prompt inputs rather than merged into a single message.
 - **Built-in coding guardrails stay minimal** — the predefined guardrail layer covers default coding behavior such as assumption transparency, simple solutions, targeted edits, narrow validation, and brief specific commit messages naming the actual change when the user explicitly asks for a commit.
+- **One process can describe multiple agents** — the CLI runtime stores agent descriptors in a vector, and Stylos status publishes process-level metadata plus an `agents` list rather than flattening one effective agent into top-level fields.
 
 ## Component Map
 
@@ -71,11 +73,6 @@ tools.rs
   │    ├─ history_search  ──► ctx.db.search(SearchArgs)
   │    └─ workflow_*  ──► workflow state inspection / transitions
   └─ ToolCtx { db: Arc<DbHandle>, session_id, project_dir }
-
-DbHandle  (db.rs)
-  ├─ Arc<Mutex<rusqlite::Connection>>  (WAL mode, busy_timeout 5s)
-  ├─ schema: agent_sessions, agent_turns, agent_messages + FTS5 vtable
-  └─ insert_session / begin_turn / append_message / finalize_turn / recall / search
 ```
 
 ## Harness Loop (agent.rs)
@@ -128,93 +125,16 @@ Codex uses the OpenAI Responses API rather than Chat Completions. Its stream con
 
 All tools receive a `&ToolCtx` carrying the DB handle and session identity. Filesystem tools ignore it; history tools and workflow tools use it. Tool call display labels are truncated to 60 chars to keep TUI lines readable.
 
-| Tool                        | Underlying call                       | Returns                           |
-| --------------------------- | ------------------------------------- | --------------------------------- |
-| `fs_read_file`              | `fs::read_to_string`                  | file contents                     |
-| `fs_write_file`             | `fs::write`                           | confirmation line                 |
-| `fs_list_directory`         | `fs::read_dir`                        | newline-joined names              |
-| `shell_run_command`         | `tokio::process::Command` via `sh -c` | stdout + stderr                   |
-| `history_recall`            | `DbHandle::recall`                    | JSON array of past messages       |
-| `history_search`            | `DbHandle::search` (FTS5)             | JSON array of snippets + turn_seq |
-| `workflow_get_state`        | workflow snapshot assembly            | JSON workflow state               |
-| `workflow_set_active`       | workflow activation logic             | JSON updated workflow state       |
-| `workflow_set_phase`        | workflow transition validation        | JSON updated workflow state       |
-| `workflow_set_phase_result` | workflow phase-result update          | JSON updated workflow state       |
-| `workflow_complete`         | workflow completion/failure logic     | JSON updated workflow state       |
-
-Tool errors are caught in `call_tool` and returned as `"Error: <message>"` strings — the model sees the error as a tool result and can react.
-
 ## Persistent History (db.rs)
 
 Database path: `$XDG_DATA_HOME/themion/system.db` (default `~/.local/share/themion/system.db`). Created on first run; WAL mode enabled on every open for safe multi-process access.
 
-Schema:
+## Stylos status
 
-| Table                | Key columns                                                    |
-| -------------------- | -------------------------------------------------------------- |
-| `agent_sessions`     | `session_id` (UUID), `project_dir`, `is_interactive`           |
-| `agent_turns`        | `turn_id`, `session_id`, `turn_seq`, token stats               |
-| `agent_messages`     | `message_id`, `turn_id`, `role`, `content`, `tool_calls_json`  |
-| `agent_messages_fts` | FTS5 virtual table over `agent_messages.content`               |
+When the `stylos` feature is enabled, Themion still opens one Stylos session per process. Status now publishes shared process metadata plus an `agents` array. The top-level `startup_project_dir` records where the Themion process started and is informational provenance; consumers must not assume it matches every agent `project_dir`.
 
-Every process start generates a new `session_id`. Multiple concurrent processes share the same file; each writes to its own session rows.
+Each agent snapshot includes its `agent_id`, `label`, `roles`, `session_id`, workflow/activity state, provider/model/profile, and per-agent git metadata.
 
 ## TUI (tui.rs)
 
-The TUI uses Ratatui + Crossterm and runs in the alternate screen buffer.
-
-Layout (top to bottom):
-
-```text
-┌─ conversation pane (Min 1) ───────────────────────────────────────┐
-│  startup banner (block ASCII art + version / profile / model)     │
-│  word-wrapped entries; bottom-pinned via ratatui line_count()     │
-│  pending line: braille spinner ⠋⠙⠹… animated at 150 ms tick      │
-├─ input box (3 rows) ──────────────────────────────────────────────┤
-│  ▸ ────────────────────────────────────────────────────────────── │
-│    <typed text>                                                    │
-├─ status bar (1 row) ──────────────────────────────────────────────┤
-│  <project>  |  <profile>  |  <model>  |  in:N out:N cached:N  |  ctx:N
-└───────────────────────────────────────────────────────────────────┘
-```
-
-Token counts in the status bar use compact human-friendly units such as `2k` and `1m`. `ctx` shows `tokens_in` from the last completed turn (actual context sent to the API).
-
-Key bindings:
-
-| Key                   | Action                    |
-| --------------------- | ------------------------- |
-| `Enter`               | Submit message            |
-| `↑` / `↓`             | Navigate input history    |
-| `Alt+↑` / `Alt+↓`     | Scroll conversation pane  |
-| `PageUp` / `PageDown` | Scroll conversation pane  |
-| Mouse scroll          | Scroll conversation pane  |
-| `Esc`                 | Interrupt current turn    |
-| `Ctrl+C`              | Quit                      |
-
-### Entry types
-
-| Variant        | Colour  | Description                              |
-| -------------- | ------- | ---------------------------------------- |
-| `User`         | bold    | User message with `▸` prefix            |
-| `Assistant`    | default | Model response, word-wrapped             |
-| `Banner`       | cyan    | Startup ASCII art and info lines         |
-| `ToolCall`     | yellow  | `↳ <tool>: <args>` (args ≤ 60 chars)    |
-| `ToolDone`     | green   | Appends ` ✓` to the matching ToolCall   |
-| `Stats`        | dim     | Turn summary (tokens, time)              |
-| `Blank`        | —       | Vertical spacing                         |
-
-### Commands
-
-| Command                          | Action |
-| -------------------------------- | ------ |
-| `/config`                        | Show active settings |
-| `/config profile list`           | List profiles |
-| `/config profile show`           | Show active profile |
-| `/config profile create <name>`  | Create a profile from current settings |
-| `/config profile use <name>`     | Switch profile |
-| `/config profile set key=value`  | Update provider/model/base_url/api_key |
-| `/login codex`                   | Start Codex auth flow and switch to codex profile |
-| `!<command>`                     | Run a local shell command in the project directory and show output in the pane |
-
-The `!<command>` shortcut is handled entirely in `themion-cli`. It does not go through the model tool loop, is not sent as a prompt, and is intended as a direct user convenience for local terminal work.
+The TUI still boots with one main interactive agent in the first shipped step, but its runtime agent descriptor now uses explicit roles rather than relying only on an `is_interactive` boolean. The initial main agent carries `roles = ["main", "interactive"]`.

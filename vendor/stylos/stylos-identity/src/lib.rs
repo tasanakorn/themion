@@ -31,9 +31,36 @@ pub struct Role(String);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Instance(String);
 
-impl Realm    { pub fn new(s: impl Into<String>) -> Result<Self> { let s = s.into(); validate_segment(&s, "realm")?;    Ok(Self(s)) } pub fn as_str(&self) -> &str { &self.0 } }
-impl Role     { pub fn new(s: impl Into<String>) -> Result<Self> { let s = s.into(); validate_segment(&s, "role")?;     Ok(Self(s)) } pub fn as_str(&self) -> &str { &self.0 } }
-impl Instance { pub fn new(s: impl Into<String>) -> Result<Self> { let s = s.into(); validate_segment(&s, "instance")?; Ok(Self(s)) } pub fn as_str(&self) -> &str { &self.0 } }
+impl Realm {
+    pub fn new(s: impl Into<String>) -> Result<Self> {
+        let s = s.into();
+        validate_segment(&s, "realm")?;
+        Ok(Self(s))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl Role {
+    pub fn new(s: impl Into<String>) -> Result<Self> {
+        let s = s.into();
+        validate_segment(&s, "role")?;
+        Ok(Self(s))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl Instance {
+    pub fn new(s: impl Into<String>) -> Result<Self> {
+        let s = s.into();
+        validate_segment(&s, "instance")?;
+        Ok(Self(s))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StylosIdentity {
@@ -52,6 +79,11 @@ impl StylosIdentity {
     }
 
     pub fn root_key(&self) -> String {
-        format!("stylos/{}/{}/{}", self.realm.as_str(), self.role.as_str(), self.instance.as_str())
+        format!(
+            "stylos/{}/{}/{}",
+            self.realm.as_str(),
+            self.role.as_str(),
+            self.instance.as_str()
+        )
     }
 }

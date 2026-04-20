@@ -45,6 +45,7 @@ enum AppEvent {
     Agent(AgentEvent),
     AgentReady(Box<Agent>, Uuid),
     Tick,
+    StylosCmd(crate::stylos::StylosCmdRequest),
     LoginPrompt {
         user_code: String,
         verification_uri: String,
@@ -71,7 +72,102 @@ enum Entry {
 pub struct AgentHandle {
     pub agent: Option<Agent>,
     pub session_id: Uuid,
-    pub is_interactive: bool,
+    pub agent_id: String,
+    pub label: String,
+    pub roles: Vec<String>,
+}
+
+#[cfg(feature = "stylos")]
+#[derive(Clone, Debug)]
+struct AgentStatusSource {
+    agent_id: String,
+    label: String,
+    roles: Vec<String>,
+    session_id: String,
+    workflow: WorkflowState,
+    activity_status: String,
+    activity_status_changed_at_ms: u64,
+    project_dir: PathBuf,
+    provider: String,
+    model: String,
+    active_profile: String,
+    rate_limits: Option<ApiCallRateLimitReport>,
+}
+
+#[cfg(feature = "stylos")]
+fn has_role(handle: &AgentHandle, role: &str) -> bool {
+    handle.roles.iter().any(|r| r == role)
+}
+
+#[cfg(feature = "stylos")]
+fn validate_agent_roles(agents: &[AgentHandle]) -> anyhow::Result<()> {
+    let main_count = agents.iter().filter(|h| has_role(h, "main")).count();
+    if main_count != 1 {
+        anyhow::bail!("invalid agent roles: expected exactly one main agent, found {}", main_count);
+    }
+    let interactive_count = agents.iter().filter(|h| has_role(h, "interactive")).count();
+    if interactive_count > 1 {
+        anyhow::bail!(
+            "invalid agent roles: expected at most one interactive agent, found {}",
+            interactive_count
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "stylos")]
+fn build_stylos_status_snapshot(
+    startup_project_dir: &std::path::Path,
+    agent_sources: Vec<AgentStatusSource>,
+) -> anyhow::Result<crate::stylos::StylosStatusSnapshot> {
+    let main_count = agent_sources
+        .iter()
+        .filter(|agent| agent.roles.iter().any(|r| r == "main"))
+        .count();
+    if main_count != 1 {
+        anyhow::bail!(
+            "invalid agent roles: expected exactly one main agent, found {}",
+            main_count
+        );
+    }
+    let interactive_count = agent_sources
+        .iter()
+        .filter(|agent| agent.roles.iter().any(|r| r == "interactive"))
+        .count();
+    if interactive_count > 1 {
+        anyhow::bail!(
+            "invalid agent roles: expected at most one interactive agent, found {}",
+            interactive_count
+        );
+    }
+
+    let agents = agent_sources
+        .into_iter()
+        .map(|agent| {
+            let git_status = crate::stylos::GitStatusCache::new(agent.project_dir.clone()).snapshot();
+            crate::stylos::StylosAgentStatusSnapshot {
+                agent_id: agent.agent_id,
+                label: agent.label,
+                roles: agent.roles,
+                session_id: agent.session_id,
+                workflow: agent.workflow,
+                activity_status: agent.activity_status,
+                activity_status_changed_at_ms: agent.activity_status_changed_at_ms,
+                project_dir: agent.project_dir.display().to_string(),
+                project_dir_is_git_repo: git_status.is_repo,
+                git_remotes: git_status.remotes,
+                provider: agent.provider,
+                model: agent.model,
+                active_profile: agent.active_profile,
+                rate_limits: agent.rate_limits,
+            }
+        })
+        .collect();
+
+    Ok(crate::stylos::StylosStatusSnapshot {
+        startup_project_dir: startup_project_dir.display().to_string(),
+        agents,
+    })
 }
 
 #[derive(Clone)]
@@ -141,6 +237,7 @@ pub struct App<'a> {
     agents: Vec<AgentHandle>,
     db: Arc<DbHandle>,
     project_dir: PathBuf,
+    startup_project_dir: PathBuf,
     session_tokens: TurnStats,
     last_ctx_tokens: u64,
     agent_activity: Option<AgentActivity>,
@@ -169,7 +266,9 @@ impl<'a> App<'a> {
         let handle = AgentHandle {
             agent: Some(agent),
             session_id,
-            is_interactive: true,
+            agent_id: "main".to_string(),
+            label: "main".to_string(),
+            roles: vec!["main".to_string(), "interactive".to_string()],
         };
 
         let art = concat!(
@@ -236,6 +335,7 @@ impl<'a> App<'a> {
             anim_frame: 0,
             agents: vec![handle],
             db,
+            startup_project_dir: project_dir.clone(),
             project_dir,
             session_tokens: TurnStats {
                 llm_rounds: 0,
@@ -261,7 +361,12 @@ impl<'a> App<'a> {
 
     #[allow(dead_code)]
     fn interactive_agent_mut(&mut self) -> Option<&mut AgentHandle> {
-        self.agents.iter_mut().find(|h| h.is_interactive)
+        self.agents.iter_mut().find(|h| has_role(h, "interactive"))
+    }
+
+    #[allow(dead_code)]
+    fn main_agent_mut(&mut self) -> Option<&mut AgentHandle> {
+        self.agents.iter_mut().find(|h| has_role(h, "main"))
     }
 
     fn history_up(&mut self) {
@@ -373,12 +478,10 @@ impl<'a> App<'a> {
     fn refresh_stylos_status(&self) {
         #[cfg(feature = "stylos")]
         if let Some(handle) = self.stylos.as_ref() {
-            let workflow = self.workflow_state.clone();
-            let project_dir = self.project_dir.display().to_string();
-            let git_status_cache = crate::stylos::GitStatusCache::new(self.project_dir.clone());
-            let provider_name = self.session.provider.clone();
-            let model = self.session.model.clone();
-            let active_profile = self.session.active_profile.clone();
+            if validate_agent_roles(&self.agents).is_err() {
+                return;
+            }
+            let startup_project_dir = self.startup_project_dir.clone();
             let rate_limits = self.status_rate_limits.clone();
             let idle_since = self.idle_since;
             let idle_status_changed_at = self.idle_status_changed_at;
@@ -386,18 +489,13 @@ impl<'a> App<'a> {
             let agent_activity_changed_at = self.agent_activity_changed_at;
             let stream_chunks = self.stream_chunks;
             let stream_chars = self.stream_chars;
-            let provider = std::sync::Arc::new(move || {
-                let workflow = workflow.clone();
-                let project_dir = project_dir.clone();
-                let git_status = git_status_cache.snapshot();
-                let provider_name = provider_name.clone();
-                let model = model.clone();
-                let active_profile = active_profile.clone();
-                let rate_limits = rate_limits.clone();
-                let agent_activity = agent_activity.clone();
-                let agent_activity_changed_at = agent_activity_changed_at;
-                Box::pin(async move {
-                    let (activity_status, activity_status_changed_at) =
+
+            let agent_sources: Vec<AgentStatusSource> = self
+                .agents
+                .iter()
+                .enumerate()
+                .map(|(idx, h)| {
+                    let (activity_status, activity_status_changed_at_ms) = if idx == 0 {
                         if let Some(activity) = agent_activity.as_ref() {
                             (
                                 activity.status_bar(stream_chunks, stream_chars),
@@ -416,19 +514,53 @@ impl<'a> App<'a> {
                                     idle_status_changed_at.unwrap_or_else(unix_epoch_now_ms),
                                 ),
                             }
-                        };
-                    crate::stylos::StylosStatusSnapshot {
+                        }
+                    } else {
+                        ("idle".to_string(), unix_epoch_now_ms())
+                    };
+
+                    let workflow = h
+                        .agent
+                        .as_ref()
+                        .map(|agent| agent.workflow_state().clone())
+                        .unwrap_or_else(|| {
+                            if idx == 0 {
+                                self.workflow_state.clone()
+                            } else {
+                                WorkflowState::default()
+                            }
+                        });
+
+                    AgentStatusSource {
+                        agent_id: h.agent_id.clone(),
+                        label: h.label.clone(),
+                        roles: h.roles.clone(),
+                        session_id: h.session_id.to_string(),
                         workflow,
                         activity_status,
-                        activity_status_changed_at,
-                        project_dir,
-                        project_dir_is_git_repo: git_status.is_repo,
-                        git_remotes: git_status.remotes,
-                        provider: provider_name,
-                        model,
-                        active_profile,
-                        rate_limits,
+                        activity_status_changed_at_ms,
+                        project_dir: h
+                            .agent
+                            .as_ref()
+                            .map(|agent| agent.project_dir.clone())
+                            .unwrap_or_else(|| self.project_dir.clone()),
+                        provider: self.session.provider.clone(),
+                        model: self.session.model.clone(),
+                        active_profile: self.session.active_profile.clone(),
+                        rate_limits: if idx == 0 { rate_limits.clone() } else { None },
                     }
+                })
+                .collect();
+
+            let provider = std::sync::Arc::new(move || {
+                let startup_project_dir = startup_project_dir.clone();
+                let agent_sources = agent_sources.clone();
+                Box::pin(async move {
+                    build_stylos_status_snapshot(&startup_project_dir, agent_sources)
+                        .unwrap_or_else(|_| crate::stylos::StylosStatusSnapshot {
+                            startup_project_dir: startup_project_dir.display().to_string(),
+                            agents: Vec::new(),
+                        })
                 })
                     as std::pin::Pin<
                         Box<
@@ -567,7 +699,7 @@ impl<'a> App<'a> {
         }
 
         if input == "/clear" {
-            if let Some(handle) = self.agents.iter_mut().find(|h| h.is_interactive) {
+            if let Some(handle) = self.agents.iter_mut().find(|h| h.roles.iter().any(|r| r == "interactive")) {
                 if let Some(agent) = handle.agent.as_mut() {
                     agent.clear_context();
                 }
@@ -656,7 +788,9 @@ impl<'a> App<'a> {
                                 self.agents = vec![AgentHandle {
                                     agent: Some(new_agent),
                                     session_id: new_session_id,
-                                    is_interactive: true,
+                                    agent_id: "main".to_string(),
+                                    label: "main".to_string(),
+                                    roles: vec!["main".to_string(), "interactive".to_string()],
                                 }];
                                 out.push(format!(
                                     "switched to profile '{}'  provider={}  model={}",
@@ -792,8 +926,7 @@ impl<'a> App<'a> {
         });
     }
 
-    fn submit_input(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) {
-        let text: String = self.input.lines().join("\n");
+    fn submit_text(&mut self, text: String, app_tx: &mpsc::UnboundedSender<AppEvent>) {
         let text = text.trim().to_string();
         if text.is_empty() || self.agent_busy {
             return;
@@ -847,7 +980,7 @@ impl<'a> App<'a> {
         let handle = self
             .agents
             .iter_mut()
-            .find(|h| h.is_interactive)
+            .find(|h| h.roles.iter().any(|r| r == "interactive"))
             .expect("interactive agent");
         let mut agent = handle.agent.take().expect("agent available when not busy");
         let handle_session_id = handle.session_id;
@@ -865,6 +998,11 @@ impl<'a> App<'a> {
             }
             let _ = app_tx_done.send(AppEvent::AgentReady(Box::new(agent), handle_session_id));
         });
+    }
+
+    fn submit_input(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) {
+        let text: String = self.input.lines().join("\n");
+        self.submit_text(text, app_tx);
     }
 }
 
@@ -1410,6 +1548,18 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
 
     app.refresh_stylos_status();
 
+    #[cfg(feature = "stylos")]
+    if let Some(handle) = app.stylos.as_mut() {
+        if let Some(mut cmd_rx) = handle.take_cmd_rx() {
+            let app_tx_cmd = app_tx.clone();
+            tokio::spawn(async move {
+                while let Some(cmd) = cmd_rx.recv().await {
+                    let _ = app_tx_cmd.send(AppEvent::StylosCmd(cmd));
+                }
+            });
+        }
+    }
+
     while app.running {
         terminal.draw(|f| draw(f, &app))?;
         match app_rx.recv().await {
@@ -1539,6 +1689,9 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 }
             }
             Some(AppEvent::Tick) => app.on_tick(),
+            Some(AppEvent::StylosCmd(cmd)) => {
+                app.submit_text(cmd.prompt, &app_tx);
+            }
             Some(AppEvent::Agent(ev)) => app.handle_agent_event(ev),
             Some(AppEvent::AgentReady(agent, sid)) => {
                 let agent = *agent;
@@ -1602,7 +1755,9 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                         app.agents = vec![AgentHandle {
                             agent: Some(new_agent),
                             session_id: new_session_id,
-                            is_interactive: true,
+                            agent_id: "main".to_string(),
+                            label: "main".to_string(),
+                            roles: vec!["main".to_string(), "interactive".to_string()],
                         }];
                         app.push(Entry::Assistant(format!(
                             "logged in as {} — switched to codex profile (gpt-5.4)",
@@ -1661,4 +1816,82 @@ fn unix_epoch_now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+
+#[cfg(all(test, feature = "stylos"))]
+mod tests {
+    use super::*;
+
+    fn handle(agent_id: &str, roles: &[&str]) -> AgentHandle {
+        AgentHandle {
+            agent: None,
+            session_id: Uuid::nil(),
+            agent_id: agent_id.to_string(),
+            label: agent_id.to_string(),
+            roles: roles.iter().map(|r| r.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn validate_agent_roles_accepts_one_main_and_one_interactive() {
+        let agents = vec![handle("main", &["main", "interactive"]), handle("worker", &["background"])];
+        validate_agent_roles(&agents).unwrap();
+    }
+
+    #[test]
+    fn validate_agent_roles_rejects_zero_main() {
+        let agents = vec![handle("worker", &["background"])];
+        assert!(validate_agent_roles(&agents).is_err());
+    }
+
+    #[test]
+    fn validate_agent_roles_rejects_two_main() {
+        let agents = vec![handle("a", &["main"]), handle("b", &["main"])];
+        assert!(validate_agent_roles(&agents).is_err());
+    }
+
+    #[test]
+    fn build_snapshot_preserves_multiple_agents_and_startup_dir() {
+        let startup = PathBuf::from(".");
+        let snapshot = build_stylos_status_snapshot(
+            &startup,
+            vec![
+                AgentStatusSource {
+                    agent_id: "main".to_string(),
+                    label: "main".to_string(),
+                    roles: vec!["main".to_string(), "interactive".to_string()],
+                    session_id: "s1".to_string(),
+                    workflow: WorkflowState::default(),
+                    activity_status: "idle".to_string(),
+                    activity_status_changed_at_ms: 1,
+                    project_dir: PathBuf::from("."),
+                    provider: "p1".to_string(),
+                    model: "m1".to_string(),
+                    active_profile: "prof1".to_string(),
+                    rate_limits: None,
+                },
+                AgentStatusSource {
+                    agent_id: "worker".to_string(),
+                    label: "worker".to_string(),
+                    roles: vec!["background".to_string()],
+                    session_id: "s2".to_string(),
+                    workflow: WorkflowState::default(),
+                    activity_status: "idle".to_string(),
+                    activity_status_changed_at_ms: 2,
+                    project_dir: PathBuf::from("."),
+                    provider: "p2".to_string(),
+                    model: "m2".to_string(),
+                    active_profile: "prof2".to_string(),
+                    rate_limits: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.agents.len(), 2);
+        assert_eq!(snapshot.agents[0].roles, vec!["main", "interactive"]);
+        assert_eq!(snapshot.agents[1].provider, "p2");
+        assert_eq!(snapshot.startup_project_dir, startup.display().to_string());
+    }
 }

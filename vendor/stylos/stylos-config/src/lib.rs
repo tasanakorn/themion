@@ -26,7 +26,9 @@ pub struct IdentitySection {
 impl Default for IdentitySection {
     fn default() -> Self {
         let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
         Self {
             realm: "dev".to_string(),
             role: "cli".to_string(),
@@ -64,7 +66,9 @@ impl Default for ZenohSection {
     }
 }
 
-fn default_mode() -> String { "peer".to_string() }
+fn default_mode() -> String {
+    "peer".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Endpoints {
@@ -106,10 +110,18 @@ pub struct GossipSection {
     pub enabled: bool,
 }
 
-fn default_true() -> bool { true }
-fn default_mcast_addr() -> String { STYLOS_MULTICAST_ADDR.to_string() }
-fn default_iface() -> String { "auto".to_string() }
-fn default_peer_peer() -> String { "peer".to_string() }
+fn default_true() -> bool {
+    true
+}
+fn default_mcast_addr() -> String {
+    STYLOS_MULTICAST_ADDR.to_string()
+}
+fn default_iface() -> String {
+    "auto".to_string()
+}
+fn default_peer_peer() -> String {
+    "peer".to_string()
+}
 
 impl StylosConfig {
     pub fn load(path: &Path) -> Result<Self> {
@@ -122,10 +134,14 @@ impl StylosConfig {
     pub fn load_default() -> Result<Self> {
         if let Ok(p) = std::env::var("STYLOS_CONFIG") {
             let pb = PathBuf::from(p);
-            if pb.exists() { return Self::load(&pb); }
+            if pb.exists() {
+                return Self::load(&pb);
+            }
         }
         let local = PathBuf::from("./stylos.json5");
-        if local.exists() { return Self::load(&local); }
+        if local.exists() {
+            return Self::load(&local);
+        }
         Ok(Self::default())
     }
 }
