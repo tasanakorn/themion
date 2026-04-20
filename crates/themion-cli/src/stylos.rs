@@ -4,7 +4,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use stylos_config::{Endpoints, IdentitySection, StylosConfig as SessionConfig, ZenohSection};
@@ -31,6 +31,7 @@ pub enum StylosRuntimeState {
 pub struct StylosStatusSnapshot {
     pub workflow: WorkflowState,
     pub activity_status: String,
+    pub activity_status_changed_at: u64,
     pub project_dir: String,
     pub provider: String,
     pub model: String,
@@ -105,6 +106,7 @@ struct ThemionStatusPayload {
     project_dir: String,
     workflow: WorkflowState,
     activity_status: String,
+    activity_status_changed_at: u64,
     rate_limits: Option<ApiCallRateLimitReport>,
 }
 
@@ -198,6 +200,7 @@ async fn start_inner(
                         None => StylosStatusSnapshot {
                             workflow: WorkflowState::default(),
                             activity_status: "idle".to_string(),
+                            activity_status_changed_at: unix_epoch_now_secs(),
                             project_dir: initial_project_dir.clone(),
                             provider: status_provider.clone(),
                             model: status_model.clone(),
@@ -216,6 +219,7 @@ async fn start_inner(
                         project_dir: snapshot.project_dir,
                         workflow: snapshot.workflow,
                         activity_status: snapshot.activity_status,
+                        activity_status_changed_at: snapshot.activity_status_changed_at,
                         rate_limits: snapshot.rate_limits,
                     };
                     if let Ok(bytes) = serde_cbor::to_vec(&payload) {
@@ -300,4 +304,11 @@ fn is_valid_segment(s: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+fn unix_epoch_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
