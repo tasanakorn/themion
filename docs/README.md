@@ -29,6 +29,7 @@
 | PRD-017 | [Press `Esc` to Interrupt an In-Progress Agent Turn](prd/prd-017-press-esc-to-interrupt-agent.md) | Implemented | v0.9.0 | `themion-cli`, `themion-core`, docs |
 | PRD-018 | [Stronger Short Commit-Message Guardrail](prd/prd-018-stronger-short-commit-message-guardrail.md) | Proposed | v0.9.1 | `themion-core`, docs |
 | PRD-019 | [Basic Stylos Support in `themion-cli`](prd/prd-019-basic-stylos-support-in-themion-cli.md) | Implemented | v0.10.0 | `themion-cli`, docs |
+| PRD-020 | [Stylos Git Metadata Cache and Remote URL Simplification](prd/prd-020-stylos-git-metadata-cache-and-remote-url-simplification.md) | Implemented | v0.10.1 | `themion-cli`, docs |
 
 ## Roadmap note
 
