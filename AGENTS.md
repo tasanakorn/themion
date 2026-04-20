@@ -56,6 +56,9 @@ When adding code:
 - Do not introduce new dependencies unless they are clearly justified.
 - Avoid breaking public shapes unless required by the task.
 - Keep comments concise and useful.
+- When a timestamp is serialized for cross-language consumers, state and preserve the unit explicitly.
+- Prefer milliseconds for machine-consumed status timestamps unless a documented consumer requires another precision.
+- If a field keeps the same name but its unit changes, update the relevant docs and consumer expectations in the same task when practical.
 
 ## Rust-specific guidance
 
@@ -72,6 +75,8 @@ When adding code:
 - Do not rewrite large files unnecessarily.
 - Do not touch generated/build output such as `target/`.
 - Do not edit lockfiles unless a dependency change is required.
+- Read the relevant file before editing it.
+- Verify tool availability before depending on non-standard local commands.
 
 ## Validation
 
@@ -106,6 +111,14 @@ If you changed only one crate, prefer checking that crate first.
 - Stage and commit only files relevant to the requested change.
 - Use clear commit messages.
 - Do not include unrelated modifications in a commit.
+- Before `git add -A` or committing all pending changes, inspect `git status` and confirm there are no unrelated edits.
+
+## Lessons learned
+
+- Do not assume common local tools such as `rg` are available; fall back to standard shell tools or verified alternatives.
+- When adding a new exported/status field, trace where it is produced and consumed so paired changes land together.
+- For activity/status transitions, track both the state value and the time the state changed so downstream consumers can interpret snapshots correctly.
+- If asked to commit, keep commits scoped unless the user explicitly requests committing all pending changes.
 
 ## When updating docs
 
