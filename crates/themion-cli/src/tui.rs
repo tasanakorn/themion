@@ -45,6 +45,7 @@ enum AppEvent {
     Agent(AgentEvent),
     AgentReady(Box<Agent>, Uuid),
     Tick,
+    #[cfg(feature = "stylos")]
     StylosCmd(crate::stylos::StylosCmdRequest),
     LoginPrompt {
         user_code: String,
@@ -359,11 +360,13 @@ impl<'a> App<'a> {
         }
     }
 
+    #[cfg(feature = "stylos")]
     #[allow(dead_code)]
     fn interactive_agent_mut(&mut self) -> Option<&mut AgentHandle> {
         self.agents.iter_mut().find(|h| has_role(h, "interactive"))
     }
 
+    #[cfg(feature = "stylos")]
     #[allow(dead_code)]
     fn main_agent_mut(&mut self) -> Option<&mut AgentHandle> {
         self.agents.iter_mut().find(|h| has_role(h, "main"))
@@ -1689,6 +1692,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 }
             }
             Some(AppEvent::Tick) => app.on_tick(),
+            #[cfg(feature = "stylos")]
             Some(AppEvent::StylosCmd(cmd)) => {
                 app.submit_text(cmd.prompt, &app_tx);
             }
@@ -1847,7 +1851,7 @@ mod tests {
 
     #[test]
     fn validate_agent_roles_rejects_two_main() {
-        let agents = vec![handle("a", &["main"]), handle("b", &["main"])];
+        let agents = vec![handle("a", &["main"]), handle("b", &["main"] )];
         assert!(validate_agent_roles(&agents).is_err());
     }
 

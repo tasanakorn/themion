@@ -67,6 +67,8 @@ When adding code:
 - Keep serde structs and API translation code close to the backend that uses them.
 - Preserve streaming behavior and tool-call handling when editing client code.
 - Be careful with async trait/object boundaries; do not introduce unnecessary lifetime complexity.
+- This workspace uses feature flags; when editing feature-gated code, ensure both default builds and relevant opt-in feature builds still compile.
+- Do not reference feature-gated modules, types, or helpers from always-on code paths unless the reference is guarded consistently.
 
 ## Tools and file edits
 
@@ -89,6 +91,11 @@ Typical checks:
 - `cargo test -p themion-cli`
 
 If you changed only one crate, prefer checking that crate first.
+If you changed feature-gated code or code that references feature-gated modules, also run the relevant feature-on and feature-off build checks for the affected crate.
+Typical feature checks for `themion-cli`:
+
+- `cargo check -p themion-cli`
+- `cargo check -p themion-cli --features stylos`
 
 ## When writing PRDs
 
@@ -119,6 +126,7 @@ If you changed only one crate, prefer checking that crate first.
 - When adding a new exported/status field, trace where it is produced and consumed so paired changes land together.
 - For activity/status transitions, track both the state value and the time the state changed so downstream consumers can interpret snapshots correctly.
 - If asked to commit, keep commits scoped unless the user explicitly requests committing all pending changes.
+- Feature-flag regressions are easy to miss; when touching gated code, verify the crate still builds with the feature enabled and disabled as relevant.
 
 ## When updating docs
 
