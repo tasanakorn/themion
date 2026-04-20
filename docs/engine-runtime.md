@@ -45,3 +45,55 @@ A single user turn follows this shape:
 `themion-core::Agent` owns per-agent harness state such as session ID, project directory, workflow state, messages, and model/backend integration. `themion-cli` owns process-local descriptors such as `agent_id`, `label`, and `roles` that describe how a given core agent is used within one Themion process.
 
 This keeps reusable harness behavior in core while allowing the CLI to publish process-level multi-agent status for Stylos.
+
+## Stylos remote-request bridge
+
+Stylos request handling stays CLI-local even when it ultimately causes an agent turn.
+
+In the current implementation:
+
+- Stylos queryables are registered in `crates/themion-cli/src/stylos.rs`
+- query handlers read the current exported process snapshot from a snapshot provider set by the TUI runtime
+- accepted `talk` and `tasks/request` queries are converted into `StylosRemotePromptRequest` values and sent over an in-process channel
+- the TUI event loop receives those requests as `AppEvent::StylosRemotePrompt`
+- the TUI either rejects the request immediately if the current local execution path is already busy, or submits the prompt through the same local turn path used for normal input
+
+This means Stylos does not bypass the harness loop, call providers directly, or move history/tool execution into the transport layer. It only injects new work into the existing local input path.
+
+## Snapshot-driven request decisions
+
+The query layer makes best-effort decisions from the current local snapshot rather than from a separate scheduler.
+
+That includes:
+
+- `free` discovery using exported `activity_status`
+- `talk` acceptance requiring the requested agent to be present and currently `idle` or `nap`
+- `tasks/request` candidate selection using the exported agent list, role metadata, git-repo metadata, and current activity state
+- Zenoh-level `stylos_query_nodes` using `session.info()` from the active local Stylos session rather than Themion mesh queryables
+
+Because those checks are snapshot-based, they can race with local activity changes. The runtime reports the chosen agent honestly and may still fail later with `agent_busy` if the selected local execution path is no longer available by the time the request reaches the event loop.
+
+## In-memory task lifecycle tracking
+
+`crates/themion-cli/src/stylos.rs` maintains an in-memory `TaskRegistry` for accepted remote tasks.
+
+Current lifecycle behavior:
+
+- `tasks/request` allocates a stable `task_id` and inserts a `queued` entry
+- when the bridged local turn actually begins, the registry updates that task to `running`
+- when the turn finishes, the TUI stores the last observed assistant text as the terminal result and marks the task `completed`
+- if the request cannot be delivered or arrives while the selected local execution path is already busy, the registry marks the task `failed` with a machine-readable reason such as `agent_busy`
+- `tasks/status` reads the current registry entry without blocking
+- `tasks/result` can wait for a terminal state up to a bounded timeout, then returns either the finished result or the current non-terminal state with `timed_out = true`
+
+The registry is intentionally process-local and non-durable in this first release. Process restart drops pending remote work and prior task records.
+
+## Remote execution targeting in the current slice
+
+The current Stylos bridge validates requested `agent_id` values against the exported snapshot, records the requested agent in the remote request payload, and routes execution to that matching local agent when present.
+
+That means:
+
+- strict local `agent_id` execution targeting has landed for the current process-local agent set
+- the query layer still relies on snapshot-based selection and a CLI-local in-process bridge rather than a durable scheduler
+- this preserves the current harness architecture while still making the query and task surface useful for discovery, request submission, and best-effort status lookup

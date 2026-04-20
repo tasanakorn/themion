@@ -107,6 +107,8 @@ pub struct Agent {
     turn_seq_counter: u32,
     model_info: Option<ModelInfo>,
     workflow_state: WorkflowState,
+    #[cfg(feature = "stylos")]
+    stylos_tool_invoker: Option<crate::tools::StylosToolInvoker>,
 }
 
 impl Agent {
@@ -129,6 +131,8 @@ impl Agent {
             turn_seq_counter: 0,
             model_info: None,
             workflow_state: WorkflowState::default(),
+            #[cfg(feature = "stylos")]
+            stylos_tool_invoker: None,
         }
     }
 
@@ -178,11 +182,18 @@ impl Agent {
             turn_seq_counter: 0,
             model_info: None,
             workflow_state,
+            #[cfg(feature = "stylos")]
+            stylos_tool_invoker: None,
         }
     }
 
     pub fn set_event_tx(&mut self, tx: mpsc::UnboundedSender<AgentEvent>) {
         self.event_tx = Some(tx);
+    }
+
+    #[cfg(feature = "stylos")]
+    pub fn set_stylos_tool_invoker(&mut self, invoker: Option<crate::tools::StylosToolInvoker>) {
+        self.stylos_tool_invoker = invoker;
     }
 
     pub fn clear_context(&mut self) {
@@ -1125,6 +1136,8 @@ impl Agent {
                     project_dir: self.project_dir.clone(),
                     workflow_state: Some(self.workflow_state.clone()),
                     turn_seq: Some(turn_seq),
+                    #[cfg(feature = "stylos")]
+                    stylos_tool_invoker: self.stylos_tool_invoker.clone(),
                 };
                 let result =
                     tools::call_tool(&tc.function.name, &tc.function.arguments, &tool_ctx).await;

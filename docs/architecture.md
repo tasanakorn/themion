@@ -135,6 +135,71 @@ When the `stylos` feature is enabled, Themion still opens one Stylos session per
 
 Each agent snapshot includes its `agent_id`, `label`, `roles`, `session_id`, workflow/activity state, provider/model/profile, and per-agent git metadata.
 
+## Stylos query surface
+
+Feature-enabled `themion-cli` also exposes additive Stylos queryables under the existing Themion namespace.
+
+Discovery queryables are mesh-wide and are not addressed to a single instance:
+
+- `stylos/<realm>/themion/query/agents/alive`
+- `stylos/<realm>/themion/query/agents/free`
+- `stylos/<realm>/themion/query/agents/git`
+
+Per-instance queryables target one Themion process:
+
+- `stylos/<realm>/themion/<instance>/query/status`
+- `stylos/<realm>/themion/<instance>/query/talk`
+- `stylos/<realm>/themion/<instance>/query/tasks/request`
+- `stylos/<realm>/themion/<instance>/query/tasks/status`
+- `stylos/<realm>/themion/<instance>/query/tasks/result`
+
+All of these queryables live in `crates/themion-cli/src/stylos.rs` and are registered only when the `stylos` cargo feature is enabled.
+
+Matching injected Stylos tools in `themion-core` now include:
+
+- `stylos_query_nodes`
+
+This tool is a Zenoh-session-level check, not a Themion mesh discovery queryable. It inspects the current local Zenoh session via `session.info()` and returns the local session ZID plus currently known peer and router ZIDs.
+
+### Discovery behavior
+
+- `alive` returns one reply per responding instance with that instance identity, session ID, and its current agent list.
+- `free` uses the current exported activity state and returns only agents whose `activity_status` is `idle` or `nap`.
+- `git` returns only agents whose `project_dir_is_git_repo` is true. When the request includes a `remote`, the handler matches against normalized repo keys when possible and falls back to exact raw-remote comparison for unsupported forms.
+- `stylos_query_nodes` returns a local network snapshot with `self_zid`, `peer_zids`, and `router_zids` gathered from the active Zenoh session.
+
+The reply payloads include per-agent fields already present in the status snapshot plus normalized `git_repo_keys` derived from exported `git_remotes`.
+
+### Git normalization rules
+
+Git discovery matching is designed around comparable repository identity rather than raw remote-string equality.
+
+Current normalization behavior:
+
+- supports common SSH and HTTP(S) forms for `github.com`, `gitlab.com`, and `bitbucket.org`
+- lowercases the host for comparison
+- trims surrounding `/`
+- ignores a trailing `.git`
+- emits canonical keys in the form `<host>/<owner>/<repo>`
+- returns no normalized key for unsupported hosts, so matching falls back to exact raw remote comparison instead of guessing
+
+Examples:
+
+- `git@github.com:example/themion.git` → `github.com/example/themion`
+- `https://github.com/example/themion` → `github.com/example/themion`
+- `ssh://git@gitlab.com/group/proj.git` → `gitlab.com/group/proj`
+- `git@bitbucket.org:team/repo.git` → `bitbucket.org/team/repo`
+
+### Request and task query behavior
+
+- `status` returns the current process snapshot and supports optional `agent_id` or `role` filtering. Supplying both returns `invalid_request`. Unknown filters return `not_found`.
+- `talk` validates that the requested agent exists and is currently `idle` or `nap`, then enqueues the message through the CLI-local remote prompt bridge and routes execution to that local agent when present, returning an acknowledgement or rejection.
+- `tasks/request` filters local candidates using the current snapshot, optional `preferred_agent_id`, optional `required_roles`, and optional `require_git_repo`, then chooses deterministically by sorted `agent_id`.
+- `tasks/status` returns the current in-memory lifecycle state for a previously accepted task.
+- `tasks/result` returns immediately for terminal tasks, returns current non-terminal state when `wait_timeout_ms` is omitted or zero, and otherwise waits up to the requested timeout clamped to 60,000 ms.
+
+Task lifecycle tracking is process-local and in-memory. Accepted tasks start as `queued`, move to `running` when the selected local agent turn begins, and then to `completed` or `failed`. Lifecycle records currently expire after 30 minutes.
+
 ## TUI (tui.rs)
 
 The TUI still boots with one main interactive agent in the first shipped step, but its runtime agent descriptor now uses explicit roles rather than relying only on an `is_interactive` boolean. The initial main agent carries `roles = ["main", "interactive"]`.

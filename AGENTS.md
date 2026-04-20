@@ -59,6 +59,7 @@ When adding code:
 - When a timestamp is serialized for cross-language consumers, state and preserve the unit explicitly.
 - Prefer milliseconds for machine-consumed status timestamps unless a documented consumer requires another precision.
 - If a field keeps the same name but its unit changes, update the relevant docs and consumer expectations in the same task when practical.
+- Ensure implemented code does not introduce new build warnings; fix warning sources in the touched scope when practical.
 
 ## Rust-specific guidance
 
@@ -127,6 +128,7 @@ Typical feature checks for `themion-cli`:
 - For activity/status transitions, track both the state value and the time the state changed so downstream consumers can interpret snapshots correctly.
 - If asked to commit, keep commits scoped unless the user explicitly requests committing all pending changes.
 - Feature-flag regressions are easy to miss; when touching gated code, verify the crate still builds with the feature enabled and disabled as relevant.
+- When editing code, avoid leaving newly introduced warnings behind; either fix them in the touched area or call them out clearly if blocked.
 
 ## When updating docs
 

@@ -7,9 +7,16 @@ use crate::workflow::{
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::fs;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use uuid::Uuid;
+
+#[cfg(feature = "stylos")]
+type StylosToolFuture = Pin<Box<dyn Future<Output = Result<String>> + Send>>;
+#[cfg(feature = "stylos")]
+pub type StylosToolInvoker = Arc<dyn Fn(String, Value) -> StylosToolFuture + Send + Sync>;
 
 pub struct ToolCtx {
     pub db: Arc<DbHandle>,
@@ -17,11 +24,13 @@ pub struct ToolCtx {
     pub project_dir: PathBuf,
     pub workflow_state: Option<WorkflowState>,
     pub turn_seq: Option<u32>,
+    #[cfg(feature = "stylos")]
+    pub stylos_tool_invoker: Option<StylosToolInvoker>,
 }
 
 pub fn tool_definitions() -> Value {
-    json!([
-        {
+    let mut defs = vec![
+        json!({
             "type": "function",
             "function": {
                 "name": "fs_read_file",
@@ -34,8 +43,8 @@ pub fn tool_definitions() -> Value {
                     "required": ["path"]
                 }
             }
-        },
-        {
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "fs_write_file",
@@ -49,8 +58,8 @@ pub fn tool_definitions() -> Value {
                     "required": ["path", "content"]
                 }
             }
-        },
-        {
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "fs_list_directory",
@@ -63,8 +72,8 @@ pub fn tool_definitions() -> Value {
                     "required": ["path"]
                 }
             }
-        },
-        {
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "shell_run_command",
@@ -77,8 +86,8 @@ pub fn tool_definitions() -> Value {
                     "required": ["command"]
                 }
             }
-        },
-        {
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "history_recall",
@@ -94,8 +103,8 @@ pub fn tool_definitions() -> Value {
                     "required": []
                 }
             }
-        },
-        {
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "history_search",
@@ -111,8 +120,8 @@ pub fn tool_definitions() -> Value {
                     "required": ["query"]
                 }
             }
-        },
-        {
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "workflow_get_state",
@@ -123,8 +132,8 @@ pub fn tool_definitions() -> Value {
                     "required": []
                 }
             }
-        },
-        {
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "workflow_set_active",
@@ -138,8 +147,8 @@ pub fn tool_definitions() -> Value {
                     "required": ["workflow"]
                 }
             }
-        },
-        {
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "workflow_set_phase",
@@ -153,8 +162,8 @@ pub fn tool_definitions() -> Value {
                     "required": ["phase"]
                 }
             }
-        },
-        {
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "workflow_set_phase_result",
@@ -168,8 +177,8 @@ pub fn tool_definitions() -> Value {
                     "required": ["result"]
                 }
             }
-        },
-        {
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "workflow_complete",
@@ -183,8 +192,52 @@ pub fn tool_definitions() -> Value {
                     "required": ["outcome"]
                 }
             }
+        }),
+    ];
+
+    #[cfg(feature = "stylos")]
+    defs.extend(stylos_tool_definitions());
+
+    Value::Array(defs)
+}
+
+#[cfg(feature = "stylos")]
+fn stylos_tool_definitions() -> Vec<Value> {
+    vec![
+        stylos_tool("stylos_query_agents_alive", "Ask which Themion instances and agents are currently alive.", json!({"type":"object","properties":{},"required":[]})),
+        stylos_tool("stylos_query_agents_free", "Ask which agents are currently free for new work.", json!({"type":"object","properties":{},"required":[]})),
+        stylos_tool("stylos_query_agents_git", "Ask which agents are attached to git repositories, optionally matching a specific repo identity.", json!({
+            "type":"object","properties":{"remote":{"type":"string","description":"Optional git remote to match across normalized repo forms."}},"required":[]
+        })),
+        stylos_tool("stylos_query_nodes", "Ask which Themion nodes are visible on the Stylos network.", json!({"type":"object","properties":{},"required":[]})),
+        stylos_tool("stylos_query_status", "Ask one instance for its current process and agent status.", json!({
+            "type":"object","properties":{"instance":{"type":"string"},"agent_id":{"type":"string"},"role":{"type":"string"}},"required":["instance"]
+        })),
+        stylos_tool("stylos_request_talk", "Submit a user-style message to one target agent.", json!({
+            "type":"object","properties":{"instance":{"type":"string"},"agent_id":{"type":"string"},"message":{"type":"string"},"request_id":{"type":"string"}},"required":["instance","agent_id","message"]
+        })),
+        stylos_tool("stylos_request_task", "Submit a structured task request for local agent routing.", json!({
+            "type":"object","properties":{"instance":{"type":"string"},"task":{"type":"string"},"preferred_agent_id":{"type":"string"},"required_roles":{"type":"array","items":{"type":"string"}},"require_git_repo":{"type":"boolean"},"request_id":{"type":"string"}},"required":["instance","task"]
+        })),
+        stylos_tool("stylos_query_task_status", "Look up the current lifecycle state of a submitted task.", json!({
+            "type":"object","properties":{"instance":{"type":"string"},"task_id":{"type":"string"}},"required":["instance","task_id"]
+        })),
+        stylos_tool("stylos_query_task_result", "Wait for or retrieve the result of a submitted task.", json!({
+            "type":"object","properties":{"instance":{"type":"string"},"task_id":{"type":"string"},"wait_timeout_ms":{"type":"integer"}},"required":["instance","task_id"]
+        })),
+    ]
+}
+
+#[cfg(feature = "stylos")]
+fn stylos_tool(name: &str, description: &str, parameters: Value) -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": parameters,
         }
-    ])
+    })
 }
 
 pub async fn call_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> String {
@@ -307,6 +360,22 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 .unwrap_or_default()),
                 Err(e) => Ok(format!("Error: {e}")),
             }
+        }
+        #[cfg(feature = "stylos")]
+        "stylos_query_agents_alive"
+        | "stylos_query_agents_free"
+        | "stylos_query_agents_git"
+        | "stylos_query_nodes"
+        | "stylos_query_status"
+        | "stylos_request_talk"
+        | "stylos_request_task"
+        | "stylos_query_task_status"
+        | "stylos_query_task_result" => {
+            let invoker = ctx
+                .stylos_tool_invoker
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("stylos tools unavailable"))?;
+            invoker(name.to_string(), args).await
         }
         "workflow_get_state" | "get_workflow_state" => {
             let state = ctx

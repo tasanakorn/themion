@@ -1,6 +1,6 @@
 use crate::config::{save_profiles, Config, ProfileConfig};
 #[cfg(feature = "stylos")]
-use crate::stylos::{StylosHandle, StylosRuntimeState};
+use crate::stylos::{tool_bridge, StylosHandle, StylosRemotePromptRequest, StylosRuntimeState, StylosToolBridge};
 use crate::{format_stats, Session};
 use crossterm::{
     event::{
@@ -47,6 +47,8 @@ enum AppEvent {
     Tick,
     #[cfg(feature = "stylos")]
     StylosCmd(crate::stylos::StylosCmdRequest),
+    #[cfg(feature = "stylos")]
+    StylosRemotePrompt(StylosRemotePromptRequest),
     LoginPrompt {
         user_code: String,
         verification_uri: String,
@@ -73,7 +75,9 @@ enum Entry {
 pub struct AgentHandle {
     pub agent: Option<Agent>,
     pub session_id: Uuid,
+    #[allow(dead_code)]
     pub agent_id: String,
+    #[allow(dead_code)]
     pub label: String,
     pub roles: Vec<String>,
 }
@@ -98,6 +102,10 @@ struct AgentStatusSource {
 #[cfg(feature = "stylos")]
 fn has_role(handle: &AgentHandle, role: &str) -> bool {
     handle.roles.iter().any(|r| r == role)
+}
+
+fn is_interactive_handle(handle: &AgentHandle) -> bool {
+    handle.roles.iter().any(|r| r == "interactive")
 }
 
 #[cfg(feature = "stylos")]
@@ -238,6 +246,7 @@ pub struct App<'a> {
     agents: Vec<AgentHandle>,
     db: Arc<DbHandle>,
     project_dir: PathBuf,
+    #[allow(dead_code)]
     startup_project_dir: PathBuf,
     session_tokens: TurnStats,
     last_ctx_tokens: u64,
@@ -251,6 +260,12 @@ pub struct App<'a> {
     status_model_info: Option<ModelInfo>,
     workflow_state: WorkflowState,
     active_turn_cancellation: Option<TurnCancellation>,
+    #[cfg(feature = "stylos")]
+    active_remote_request: Option<StylosRemotePromptRequest>,
+    #[cfg(feature = "stylos")]
+    last_assistant_text: Option<String>,
+    #[cfg(feature = "stylos")]
+    stylos_tool_bridge: Option<StylosToolBridge>,
 }
 
 impl<'a> App<'a> {
@@ -261,7 +276,9 @@ impl<'a> App<'a> {
         project_dir: PathBuf,
         #[cfg(feature = "stylos")] stylos: Option<StylosHandle>,
     ) -> Self {
-        let agent = build_agent(&session, session_id, project_dir.clone(), db.clone())
+        #[cfg(feature = "stylos")]
+        let stylos_tool_bridge = stylos.as_ref().and_then(tool_bridge);
+        let agent = build_agent(&session, session_id, project_dir.clone(), db.clone(), #[cfg(feature = "stylos")] stylos_tool_bridge.clone())
             .expect("failed to build agent");
         let initial_model_info = session.model_info.clone();
         let handle = AgentHandle {
@@ -357,6 +374,12 @@ impl<'a> App<'a> {
             status_model_info: initial_model_info,
             workflow_state: WorkflowState::default(),
             active_turn_cancellation: None,
+            #[cfg(feature = "stylos")]
+            active_remote_request: None,
+            #[cfg(feature = "stylos")]
+            last_assistant_text: None,
+            #[cfg(feature = "stylos")]
+            stylos_tool_bridge,
         }
     }
 
@@ -581,11 +604,34 @@ impl<'a> App<'a> {
     fn handle_agent_event(&mut self, ev: AgentEvent) {
         match ev {
             AgentEvent::LlmStart => {
+                #[cfg(feature = "stylos")]
+                if let (Some(remote), Some(handle)) = (self.active_remote_request.as_ref(), self.stylos.as_ref()) {
+                    if let Some(task_id) = remote.task_id.clone() {
+                        let query_context = handle.query_context();
+                        tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current().block_on(async move {
+                                query_context.task_registry().set_running(&task_id).await;
+                            });
+                        });
+                    }
+                }
                 self.reset_stream_counters();
+                #[cfg(feature = "stylos")]
+                {
+                    self.last_assistant_text = None;
+                }
                 self.set_agent_activity(AgentActivity::WaitingForModel);
                 self.streaming_idx = None;
             }
             AgentEvent::AssistantChunk(chunk) => {
+                #[cfg(feature = "stylos")]
+                {
+                    let next = match self.last_assistant_text.take() {
+                        Some(mut existing) => { existing.push_str(&chunk); existing }
+                        None => chunk.clone(),
+                    };
+                    self.last_assistant_text = Some(next);
+                }
                 self.stream_chunks += 1;
                 self.stream_chars += chunk.chars().count() as u64;
                 self.set_agent_activity(AgentActivity::StreamingResponse);
@@ -602,6 +648,10 @@ impl<'a> App<'a> {
                 }
             }
             AgentEvent::AssistantText(text) => {
+                #[cfg(feature = "stylos")]
+                {
+                    self.last_assistant_text = Some(text.clone());
+                }
                 self.streaming_idx = None;
                 self.clear_agent_activity();
                 self.push(Entry::Assistant(text));
@@ -633,6 +683,18 @@ impl<'a> App<'a> {
                 self.push(Entry::Stats(text));
             }
             AgentEvent::TurnDone(stats) => {
+                #[cfg(feature = "stylos")]
+                if let (Some(remote), Some(handle)) = (self.active_remote_request.take(), self.stylos.as_ref()) {
+                    if let Some(task_id) = remote.task_id {
+                        let result_text = self.last_assistant_text.clone();
+                        let query_context = handle.query_context();
+                        tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current().block_on(async move {
+                                query_context.task_registry().set_completed(&task_id, result_text, None).await;
+                            });
+                        });
+                    }
+                }
                 self.streaming_idx = None;
                 self.set_agent_activity(AgentActivity::Finishing);
                 self.clear_agent_activity();
@@ -646,7 +708,7 @@ impl<'a> App<'a> {
                     .to_string();
                 self.push(Entry::TurnDone {
                     summary: if interrupted {
-                        "󰜺 Turn interrupted".to_string()
+                        "󰇺 Turn interrupted".to_string()
                     } else {
                         "󰇺 Turn end".to_string()
                     },
@@ -663,6 +725,10 @@ impl<'a> App<'a> {
                 self.session_tokens.tool_calls += stats.tool_calls;
                 self.session_tokens.elapsed_ms += stats.elapsed_ms;
                 self.reset_stream_counters();
+                #[cfg(feature = "stylos")]
+                {
+                    self.last_assistant_text = None;
+                }
             }
         }
     }
@@ -702,7 +768,7 @@ impl<'a> App<'a> {
         }
 
         if input == "/clear" {
-            if let Some(handle) = self.agents.iter_mut().find(|h| h.roles.iter().any(|r| r == "interactive")) {
+            if let Some(handle) = self.agents.iter_mut().find(|h| is_interactive_handle(h)) {
                 if let Some(agent) = handle.agent.as_mut() {
                     agent.clear_context();
                 }
@@ -782,6 +848,7 @@ impl<'a> App<'a> {
                             new_session_id,
                             self.project_dir.clone(),
                             self.db.clone(),
+                            #[cfg(feature = "stylos")] self.stylos_tool_bridge.clone(),
                         ) {
                             Ok(new_agent) => {
                                 let db = self.db.clone();
@@ -929,6 +996,50 @@ impl<'a> App<'a> {
         });
     }
 
+    fn submit_text_to_agent(
+        &mut self,
+        agent_index: usize,
+        text: String,
+        app_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
+        self.agent_busy = true;
+        self.reset_stream_counters();
+        self.set_agent_activity(AgentActivity::PreparingRequest);
+
+        let cancellation = TurnCancellation::new();
+        self.active_turn_cancellation = Some(cancellation.clone());
+
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let app_tx_relay = app_tx.clone();
+        tokio::spawn(async move {
+            let mut rx = event_rx;
+            while let Some(ev) = rx.recv().await {
+                let _ = app_tx_relay.send(AppEvent::Agent(ev));
+            }
+        });
+
+        let handle = self
+            .agents
+            .get_mut(agent_index)
+            .expect("agent index valid");
+        let mut agent = handle.agent.take().expect("agent available when not busy");
+        let handle_session_id = handle.session_id;
+        agent.set_event_tx(event_tx);
+
+        let app_tx_done = app_tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = agent
+                .run_loop_with_cancellation(&text, Some(cancellation))
+                .await
+            {
+                let _ = app_tx_done.send(AppEvent::Agent(AgentEvent::AssistantText(format!(
+                    "error: {e}"
+                ))));
+            }
+            let _ = app_tx_done.send(AppEvent::AgentReady(Box::new(agent), handle_session_id));
+        });
+    }
+
     fn submit_text(&mut self, text: String, app_tx: &mpsc::UnboundedSender<AppEvent>) {
         let text = text.trim().to_string();
         if text.is_empty() || self.agent_busy {
@@ -963,44 +1074,31 @@ impl<'a> App<'a> {
             return;
         }
 
-        self.push(Entry::User(text.clone()));
-        self.agent_busy = true;
-        self.reset_stream_counters();
-        self.set_agent_activity(AgentActivity::PreparingRequest);
-
-        let cancellation = TurnCancellation::new();
-        self.active_turn_cancellation = Some(cancellation.clone());
-
-        let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
-        let app_tx_relay = app_tx.clone();
-        tokio::spawn(async move {
-            let mut rx = event_rx;
-            while let Some(ev) = rx.recv().await {
-                let _ = app_tx_relay.send(AppEvent::Agent(ev));
-            }
-        });
-
-        let handle = self
+        #[cfg(feature = "stylos")]
+        let target_agent_id = self
+            .active_remote_request
+            .as_ref()
+            .and_then(|request| request.agent_id.as_deref());
+        #[cfg(feature = "stylos")]
+        let agent_index = target_agent_id
+            .and_then(|agent_id| self.agents.iter().position(|h| h.agent_id == agent_id))
+            .or_else(|| self.agents.iter().position(is_interactive_handle))
+            .expect("interactive or targeted agent");
+        #[cfg(not(feature = "stylos"))]
+        let agent_index = self
             .agents
-            .iter_mut()
-            .find(|h| h.roles.iter().any(|r| r == "interactive"))
+            .iter()
+            .position(is_interactive_handle)
             .expect("interactive agent");
-        let mut agent = handle.agent.take().expect("agent available when not busy");
-        let handle_session_id = handle.session_id;
-        agent.set_event_tx(event_tx);
 
-        let app_tx_done = app_tx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = agent
-                .run_loop_with_cancellation(&text, Some(cancellation))
-                .await
-            {
-                let _ = app_tx_done.send(AppEvent::Agent(AgentEvent::AssistantText(format!(
-                    "error: {e}"
-                ))));
-            }
-            let _ = app_tx_done.send(AppEvent::AgentReady(Box::new(agent), handle_session_id));
-        });
+        #[cfg(feature = "stylos")]
+        if self.active_remote_request.is_none() {
+            self.push(Entry::User(text.clone()));
+        }
+        #[cfg(not(feature = "stylos"))]
+        self.push(Entry::User(text.clone()));
+
+        self.submit_text_to_agent(agent_index, text, app_tx);
     }
 
     fn submit_input(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) {
@@ -1088,11 +1186,24 @@ fn build_rate_limit_statusline(report: Option<&ApiCallRateLimitReport>) -> Strin
     }
 }
 
+#[cfg(feature = "stylos")]
+fn stylos_tool_invoker(bridge: Option<StylosToolBridge>) -> Option<themion_core::tools::StylosToolInvoker> {
+    bridge.map(|bridge| {
+        std::sync::Arc::new(move |name: String, args: serde_json::Value| {
+            let bridge = bridge.clone();
+            let fut: std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>> =
+                Box::pin(async move { bridge.invoke(&name, args).await });
+            fut
+        }) as themion_core::tools::StylosToolInvoker
+    })
+}
+
 fn build_agent(
     session: &Session,
     session_id: Uuid,
     project_dir: PathBuf,
     db: Arc<DbHandle>,
+    #[cfg(feature = "stylos")] stylos_tool_bridge: Option<StylosToolBridge>,
 ) -> anyhow::Result<Agent> {
     use themion_core::ChatBackend;
     let client: Box<dyn ChatBackend + Send + Sync> = match session.provider.as_str() {
@@ -1124,14 +1235,27 @@ fn build_agent(
             Box::new(c)
         }
     };
-    Ok(Agent::new_with_db(
+    #[cfg(feature = "stylos")]
+    let mut agent = Agent::new_with_db(
         client,
         session.model.clone(),
         session.system_prompt.clone(),
         session_id,
         project_dir,
         db,
-    ))
+    );
+    #[cfg(not(feature = "stylos"))]
+    let agent = Agent::new_with_db(
+        client,
+        session.model.clone(),
+        session.system_prompt.clone(),
+        session_id,
+        project_dir,
+        db,
+    );
+    #[cfg(feature = "stylos")]
+    agent.set_stylos_tool_invoker(stylos_tool_invoker(stylos_tool_bridge));
+    Ok(agent)
 }
 
 fn set_input_text(input: &mut TextArea, text: &str) {
@@ -1561,6 +1685,14 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 }
             });
         }
+        if let Some(mut prompt_rx) = handle.take_prompt_rx() {
+            let app_tx_prompt = app_tx.clone();
+            tokio::spawn(async move {
+                while let Some(request) = prompt_rx.recv().await {
+                    let _ = app_tx_prompt.send(AppEvent::StylosRemotePrompt(request));
+                }
+            });
+        }
     }
 
     while app.running {
@@ -1694,7 +1826,24 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
             Some(AppEvent::Tick) => app.on_tick(),
             #[cfg(feature = "stylos")]
             Some(AppEvent::StylosCmd(cmd)) => {
+                app.active_remote_request = None;
                 app.submit_text(cmd.prompt, &app_tx);
+            }
+            #[cfg(feature = "stylos")]
+            Some(AppEvent::StylosRemotePrompt(request)) => {
+                if app.agent_busy {
+                    if let (Some(handle), Some(task_id)) = (app.stylos.as_ref(), request.task_id.clone()) {
+                        let query_context = handle.query_context();
+                        tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current().block_on(async move {
+                                query_context.task_registry().set_failed(&task_id, "agent_busy".to_string()).await;
+                            });
+                        });
+                    }
+                } else {
+                    app.active_remote_request = Some(request.clone());
+                    app.submit_text(request.prompt, &app_tx);
+                }
             }
             Some(AppEvent::Agent(ev)) => app.handle_agent_event(ev),
             Some(AppEvent::AgentReady(agent, sid)) => {
@@ -1748,6 +1897,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     new_session_id,
                     app.project_dir.clone(),
                     app.db.clone(),
+                    #[cfg(feature = "stylos")] app.stylos_tool_bridge.clone(),
                 ) {
                     Ok(mut new_agent) => {
                         new_agent.refresh_model_info().await;
@@ -1897,5 +2047,22 @@ mod tests {
         assert_eq!(snapshot.agents[0].roles, vec!["main", "interactive"]);
         assert_eq!(snapshot.agents[1].provider, "p2");
         assert_eq!(snapshot.startup_project_dir, startup.display().to_string());
+    }
+
+    #[test]
+    fn targeted_remote_request_prefers_matching_agent_id() {
+        let agents = vec![handle("main", &["main", "interactive"]), handle("worker", &["background"])];
+        let request = StylosRemotePromptRequest {
+            prompt: "hi".to_string(),
+            agent_id: Some("worker".to_string()),
+            task_id: None,
+            request_id: None,
+        };
+        let target = request.agent_id.as_deref();
+        let index = target
+            .and_then(|agent_id| agents.iter().position(|h| h.agent_id == agent_id))
+            .or_else(|| agents.iter().position(is_interactive_handle))
+            .unwrap();
+        assert_eq!(agents[index].agent_id, "worker");
     }
 }

@@ -1,15 +1,17 @@
 # PRD-022: Stylos Queryables for Agent Presence, Availability, and Task Requests
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Version:** v0.12.0
-- **Scope:** `themion-cli`, docs
+- **Scope:** `themion-cli`, `themion-core`, docs
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
 - **Date:** 2026-04-20
+- **Implementation status note:** Discovery queryables, per-instance queryables, git remote normalization, in-memory task lifecycle lookup, strict remote `agent_id` execution targeting for the current CLI-local agent set, and feature-gated agent-injected Stylos tool adapters have landed. The harness tool schemas now bridge into the existing CLI-local Stylos runtime/query implementation so the documented query surface and injected tools stay aligned.
 
 ## Goals
 
 - Add useful Stylos queryables so external tools and peers can ask across the Themion mesh which agents are alive, which agents are currently free, which agents are attached to git repositories, which agents match a specific git remote URI, and what a chosen process or agent's current status is.
 - Add a small request surface for talking to a target agent and for submitting task requests to an available agent, with a task lifecycle that supports later status lookup and optional waiting with timeout, without changing Themion's core provider or workflow architecture.
+- Define a matching set of agent-injected Stylos tools that can be exposed in the harness tool palette when Stylos support is available, so an in-turn agent can perform the same discovery and request operations through a stable tool contract.
 - Keep the initial design CLI-local and Stylos-feature-gated so the new behavior remains part of `themion-cli` runtime wiring rather than leaking network transport concerns into `themion-core`.
 - Reuse the already-landed multi-agent Stylos status model so the new queryables answer questions from the existing per-process and per-agent snapshot rather than inventing a parallel state model.
 
@@ -20,13 +22,13 @@
 - No requirement to add auth, ACLs, trust policy, or encrypted peer-to-peer messaging in the same change.
 - No requirement to expose arbitrary tool execution over Stylos.
 - No requirement to add a rich TUI for browsing or managing remote Stylos peers in this first pass.
-- No requirement to redesign the existing status heartbeat payload beyond the additive fields needed to support query answers and task-request handling.
+- No requirement to redesign the existing status heartbeat payload beyond the additive fields needed to support query answers, task-request handling, and future tool adapters.
 
 ## Background & Motivation
 
 ### Current state
 
-PRD-019 established basic optional Stylos support in `themion-cli`, and PRD-021 changed the exported Stylos status shape so one Themion process reports an `agents` array with per-agent workflow, activity, profile, model, project directory, and git metadata. PRD-020 then simplified git metadata to a unique list of remote URLs with a small cache.
+PRD-019 established basic optional Stylos support in `themion-cli`, and PRD-021 changed the exported Stylos status shape so one Themion process reports an `agents` array` with per-agent workflow, activity, profile, model, project directory, and git metadata. PRD-020 then simplified git metadata to a unique list of remote URLs with a small cache.
 
 That means a feature-enabled Themion process already publishes enough information for an observer to infer several practical things:
 
@@ -48,6 +50,17 @@ Those are different kinds of mesh interaction:
 - "what is this instance doing?", "talk to this agent", and "send this task request here" are direct requests to a chosen running Themion process
 
 The PRD should therefore make that distinction explicit instead of forcing every query through an instance-scoped key. This aligns better with Zenoh-style key hierarchies, where discovery commonly fans out across multiple matching queryables while direct control remains explicitly addressed.
+
+### Why the PRD must distinguish queryables from injected tools
+
+Stylos queryables and agent-injected tools are related, but they are not the same interface layer.
+
+- queryables are a network-facing Stylos surface owned by `themion-cli`
+- injected tools are part of the harness tool palette visible to the model during a turn
+- queryables may exist without injected tools
+- injected tools should act as adapters over the documented query/request surface rather than silently inventing a second protocol
+
+Without stating this explicitly, names such as `stylos_query_agents_alive` can be misread as already-landed harness tools rather than logical operation names for the queryable API. The PRD should therefore define whether these operations are only queryables, or also future tool definitions, and should keep those contracts aligned.
 
 ### Why use `query/agents/...` for discovery
 
@@ -159,9 +172,9 @@ These queryables are additive to the existing info/status publication behavior a
 
 **Alternative considered:** expose only one generic `query` endpoint with ad hoc request bodies. Rejected: named leaves are easier to inspect, document, and evolve for the small initial command set.
 
-### Draft tool-style operation names and queryable contract
+### Define operation names and their meaning across queryables and future tools
 
-To make the API easier to implement and easier to talk about in docs, each queryable should also have a stable operation name used in comments, helper functions, and future docs/examples.
+To make the API easier to implement and easier to talk about in docs, each queryable should also have a stable operation name used in comments, helper functions, future docs/examples, and any future tool wrappers.
 
 Recommended operation names:
 
@@ -176,9 +189,71 @@ Recommended operation names:
 | `stylos/<realm>/themion/<instance>/query/tasks/status` | `stylos_query_task_status` | per-instance | Look up the current lifecycle state of a submitted task. |
 | `stylos/<realm>/themion/<instance>/query/tasks/result` | `stylos_query_task_result` | per-instance | Wait for or retrieve the result of a submitted task. |
 
-These names are not user-facing shell commands; they are the intended logical operation names for implementation and documentation.
+These names are not shell commands. In this PRD they serve two purposes:
 
-**Alternative considered:** mirror the raw leaf names everywhere without operation-style names. Rejected: dedicated operation names make logs, helper functions, tests, and future tool wrappers easier to read.
+- they are the logical operation names for the Stylos queryable API
+- they are the intended canonical names for matching agent-injected tool adapters if and when those tools are registered in the harness
+
+That means a future harness tool named `stylos_query_agents_alive` should be a thin adapter over the documented `query/agents/alive` operation rather than a separate behavior contract.
+
+**Alternative considered:** mirror the raw leaf names everywhere without operation-style names. Rejected: dedicated operation names make logs, helper functions, tests, future tool wrappers, and docs easier to read.
+
+### Expose matching Stylos operations as optional agent-injected tools
+
+When Stylos support is compiled and available at runtime, Themion should be able to expose a matching set of agent-callable tools in the harness tool palette.
+
+Normative intent:
+
+- injected Stylos tools are optional and feature-gated behind `stylos`
+- non-`stylos` builds must not advertise or register these tools
+- the tools should be adapters over the existing query and request surface rather than a parallel protocol
+- the tools should use the same request and response semantics documented for the corresponding queryables where practical
+- tool calls should fail clearly when Stylos runtime wiring is unavailable, misconfigured, or disabled
+- query-style tools should not require the model to know transport details beyond documented parameters
+
+Initial intended injected tool set:
+
+- `stylos_query_agents_alive`
+- `stylos_query_agents_free`
+- `stylos_query_agents_git`
+- `stylos_query_status`
+- `stylos_request_talk`
+- `stylos_request_task`
+- `stylos_query_task_status`
+- `stylos_query_task_result`
+
+Ownership expectations:
+
+- tool schema exposure and tool-call dispatch belong in `themion-core` because they affect the harness tool palette
+- actual Stylos transport execution and request wiring remain CLI-local, so `themion-cli` should provide the runtime bridge or capability provider used by those tools
+- non-Stylos runtimes should either omit the tools entirely or return a clear unavailable result consistent with the final implementation choice
+
+This preserves the core/CLI boundary: core owns reusable tool interfaces, while the CLI owns the feature-gated local transport implementation.
+
+**Alternative considered:** keep Stylos operations permanently queryable-only and never expose them as harness tools. Rejected: it prevents an in-turn agent from discovering peers or delegating work through the same documented interface, even though the operation set is naturally tool-shaped.
+
+### Keep injected tool schemas aligned with the documented query payloads
+
+If and when the Stylos tool adapters are registered, their schemas should closely mirror the documented queryable request bodies so the same operation is understandable across both entry points.
+
+Recommended alignment:
+
+- `stylos_query_agents_alive` takes no required arguments
+- `stylos_query_agents_free` takes no required arguments
+- `stylos_query_agents_git` accepts optional `remote`
+- `stylos_query_status` accepts required `instance` and optional `agent_id` or `role`
+- `stylos_request_talk` accepts required `instance`, `agent_id`, and `message`, plus optional `request_id`
+- `stylos_request_task` accepts required `instance` and `task`, plus optional `preferred_agent_id`, `required_roles`, `require_git_repo`, and `request_id`
+- `stylos_query_task_status` accepts required `instance` and `task_id`
+- `stylos_query_task_result` accepts required `instance`, `task_id`, and optional `wait_timeout_ms`
+
+Response guidance:
+
+- tool results should return machine-readable JSON strings consistent with the corresponding query replies
+- transport failures, disabled feature state, or invalid requests should return structured error objects rather than free-form prose where practical
+- result shapes should preserve fields such as `accepted`, `task_id`, `timed_out`, `found`, and `git_repo_keys` so callers can reason about behavior consistently across network and tool entry points
+
+**Alternative considered:** simplify injected tool schemas into conversational free-form arguments. Rejected: that would make the tool layer drift from the documented Stylos API and create two different mental models for the same operations.
 
 ### Define expected queryable behavior explicitly
 
@@ -343,6 +418,11 @@ Example logical reply shape shown in JSON for readability; the wire encoding sho
   - return acknowledgement, not the final assistant answer
   - on failure, return a structured rejection reason
 
+Implementation note:
+
+- the landed implementation validates against the current local snapshot and enqueues accepted work through the normal local agent-input path
+- when a target `agent_id` is supplied and matches a local agent, execution is now routed to that local agent rather than always falling back to the interactive agent
+
 Example logical request/reply shapes shown in JSON for readability; the wire encoding should be CBOR:
 
 ```json
@@ -374,6 +454,10 @@ Example logical request/reply shapes shown in JSON for readability; the wire enc
   - on success, enqueue the request into the normal local agent-input path
   - allocate a stable `task_id` for later lookup
   - on failure, return a structured rejection such as `no_available_agent` or `invalid_request`
+
+Implementation note:
+
+- the landed implementation performs candidate selection from the exported local snapshot and routes accepted work to the selected local agent through the normal local execution path
 
 Example logical request/reply shapes shown in JSON for readability; the wire encoding should be CBOR:
 
@@ -415,6 +499,10 @@ Recommended lifecycle states:
 - `rejected`
 - `expired`
 
+Implementation note:
+
+- the landed implementation updates task state from query acceptance into the local execution lifecycle for the selected agent, including `running`, `completed`, and busy-path `failed`
+
 Example logical request/reply shapes shown in JSON for readability; the wire encoding should be CBOR:
 
 ```json
@@ -443,6 +531,11 @@ Example logical request/reply shapes shown in JSON for readability; the wire enc
   - if the task is still pending and `wait_timeout_ms` is positive, wait up to that timeout for a terminal state
   - if the timeout expires before terminal completion, return a normal non-error reply indicating the task is still pending and the wait timed out
   - the result query should not create a new task or alter task execution semantics
+
+Implementation note:
+
+- the currently landed slice stores terminal task result text from the final assistant output observed in the bridged local execution path
+- richer per-agent task result handling remains future work
 
 Example logical request/reply shapes shown in JSON for readability; the wire encoding should be CBOR:
 
@@ -549,6 +642,11 @@ Normative behavior:
 - timeout behavior is part of `tasks/result`, not `tasks/request`
 - `talk` remains a fire-and-acknowledge request and does not grow task-result waiting semantics in this PRD
 
+Implementation note:
+
+- the landed implementation tracks accepted tasks in memory and updates them from the normal local runtime bridge for the selected agent
+- durable lifecycle persistence remains future work
+
 This keeps submission, execution, and result retrieval distinct while still supporting useful caller workflows.
 
 **Alternative considered:** make `tasks/request` optionally block until completion. Rejected: it complicates transport behavior, timeout handling, and agent runtime coupling.
@@ -574,12 +672,13 @@ This keeps the initial transport honest and avoids overcommitting to durability 
 
 | File | Change |
 | ---- | ------ |
-| `crates/themion-cli/src/stylos.rs` | Add discovery queryables for `query/agents/alive`, `query/agents/free`, and `query/agents/git`; per-instance queryables for `status`, `talk`, `tasks/request`, `tasks/status`, and `tasks/result`; CBOR request/response payload structs; git remote normalization helpers for comparable repo identity; in-memory task lifecycle tracking; and best-effort request handling that reads from current process snapshots. |
-| `crates/themion-cli/src/tui.rs` | Expose or reuse process/agent snapshot helpers needed by the query handlers, add a narrow in-process path for enqueueing remote talk/task submissions, and preserve existing activity-state reporting used to decide free-vs-busy agents. |
-| `crates/themion-cli/src/main.rs` | Wire any additional feature-gated Stylos runtime state needed for query handling without affecting non-feature builds. |
-| `docs/architecture.md` | Document the richer Stylos query surface and clarify that discovery queries are mesh-wide while remote request routing remains CLI-local runtime behavior on the addressed instance. |
-| `docs/engine-runtime.md` | Clarify how Stylos-originated talk/task requests enter the normal local agent-input path and how in-memory task lifecycle tracking supports status/result queries without moving harness logic into the transport layer. |
-| `docs/README.md` | Add this PRD to the PRD index. |
+| `crates/themion-cli/src/stylos.rs` | Add discovery queryables for `query/agents/alive`, `query/agents/free`, and `query/agents/git`; per-instance queryables for `status`, `talk`, `tasks/request`, `tasks/status`, and `tasks/result`; CBOR request/response payload structs; git remote normalization helpers for comparable repo identity; in-memory task lifecycle tracking; a prompt handoff channel for remote request delivery; and best-effort request handling that reads from current process snapshots. |
+| `crates/themion-cli/src/tui.rs` | Expose or reuse process/agent snapshot helpers needed by the query handlers, route remote talk/task submissions into the normal local agent execution path for the selected local agent, capture final assistant text for task results, and preserve existing activity-state reporting used to decide free-vs-busy agents. |
+| `crates/themion-core/src/tools.rs` | Define and register feature-gated agent-injected Stylos tool schemas, plus the feature-gated tool invoker hook used to dispatch those operations through CLI-provided runtime wiring. |
+| `crates/themion-cli/src/main.rs` | No dedicated direct wiring changes were required beyond existing startup flow; the active CLI session still owns Stylos runtime startup while TUI-local agent construction now passes the Stylos capability bridge into the harness tool layer. |
+| `docs/architecture.md` | Document the richer Stylos query surface and clarify that discovery queries are mesh-wide while remote request routing remains CLI-local runtime behavior on the addressed instance; injected tools are now documented as adapters over the same operation set. |
+| `docs/engine-runtime.md` | Clarify how Stylos-originated talk/task requests enter the normal local agent-input path, how in-memory task lifecycle tracking supports later queries without moving harness logic into the transport layer, and how injected Stylos tools bridge from the harness into the CLI-local transport wiring. |
+| `docs/README.md` | Keep this PRD indexed and reflect that both the queryables and the matching injected-tool contract are implemented. |
 
 ## Edge Cases
 
@@ -589,7 +688,7 @@ This keeps the initial transport honest and avoids overcommitting to durability 
 - an agent exports multiple remotes that normalize to the same repo identity → replies may keep all raw remotes but should deduplicate `git_repo_keys`.
 - an agent is `idle` but intentionally should not accept remote requests in future runtime work → the first implementation may accept it, but the API should leave room for a future explicit capability flag.
 - caller requests per-instance `status` for an unknown `agent_id` → return a clear not-found response.
-- caller sends `talk` to a busy or non-interactive agent → runtime should either reject clearly or accept only if that agent's local input model explicitly allows queued remote input; the initial implementation should document which rule it chooses and apply it consistently.
+- caller sends `talk` to a busy or non-interactive agent → runtime should either reject clearly or accept only if that agent's local input model explicitly allows queued remote input; the landed slice rejects busy targets and routes accepted work to the requested local agent when present.
 - multiple agents are free and satisfy a `tasks/request` filter on one addressed instance → selection should be deterministic, such as first stable snapshot order, so behavior is inspectable.
 - a selected free agent becomes busy immediately after selection → request handling may still race; the implementation should either fail fast on enqueue or accept best-effort and report the selected agent honestly.
 - caller sets `require_git_repo = true` but the candidate agent's cached git state is stale within the existing TTL window → the request may use slightly stale repo metadata, consistent with current Stylos git caching behavior.
@@ -599,6 +698,8 @@ This keeps the initial transport honest and avoids overcommitting to durability 
 - `wait_timeout_ms` is negative, malformed, or excessively large → return a structured invalid-request reply or clamp according to documented limits; do not block indefinitely by accident.
 - Stylos startup succeeds but one queryable registration fails → Themion should remain usable, surface the degraded query state, and continue publishing status where possible.
 - non-feature builds remain unaffected → the added API surface must stay fully behind the `stylos` feature.
+- injected Stylos tools requested in a non-`stylos` build are omitted from the harness tool palette, and when Stylos runtime is unavailable at call time they return a clear unavailable error rather than pretending the operation succeeded.
+- a remote task arrives while the selected local execution path is already busy → the landed slice marks the task as failed with reason `agent_busy`.
 
 ## Migration
 
@@ -612,13 +713,15 @@ Migration expectations:
 - git-repo discovery callers can ask either broadly for any git-backed agent or specifically for agents matching a repo identity
 - new per-instance query consumers can target `status`, `talk`, `tasks/request`, `tasks/status`, and `tasks/result` on one chosen process
 - request senders must treat `talk`, `tasks/request`, `tasks/status`, and `tasks/result` as best-effort, process-local operations in the first release
+- the landed slice supports strict local `agent_id` execution targeting within the current process-local agent set but is still not a durable distributed scheduler
+- injected Stylos tools follow the same request and response contract rather than introducing a separate migration surface
 
 No database or provider migration is required for the initial implementation.
 
 ## Testing
 
 - run `cargo check -p themion-cli` after implementation → verify: non-feature builds still compile with no Stylos dependency regressions.
-- run `cargo check -p themion-cli --features stylos` after implementation → verify: the feature-enabled CLI compiles with the new queryables, git normalization helpers, task lifecycle tracking, and request-routing helpers.
+- run `cargo check -p themion-cli --features stylos` after implementation → verify: the feature-enabled CLI compiles with the new queryables, git normalization helpers, task lifecycle tracking, request-routing helpers, and the remote prompt bridge.
 - start multiple feature-enabled Themion instances and query `stylos/<realm>/themion/query/agents/alive` → verify: the query receives one reply per responding instance and each reply includes process identity plus the current `agents` list.
 - place one agent in `idle` or `nap` and another in a busy state, then query `stylos/<realm>/themion/query/agents/free` → verify: only the idle/nap agent appears in each responding instance's reply.
 - start feature-enabled Themion in a git repo and query `stylos/<realm>/themion/query/agents/git` with no body → verify: only agents with `project_dir_is_git_repo = true` are returned and their `git_remotes` values are included.
@@ -627,36 +730,44 @@ No database or provider migration is required for the initial implementation.
 - query `stylos/<realm>/themion/query/agents/git` with an unknown or unsupported host syntax → verify: the implementation falls back to exact raw matching rather than producing a false normalized match.
 - query `stylos/<realm>/themion/<instance>/query/status` with no filter → verify: the full current process snapshot for the addressed instance is returned.
 - query `stylos/<realm>/themion/<instance>/query/status` with `{ "agent_id": "missing" }` → verify: the response is a structured not-found result.
-- send a valid `talk` request to `stylos/<realm>/themion/<instance>/query/talk` for an eligible agent → verify: the response acknowledges acceptance and the agent receives the message through the normal local input path.
+- send a valid `talk` request to `stylos/<realm>/themion/<instance>/query/talk` for an eligible agent → verify: the response acknowledges acceptance and the targeted local agent receives the message through the normal local input path.
 - send a `talk` request to an ineligible or unknown agent → verify: the response is a structured rejection with a clear reason.
 - send a `tasks/request` to `stylos/<realm>/themion/<instance>/query/tasks/request` that requires a git repo when exactly one free git-backed agent exists on that instance → verify: the request is accepted, returns a `task_id`, and reports that agent's ID.
 - query `stylos/<realm>/themion/<instance>/query/tasks/status` for an accepted task before completion → verify: the response reports a non-terminal state such as `queued` or `running`.
 - query `stylos/<realm>/themion/<instance>/query/tasks/result` with `wait_timeout_ms = 0` for a still-running task → verify: the response returns immediately with the current non-terminal state.
 - query `stylos/<realm>/themion/<instance>/query/tasks/result` with a positive timeout for a task that completes within that window → verify: the response returns the terminal state and result without requiring a second query.
 - query `stylos/<realm>/themion/<instance>/query/tasks/result` with a positive timeout for a task that does not complete in time → verify: the response returns a normal timed-out pending reply rather than a transport or protocol error.
+- send a `tasks/request` while the selected local execution path is already busy → verify: the response lifecycle reaches a terminal `failed` state with reason `agent_busy`.
 - send a `tasks/request` when no free agent on the addressed instance matches the filters → verify: the response is a structured rejection such as `no_available_agent`.
 - run focused tests for free-agent filtering and deterministic candidate selection → verify: `idle` and `nap` are treated as free and the selected agent is stable for the same snapshot order.
 - run focused tests for git remote normalization and repo-key derivation → verify: supported ssh/https remote variants normalize to the same comparable repo key and unsupported forms do not collide incorrectly.
 - run focused tests for task lifecycle transitions and timeout handling → verify: accepted tasks move through expected states and timed waits produce the documented non-error pending reply.
 - verify CBOR request and reply encoding for all new queryables → verify: payloads round-trip cleanly and match the documented logical shapes.
+- run `cargo check -p themion-core -p themion-cli --features stylos` → verify: the harness can register the feature-gated Stylos tool definitions without breaking the core/CLI boundary.
+- invoke each injected Stylos tool in a feature-enabled session against a live Stylos mesh → verify: arguments and result JSON match the corresponding documented query/request contract.
+- invoke an injected Stylos tool in a non-`stylos` build or with Stylos disabled → verify: the tool is absent or returns a structured unavailable result consistent with the final implementation choice.
 
 ## Implementation checklist
 
-- define stable queryable keys for discovery (`query/agents/alive`, `query/agents/free`, `query/agents/git`) and per-instance requests (`status`, `talk`, `tasks/request`, `tasks/status`, `tasks/result`)
-- add CBOR-serializable request/response payload structs in `crates/themion-cli/src/stylos.rs`
-- add a shared process-snapshot reader reused by status publication and query handlers
-- implement discovery query handlers that reply once per local instance
-- implement git query request parsing for optional repo matching
-- implement git remote normalization helpers for supported GitHub, GitLab, and Bitbucket ssh/https URI forms
-- include normalized `git_repo_keys` in git discovery replies when available
-- implement per-instance `status` filtering and structured error replies
-- implement `talk` validation and enqueue path into the normal local agent-input flow
-- implement `tasks/request` candidate filtering, deterministic selection, stable `task_id` allocation, and enqueue path
-- implement in-memory task lifecycle tracking for accepted tasks
-- implement `tasks/status` lookup responses
-- implement `tasks/result` immediate and wait-with-timeout responses
-- keep all new runtime behavior behind the `stylos` cargo feature
-- document the query namespace, CBOR payloads, git normalization rules, task lifecycle semantics, and expected logical reply shapes in `docs/architecture.md`
-- document how remote requests enter normal local agent execution and how in-memory task lifecycle tracking supports later queries in `docs/engine-runtime.md`
-- validate with `cargo check -p themion-cli`
-- validate with `cargo check -p themion-cli --features stylos`
+- [x] define stable queryable keys for discovery (`query/agents/alive`, `query/agents/free`, `query/agents/git`) and per-instance requests (`status`, `talk`, `tasks/request`, `tasks/status`, `tasks/result`)
+- [x] add CBOR-serializable request/response payload structs in `crates/themion-cli/src/stylos.rs`
+- [x] add a shared process-snapshot reader reused by status publication and query handlers
+- [x] implement discovery query handlers that reply once per local instance
+- [x] implement git query request parsing for optional repo matching
+- [x] implement git remote normalization helpers for supported GitHub, GitLab, and Bitbucket ssh/https URI forms
+- [x] include normalized `git_repo_keys` in git discovery replies when available
+- [x] implement per-instance `status` filtering and structured error replies
+- [x] implement `talk` validation and enqueue path into the normal local agent-input flow
+- [x] implement `tasks/request` candidate filtering, deterministic selection, stable `task_id` allocation, and enqueue path
+- [x] implement in-memory task lifecycle tracking for accepted tasks
+- [x] implement `tasks/status` lookup responses
+- [x] implement `tasks/result` immediate and wait-with-timeout responses
+- [x] keep all new runtime behavior behind the `stylos` cargo feature
+- [x] enforce strict remote `agent_id` execution targeting beyond the existing interactive-agent bridge
+- [x] define feature-gated harness tool schemas for the matching Stylos operations in `themion-core`
+- [x] provide a CLI-local capability bridge so feature-gated Stylos tool calls can reach the existing query/request implementation without duplicating transport logic
+- [x] document the injected Stylos tool names, schemas, and unavailable-state behavior
+- [x] document the query namespace, CBOR payloads, git normalization rules, task lifecycle semantics, and expected logical reply shapes in `docs/architecture.md`
+- [x] document how remote requests enter normal local agent execution and how in-memory task lifecycle tracking supports later queries in `docs/engine-runtime.md`
+- [x] validate with `cargo check -p themion-cli`
+- [x] validate with `cargo check -p themion-cli --features stylos`
