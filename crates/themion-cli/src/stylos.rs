@@ -1422,6 +1422,7 @@ async fn handle_note_query(
             ));
             let prompt = build_note_prompt(
                 &note.note_id,
+                &note.note_slug,
                 note.from_instance.as_deref(),
                 note.from_agent_id.as_deref(),
                 &note.to_instance,
@@ -1848,9 +1849,9 @@ fn render_instance_identifier(instance: Option<&str>) -> String {
         .to_string()
 }
 
-pub fn build_note_prompt(note_id: &str, sender: Option<&str>, sender_agent_id: Option<&str>, target: &str, local_agent_id: &str, column: NoteColumn, body: &str) -> String {
+pub fn build_note_prompt(note_id: &str, note_slug: &str, sender: Option<&str>, sender_agent_id: Option<&str>, target: &str, local_agent_id: &str, column: NoteColumn, body: &str) -> String {
     format!(
-        "{NOTE_PREFIX} note_id={note_id} from={} from_agent_id={} to={target} to_agent_id={local_agent_id} column={}\n\n{}",
+        "{NOTE_PREFIX} note_id={note_id} note_slug={note_slug} from={} from_agent_id={} to={target} to_agent_id={local_agent_id} column={}\n\nNote body:\n{}",
         sender.unwrap_or("unknown"),
         sender_agent_id.unwrap_or("unknown"),
         column.as_str(),
@@ -2038,6 +2039,30 @@ mod tests {
         assert!(prompt.contains("***QRU***"));
         assert!(prompt.contains("type=peer_message from=node-1:42 to=node-2:77 to_agent_id=main"));
         assert!(prompt.contains("hello"));
+    }
+
+    #[test]
+    fn note_prompt_mentions_note_identity_and_body() {
+        let prompt = build_note_prompt(
+            "123e4567-e89b-12d3-a456-426614174000",
+            "fix-tests-123e4567",
+            Some("node-1:42"),
+            Some("main"),
+            "node-2:77",
+            "worker",
+            NoteColumn::Todo,
+            "please fix the tests",
+        );
+        assert!(prompt.contains("type=stylos_note"));
+        assert!(prompt.contains("note_id=123e4567-e89b-12d3-a456-426614174000"));
+        assert!(prompt.contains("note_slug=fix-tests-123e4567"));
+        assert!(prompt.contains("from=node-1:42"));
+        assert!(prompt.contains("from_agent_id=main"));
+        assert!(prompt.contains("to=node-2:77"));
+        assert!(prompt.contains("to_agent_id=worker"));
+        assert!(prompt.contains("column=todo"));
+        assert!(prompt.contains("Note body:
+please fix the tests"));
     }
 }
 

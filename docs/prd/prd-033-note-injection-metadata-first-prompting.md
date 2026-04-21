@@ -1,6 +1,6 @@
 # PRD-033: Note Injection Should Present Note Identity and Metadata in the Initial Prompt
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Version:** v0.19.0
 - **Scope:** `themion-core`, `themion-cli`, docs
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
@@ -193,10 +193,10 @@ Behavioral migration is prompt-only:
 
 ## Implementation checklist
 
-- [ ] define a stable note-injection wrapper that explicitly marks the inbound item as a durable note
-- [ ] include core note metadata in the injected wrapper without requiring an immediate `board_read_note` call
-- [ ] keep metadata formatting concise and clearly separated from note body content
-- [ ] preserve the distinction between note injection and talk injection wording
-- [ ] update architecture docs to describe the richer note injection wrapper
-- [ ] update engine runtime docs to explain the metadata-first note prompt behavior
-- [ ] update `docs/README.md` with the new PRD entry
+- [x] define a stable note-injection wrapper that explicitly marks the inbound item as a durable note
+- [x] include core note metadata in the injected wrapper without requiring an immediate `board_read_note` call
+- [x] keep metadata formatting concise and clearly separated from note body content
+- [x] preserve the distinction between note injection and talk injection wording
+- [x] update architecture docs to describe the richer note injection wrapper
+- [x] update engine runtime docs to explain the metadata-first note prompt behavior
+- [x] update `docs/README.md` with the new PRD entry

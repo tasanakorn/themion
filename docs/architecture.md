@@ -271,5 +271,6 @@ Current behavior:
 - `board_list_notes`, `board_read_note`, `board_move_note`, and `board_update_note_result` remain local board operations against the receiving instance's SQLite state after creation
 - idle-time delivery prefers the oldest pending `in_progress` note for an agent; a `todo` note is injected only when that agent has no pending `in_progress` note
 - once injected, the note is marked so it is not injected repeatedly by default
+- idle-time injected note prompts identify themselves as durable notes and include core metadata such as `note_id`, `note_slug`, source/target identities, current column, and the note body so the model usually does not need an immediate `board_read_note` call for orientation
 
 The receiver-side Stylos query surface now includes `stylos/<realm>/themion/instances/<instance>/query/notes/request` for durable note creation. This supersedes the old idle-only `talk` model for asynchronous work intake, while `talk` remains available as a lightweight realtime path.

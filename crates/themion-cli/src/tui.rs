@@ -1305,6 +1305,7 @@ impl<'a> App<'a> {
         let _ = self.db.mark_stylos_note_injected(&note.note_id);
         let prompt = crate::stylos::build_note_prompt(
             &note.note_id,
+            &note.note_slug,
             note.from_instance.as_deref(),
             note.from_agent_id.as_deref(),
             &note.to_instance,

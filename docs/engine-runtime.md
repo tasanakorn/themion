@@ -169,6 +169,6 @@ Current behavior:
 - inbound note delivery logging is distinct from talk logging: note delivery uses `Stylos note receive ...`, while talk delivery uses `Stylos hear ...`
 - the TUI checks for pending local notes on tick when no local turn is active
 - idle injection prefers pending `in_progress` notes; `todo` is considered only when no pending `in_progress` note exists for that agent
-- injected notes use a note-specific prompt wrapper and are marked injected to avoid duplicate delivery
+- injected notes use a note-specific prompt wrapper, include core note metadata (`note_id`, `note_slug`, sender/target identities, current column, then body), and are marked injected to avoid duplicate delivery
 
 This keeps persistence and board state durable while still reusing the normal harness turn path for actual agent work.
