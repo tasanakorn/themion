@@ -253,6 +253,8 @@ impl AgentActivity {
 pub struct App<'a> {
     #[cfg(feature = "stylos")]
     stylos: Option<StylosHandle>,
+    #[cfg(feature = "stylos")]
+    local_stylos_instance: Option<String>,
     session: Session,
     entries: Vec<Entry>,
     pending: Option<String>,
@@ -351,6 +353,11 @@ impl<'a> App<'a> {
         ];
 
         #[cfg(feature = "stylos")]
+        let local_stylos_instance = stylos.as_ref().and_then(|handle| match handle.state() {
+            StylosRuntimeState::Active { instance, .. } => Some(instance.clone()),
+            _ => None,
+        });
+        #[cfg(feature = "stylos")]
         if let Some(handle) = stylos.as_ref() {
             match handle.state() {
                 StylosRuntimeState::Off => {
@@ -374,6 +381,8 @@ impl<'a> App<'a> {
         Self {
             #[cfg(feature = "stylos")]
             stylos,
+            #[cfg(feature = "stylos")]
+            local_stylos_instance,
             session,
             entries: initial_entries,
             pending: None,
@@ -1258,6 +1267,45 @@ impl<'a> App<'a> {
         self.submit_text_to_agent(agent_index, text, app_tx);
     }
 
+
+    #[cfg(feature = "stylos")]
+    fn maybe_inject_pending_note(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) {
+        if self.agent_busy {
+            return;
+        }
+        let Some(instance) = self.local_stylos_instance.clone() else {
+            return;
+        };
+        let Some(agent_id) = self.agents.iter().find(|h| is_interactive_handle(h)).map(|h| h.agent_id.clone()) else {
+            return;
+        };
+        let Ok(Some(note)) = self.db.next_stylos_note_for_injection(&instance, &agent_id) else {
+            return;
+        };
+        let _ = self.db.mark_stylos_note_injected(&note.note_id);
+        let prompt = crate::stylos::build_note_prompt(
+            &note.note_id,
+            note.from_instance.as_deref(),
+            note.from_agent_id.as_deref(),
+            &note.to_instance,
+            &note.to_agent_id,
+            note.column,
+            &note.body,
+        );
+        self.push(Entry::RemoteEvent(format!("Stylos note note_id={} to={} to_agent_id={} column={}", note.note_id, note.to_instance, note.to_agent_id, note.column.as_str())));
+        self.active_remote_request = Some(StylosRemotePromptRequest {
+            prompt: prompt.clone(),
+            agent_id: Some(note.to_agent_id.clone()),
+            task_id: None,
+            request_id: None,
+            from: note.from_instance.clone(),
+            from_agent_id: note.from_agent_id.clone(),
+            to: Some(note.to_instance.clone()),
+            to_agent_id: Some(note.to_agent_id.clone()),
+        });
+        self.submit_text(prompt, app_tx);
+    }
+
     fn submit_input(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) {
         let text: String = self.input.lines().join("\n");
         self.submit_text(text, app_tx);
@@ -2089,7 +2137,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     }
                 }
             }
-            Some(AppEvent::Tick) => app.on_tick(),
+            Some(AppEvent::Tick) => { app.on_tick(); #[cfg(feature = "stylos")] app.maybe_inject_pending_note(&app_tx); },
             #[cfg(feature = "stylos")]
             Some(AppEvent::StylosCmd(cmd)) => {
                 #[cfg(feature = "stylos")]

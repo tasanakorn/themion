@@ -1,4 +1,4 @@
-use crate::db::{DbHandle, RecallArgs, RecallDirection, SearchArgs};
+use crate::db::{CreateNoteArgs, DbHandle, NoteColumn, RecallArgs, RecallDirection, SearchArgs};
 use crate::workflow::{
     allowed_transitions, can_retry_current_phase, can_retry_previous_phase, can_transition,
     normalize_workflow_name, phase_instructions, previous_phase, start_phase_for_workflow,
@@ -13,6 +13,28 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
+
+fn parse_note_column(value: &str) -> Option<NoteColumn> {
+    NoteColumn::from_str(value)
+}
+
+fn stylos_note_to_json(note: &crate::db::StylosNote) -> Value {
+    json!({
+        "note_id": note.note_id,
+        "from_instance": note.from_instance,
+        "from_agent_id": note.from_agent_id,
+        "to_instance": note.to_instance,
+        "to_agent_id": note.to_agent_id,
+        "body": note.body,
+        "column": note.column.as_str(),
+        "result_text": note.result_text,
+        "injection_state": match note.injection_state { crate::db::NoteInjectionState::Pending => "pending", crate::db::NoteInjectionState::Injected => "injected" },
+        "created_at_ms": note.created_at_ms,
+        "updated_at_ms": note.updated_at_ms,
+        "injected_at_ms": note.injected_at_ms,
+    })
+}
+
 
 #[cfg(feature = "stylos")]
 type StylosToolFuture = Pin<Box<dyn Future<Output = Result<String>> + Send>>;
@@ -198,6 +220,85 @@ pub fn tool_definitions() -> Value {
         json!({
             "type": "function",
             "function": {
+                "name": "stylos_create_note",
+                "description": "Create a durable Stylos note targeted to an instance and agent.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "to_instance": { "type": "string" },
+                        "to_agent_id": { "type": "string" },
+                        "body": { "type": "string" },
+                        "from_instance": { "type": "string" },
+                        "from_agent_id": { "type": "string" },
+                        "note_id": { "type": "string" }
+                    },
+                    "required": ["to_instance", "to_agent_id", "body"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "stylos_list_notes",
+                "description": "List durable Stylos notes, optionally filtered by target instance, agent, or column.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "to_instance": { "type": "string" },
+                        "to_agent_id": { "type": "string" },
+                        "column": { "type": "string", "enum": ["todo", "in_progress", "done"] }
+                    },
+                    "required": []
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "stylos_read_note",
+                "description": "Read one durable Stylos note by note_id.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "note_id": { "type": "string" }
+                    },
+                    "required": ["note_id"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "stylos_move_note",
+                "description": "Move a durable Stylos note between todo, in_progress, and done.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "note_id": { "type": "string" },
+                        "column": { "type": "string", "enum": ["todo", "in_progress", "done"] }
+                    },
+                    "required": ["note_id", "column"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "stylos_update_note_result",
+                "description": "Attach or update result text on a durable Stylos note.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "note_id": { "type": "string" },
+                        "result_text": { "type": "string" }
+                    },
+                    "required": ["note_id", "result_text"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "workflow_complete",
                 "description": "Mark the current workflow as passed/completed or failed. Completed requires current phase_result=passed.",
                 "parameters": {
@@ -377,6 +478,57 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 .unwrap_or_default()),
                 Err(e) => Ok(format!("Error: {e}")),
             }
+        }
+        "stylos_create_note" => {
+            let to_instance = args["to_instance"].as_str().ok_or_else(|| anyhow::anyhow!("missing to_instance"))?;
+            let to_agent_id = args["to_agent_id"].as_str().ok_or_else(|| anyhow::anyhow!("missing to_agent_id"))?;
+            let body = args["body"].as_str().ok_or_else(|| anyhow::anyhow!("missing body"))?;
+            let note_id = args["note_id"].as_str().map(str::to_string).unwrap_or_else(|| format!("note-{}", Uuid::new_v4()));
+            let note = ctx.db.create_stylos_note(CreateNoteArgs {
+                note_id,
+                from_instance: args["from_instance"].as_str().map(str::to_string),
+                from_agent_id: args["from_agent_id"].as_str().map(str::to_string),
+                to_instance: to_instance.to_string(),
+                to_agent_id: to_agent_id.to_string(),
+                body: body.to_string(),
+            })?;
+            Ok(stylos_note_to_json(&note).to_string())
+        }
+        "stylos_list_notes" => {
+            let column = args["column"].as_str().map(|v| parse_note_column(v).ok_or_else(|| anyhow::anyhow!("invalid column"))).transpose()?;
+            let notes = ctx.db.list_stylos_notes(
+                args["to_instance"].as_str(),
+                args["to_agent_id"].as_str(),
+                column,
+            )?;
+            Ok(Value::Array(notes.iter().map(stylos_note_to_json).collect()).to_string())
+        }
+        "stylos_read_note" => {
+            let note_id = args["note_id"].as_str().ok_or_else(|| anyhow::anyhow!("missing note_id"))?;
+            let note = ctx.db.get_stylos_note(note_id)?;
+            Ok(match note {
+                Some(note) => stylos_note_to_json(&note).to_string(),
+                None => json!({"found": false, "note_id": note_id}).to_string(),
+            })
+        }
+        "stylos_move_note" => {
+            let note_id = args["note_id"].as_str().ok_or_else(|| anyhow::anyhow!("missing note_id"))?;
+            let column = parse_note_column(args["column"].as_str().ok_or_else(|| anyhow::anyhow!("missing column"))?)
+                .ok_or_else(|| anyhow::anyhow!("invalid column"))?;
+            let note = ctx.db.move_stylos_note(note_id, column)?;
+            Ok(match note {
+                Some(note) => stylos_note_to_json(&note).to_string(),
+                None => json!({"found": false, "note_id": note_id}).to_string(),
+            })
+        }
+        "stylos_update_note_result" => {
+            let note_id = args["note_id"].as_str().ok_or_else(|| anyhow::anyhow!("missing note_id"))?;
+            let result_text = args["result_text"].as_str().ok_or_else(|| anyhow::anyhow!("missing result_text"))?;
+            let note = ctx.db.update_stylos_note_result(note_id, Some(result_text))?;
+            Ok(match note {
+                Some(note) => stylos_note_to_json(&note).to_string(),
+                None => json!({"found": false, "note_id": note_id}).to_string(),
+            })
         }
         "history_search" | "search_history" => {
             let query = args["query"].as_str().unwrap_or("").to_string();

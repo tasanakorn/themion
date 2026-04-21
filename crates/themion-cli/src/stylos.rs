@@ -1,6 +1,8 @@
 #![cfg(feature = "stylos")]
 
 use std::collections::{BTreeSet, HashMap};
+
+use themion_core::db::{CreateNoteArgs, NoteColumn};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -31,6 +33,7 @@ const TASK_RETENTION: Duration = Duration::from_secs(30 * 60);
 const MAX_WAIT_TIMEOUT_MS: u64 = 60_000;
 const DISCOVERY_QUERY_TIMEOUT_MS: u64 = 1_500;
 const TALK_POLL_INTERVAL_MS: u64 = 300;
+const NOTE_PREFIX: &str = "type=stylos_note";
 
 #[derive(Clone, Debug)]
 pub enum StylosRuntimeState {
@@ -92,6 +95,8 @@ type StylosSnapshotProvider = Arc<dyn Fn() -> StylosSnapshotFuture + Send + Sync
 pub struct StylosQueryContext {
     prompt_tx: mpsc::UnboundedSender<StylosRemotePromptRequest>,
     task_registry: TaskRegistry,
+    notes_db: Arc<themion_core::db::DbHandle>,
+    local_instance: String,
 }
 
 impl StylosQueryContext {
@@ -103,6 +108,14 @@ impl StylosQueryContext {
 
     pub fn task_registry(&self) -> &TaskRegistry {
         &self.task_registry
+    }
+
+    pub fn notes_db(&self) -> &Arc<themion_core::db::DbHandle> {
+        &self.notes_db
+    }
+
+    pub fn local_instance(&self) -> &str {
+        &self.local_instance
     }
 }
 
@@ -415,6 +428,7 @@ pub struct StylosHandle {
 impl StylosHandle {
     pub fn off() -> Self {
         let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
+        let notes_db = themion_core::db::DbHandle::open_in_memory().expect("in-memory notes db");
         Self {
             state: StylosRuntimeState::Off,
             session: None,
@@ -427,6 +441,8 @@ impl StylosHandle {
             query_context: StylosQueryContext {
                 prompt_tx,
                 task_registry: TaskRegistry::new(),
+                notes_db,
+                local_instance: String::new(),
             },
         }
     }
@@ -617,6 +633,26 @@ struct TalkReply {
     agent_id: String,
     request_id: Option<String>,
     correlation_id: Option<String>,
+    reason: Option<String>,
+}
+
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct NoteRequest {
+    to_agent_id: String,
+    body: String,
+    request_id: Option<String>,
+    from: Option<String>,
+    from_agent_id: Option<String>,
+    to: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct NoteReply {
+    accepted: bool,
+    agent_id: String,
+    request_id: Option<String>,
+    note_id: Option<String>,
     reason: Option<String>,
 }
 
@@ -835,9 +871,12 @@ async fn start_inner(
     let snapshot_provider = Arc::new(RwLock::new(None::<StylosSnapshotProvider>));
     let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
     let task_registry = TaskRegistry::new();
+    let notes_db = themion_core::db::DbHandle::open_in_memory().map_err(|e| e.to_string())?;
     let query_context = StylosQueryContext {
         prompt_tx,
         task_registry: task_registry.clone(),
+        notes_db,
+        local_instance: key_instance.clone(),
     };
 
     let status_ct = ct.clone();
@@ -918,6 +957,10 @@ async fn start_inner(
         "stylos/{}/themion/instances/{}/query/talk",
         realm, key_instance
     );
+    let q_note_key = format!(
+        "stylos/{}/themion/instances/{}/query/notes/request",
+        realm, key_instance
+    );
     let q_task_request_key = format!(
         "stylos/{}/themion/instances/{}/query/tasks/request",
         realm, key_instance
@@ -964,6 +1007,10 @@ async fn start_inner(
             Err(_) => return,
         };
         let talk_queryable = match q_session.declare_queryable(&q_talk_key).await {
+            Ok(q) => q,
+            Err(_) => return,
+        };
+        let note_queryable = match q_session.declare_queryable(&q_note_key).await {
             Ok(q) => q,
             Err(_) => return,
         };
@@ -1029,6 +1076,13 @@ async fn start_inner(
                     Ok(query) => {
                         let reply = handle_talk_query(&query_snapshot_provider, &query_context_for_task, parse_cbor_payload::<TalkRequest>(&query)).await;
                         let _ = reply_cbor(query, q_talk_key.clone(), &reply).await;
+                    }
+                    Err(_) => break,
+                },
+                res = note_queryable.recv_async() => match res {
+                    Ok(query) => {
+                        let reply = handle_note_query(&query_snapshot_provider, &query_context_for_task, parse_cbor_payload::<NoteRequest>(&query)).await;
+                        let _ = reply_cbor(query, q_note_key.clone(), &reply).await;
                     }
                     Err(_) => break,
                 },
@@ -1285,6 +1339,36 @@ async fn handle_talk_query(
 
         let remaining = deadline.saturating_duration_since(Instant::now());
         tokio::time::sleep(remaining.min(Duration::from_millis(TALK_POLL_INTERVAL_MS))).await;
+    }
+}
+
+
+async fn handle_note_query(
+    snapshot_provider: &Arc<RwLock<Option<StylosSnapshotProvider>>>,
+    query_context: &StylosQueryContext,
+    req: Option<NoteRequest>,
+) -> NoteReply {
+    let Some(req) = req else {
+        return NoteReply { accepted: false, agent_id: String::new(), request_id: None, note_id: None, reason: Some("invalid_request".to_string()) };
+    };
+    let Some(snapshot) = current_snapshot(snapshot_provider).await else {
+        return NoteReply { accepted: false, agent_id: req.to_agent_id, request_id: req.request_id, note_id: None, reason: Some("snapshot_unavailable".to_string()) };
+    };
+    let Some(agent) = snapshot.agents.into_iter().find(|a| a.agent_id == req.to_agent_id) else {
+        return NoteReply { accepted: false, agent_id: req.to_agent_id, request_id: req.request_id, note_id: None, reason: Some("not_found".to_string()) };
+    };
+    let note_id = format!("note-{}", Uuid::new_v4());
+    let created = query_context.notes_db().create_stylos_note(CreateNoteArgs {
+        note_id: note_id.clone(),
+        from_instance: req.from,
+        from_agent_id: req.from_agent_id,
+        to_instance: query_context.local_instance().to_string(),
+        to_agent_id: agent.agent_id.clone(),
+        body: req.body,
+    });
+    match created {
+        Ok(_) => NoteReply { accepted: true, agent_id: agent.agent_id, request_id: req.request_id, note_id: Some(note_id), reason: None },
+        Err(err) => NoteReply { accepted: false, agent_id: agent.agent_id, request_id: req.request_id, note_id: None, reason: Some(err.to_string()) },
     }
 }
 
@@ -1689,6 +1773,16 @@ fn render_instance_identifier(instance: Option<&str>) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or("external")
         .to_string()
+}
+
+pub fn build_note_prompt(note_id: &str, sender: Option<&str>, sender_agent_id: Option<&str>, target: &str, local_agent_id: &str, column: NoteColumn, body: &str) -> String {
+    format!(
+        "{NOTE_PREFIX} note_id={note_id} from={} from_agent_id={} to={target} to_agent_id={local_agent_id} column={}\n\n{}",
+        sender.unwrap_or("unknown"),
+        sender_agent_id.unwrap_or("unknown"),
+        column.as_str(),
+        body
+    )
 }
 
 fn build_peer_message_prompt(

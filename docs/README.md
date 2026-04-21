@@ -38,7 +38,7 @@
 | PRD-026 | [Stylos Talk Sender Identity, Prompt Wiring, Busy-Peer Reply Handling, and Lightweight Wait Tool](prd/prd-026-stylos-talk-sender-identity-and-reply-wiring.md) | Implemented | v0.15.0 | `themion-core`, `themion-cli`, docs |
 | PRD-027 | [Sender-Side Stylos Talk `from` and `to` Identifier Semantics](prd/prd-027-stylos-talk-from-and-to-identifiers.md) | Implemented | v0.15.1 | `themion-cli`, docs |
 | PRD-028 | [Receiver-Side Stylos Talk Logging Should Not Duplicate `hear` and `talk`](prd/prd-028-receiver-side-stylos-talk-logging-should-not-duplicate-hear-and-talk.md) | Implemented | v0.15.2 | `themion-cli`, docs |
-| PRD-029 | [Stylos Notes Board Phase 1 — Replace Ephemeral Talk with Durable Note Intake and Board Sections](prd/prd-029-stylos-notes-board-phase-1.md) | Proposed | v0.16.0 | `themion-core`, `themion-cli`, docs |
+| PRD-029 | [Stylos Notes Board Phase 1 — Replace Ephemeral Talk with Durable Note Intake and Board Sections](prd/prd-029-stylos-notes-board-phase-1.md) | Implemented | v0.16.0 | `themion-core`, `themion-cli`, docs |
 
 ## Roadmap note
 

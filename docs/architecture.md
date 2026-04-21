@@ -171,6 +171,11 @@ Matching injected Stylos tools in `themion-core` now include:
 - `stylos_request_task`
 - `stylos_query_task_status`
 - `stylos_query_task_result`
+- `stylos_create_note`
+- `stylos_list_notes`
+- `stylos_read_note`
+- `stylos_move_note`
+- `stylos_update_note_result`
 
 `stylos_query_nodes` is a Zenoh-session-level check, not a Themion mesh discovery queryable. It inspects the current local Zenoh session via `session.info()` and returns the local session ZID plus currently known peer and router ZIDs.
 
@@ -243,3 +248,19 @@ Current behavior:
 - the status bar exposes the current navigation state as `tail`, `browse`, or `review`
 
 This keeps long-history usability in the TUI itself rather than depending on terminal scrollback, which remains unreliable in alternate-screen environments.
+
+### Durable Stylos notes board
+
+Stylos collaboration now also supports durable notes backed by SQLite.
+
+Current behavior:
+
+- note records live in the main `system.db` SQLite database
+- each note stores `note_id`, optional sender identity, exact target instance `<hostname>:<pid>`, target `agent_id`, body, board column, result text, and millisecond timestamps
+- phase-1 board columns are exactly `todo`, `in_progress`, and `done`
+- newly created notes start in `todo`
+- notes are model-visible through dedicated note tools rather than transcript scraping
+- idle-time delivery prefers the oldest pending `in_progress` note for an agent; a `todo` note is injected only when that agent has no pending `in_progress` note
+- once injected, the note is marked so it is not injected repeatedly by default
+
+The receiver-side Stylos query surface now includes `stylos/<realm>/themion/instances/<instance>/query/notes/request` for durable note creation. This supersedes the old idle-only `talk` model for asynchronous work intake, while `talk` remains available as a lightweight realtime path.

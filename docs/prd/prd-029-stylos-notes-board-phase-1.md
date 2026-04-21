@@ -1,6 +1,6 @@
 # PRD-029: Stylos Notes Board Phase 1 — Replace Ephemeral Talk with Durable Note Intake and Board Columns
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Version:** v0.16.0
 - **Scope:** `themion-core`, `themion-cli`, docs
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
@@ -325,20 +325,20 @@ Expected migration shape for the implementation phase:
 
 ## Implementation checklist
 
-- [ ] define the phase-1 note and board scope explicitly in code and docs as the preferred replacement path for asynchronous `talk`
-- [ ] add SQLite schema for durable notes, column state, timestamps, source/target association, and result attachment
-- [ ] add note persistence helpers in `themion-core` database access code
-- [ ] add model-visible tools for note creation, board listing, note detail, column movement, and result attachment
-- [ ] define exact note identifiers and durable note lookup semantics
-- [ ] accept note creation while the target agent is busy as long as the target identity is valid
-- [ ] preserve exact target instance `<hostname>:<pid>` and target `agent_id` on stored notes
-- [ ] add idle-trigger deferred note injection for the matching target agent through the existing local prompt path
-- [ ] define idle-selection policy so `in_progress` is preferred over `todo`
-- [ ] ensure injected notes are marked so they are not duplicated unintentionally
-- [ ] define deterministic ordering for multiple pending notes targeting the same agent within the chosen eligible column
-- [ ] document the three primary columns as `todo`, `in_progress`, and `done`
-- [ ] support explicit note column movement between those columns
-- [ ] support attaching result data to a note and reading it back later
-- [ ] update architecture and engine runtime docs to describe the new note/board concept and the migration away from realtime `talk`
-- [ ] update `docs/README.md` with the new PRD entry
-- [ ] split future follow-up work such as advanced collaboration semantics, note threading, and richer board UX into later PRDs rather than expanding this one
+- [x] define the phase-1 note and board scope explicitly in code and docs as the preferred replacement path for asynchronous `talk`
+- [x] add SQLite schema for durable notes, column state, timestamps, source/target association, and result attachment
+- [x] add note persistence helpers in `themion-core` database access code
+- [x] add model-visible tools for note creation, board listing, note detail, column movement, and result attachment
+- [x] define exact note identifiers and durable note lookup semantics
+- [x] accept note creation while the target agent is busy as long as the target identity is valid
+- [x] preserve exact target instance `<hostname>:<pid>` and target `agent_id` on stored notes
+- [x] add idle-trigger deferred note injection for the matching target agent through the existing local prompt path
+- [x] define idle-selection policy so `in_progress` is preferred over `todo`
+- [x] ensure injected notes are marked so they are not duplicated unintentionally
+- [x] define deterministic ordering for multiple pending notes targeting the same agent within the chosen eligible column
+- [x] document the three primary columns as `todo`, `in_progress`, and `done`
+- [x] support explicit note column movement between those columns
+- [x] support attaching result data to a note and reading it back later
+- [x] update architecture and engine runtime docs to describe the new note/board concept and the migration away from realtime `talk`
+- [x] update `docs/README.md` with the new PRD entry
+- [x] split future follow-up work such as advanced collaboration semantics, note threading, and richer board UX into later PRDs rather than expanding this one

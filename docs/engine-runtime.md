@@ -54,7 +54,7 @@ In the current implementation:
 
 - Stylos queryables are registered in `crates/themion-cli/src/stylos.rs`
 - query handlers read the current exported process snapshot from a snapshot provider set by the TUI runtime
-- accepted `talk` and `tasks/request` queries are converted into `StylosRemotePromptRequest` values and sent over an in-process channel
+- accepted `talk`, durable `notes/request`, and `tasks/request` queries are converted into `StylosRemotePromptRequest` values or persisted note records and sent over an in-process/local-runtime path
 - the TUI event loop receives those requests as `AppEvent::StylosRemotePrompt`
 - the TUI either rejects the request immediately if the current local execution path is already busy, or submits the prompt through the same local turn path used for normal input
 
@@ -151,3 +151,20 @@ That means:
 - persistent history tools such as `history_recall` and `history_search` remain the mechanism for model-visible access to older stored history outside the current prompt window
 
 This feature improves user-facing review behavior without changing runtime semantics in `themion-core`.
+
+
+## Durable Stylos notes runtime
+
+PRD-029 phase 1 adds a durable board-backed note path.
+
+Current behavior:
+
+- `notes/request` validates the target agent from the current exported snapshot
+- accepted notes are persisted in SQLite immediately rather than rejected when the agent is busy
+- persisted notes start in column `todo` with millisecond timestamps
+- `themion-core` exposes note tools for create/list/read/move/update-result operations using durable `note_id` values
+- the TUI checks for pending local notes on tick when no local turn is active
+- idle injection prefers pending `in_progress` notes; `todo` is considered only when no pending `in_progress` note exists for that agent
+- injected notes use a note-specific prompt wrapper and are marked injected to avoid duplicate delivery
+
+This keeps persistence and board state durable while still reusing the normal harness turn path for actual agent work.

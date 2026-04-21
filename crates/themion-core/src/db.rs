@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -9,6 +9,13 @@ fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+fn now_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 pub struct DbHandle {
@@ -95,6 +102,25 @@ CREATE INDEX IF NOT EXISTS idx_agent_workflow_transitions_session_time
     ON agent_workflow_transitions(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_agent_workflow_transitions_turn
     ON agent_workflow_transitions(turn_id);
+
+CREATE TABLE IF NOT EXISTS stylos_notes (
+    note_id TEXT PRIMARY KEY,
+    from_instance TEXT,
+    from_agent_id TEXT,
+    to_instance TEXT NOT NULL,
+    to_agent_id TEXT NOT NULL,
+    body TEXT NOT NULL,
+    column_name TEXT NOT NULL,
+    result_text TEXT,
+    injection_state TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    injected_at_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_stylos_notes_target_column_created
+    ON stylos_notes(to_instance, to_agent_id, column_name, created_at_ms);
+CREATE INDEX IF NOT EXISTS idx_stylos_notes_target_injection
+    ON stylos_notes(to_instance, to_agent_id, injection_state, created_at_ms);
 ";
 
 const SCHEMA_FTS5: &str = "
@@ -626,6 +652,163 @@ impl DbHandle {
         Ok(out)
     }
 
+    pub fn create_stylos_note(&self, args: CreateNoteArgs) -> Result<StylosNote> {
+        let now_ms = now_unix_ms();
+        let note = StylosNote {
+            note_id: args.note_id,
+            from_instance: args.from_instance,
+            from_agent_id: args.from_agent_id,
+            to_instance: args.to_instance,
+            to_agent_id: args.to_agent_id,
+            body: args.body,
+            column: NoteColumn::Todo,
+            result_text: None,
+            injection_state: NoteInjectionState::Pending,
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+            injected_at_ms: None,
+        };
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO stylos_notes (
+                note_id, from_instance, from_agent_id, to_instance, to_agent_id, body,
+                column_name, result_text, injection_state, created_at_ms, updated_at_ms, injected_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                note.note_id,
+                note.from_instance,
+                note.from_agent_id,
+                note.to_instance,
+                note.to_agent_id,
+                note.body,
+                note.column.as_str(),
+                note.result_text,
+                note.injection_state.as_str(),
+                note.created_at_ms,
+                note.updated_at_ms,
+                note.injected_at_ms,
+            ],
+        )?;
+        drop(conn);
+        self.get_stylos_note(&note.note_id)?.ok_or_else(|| anyhow::anyhow!("note insert failed"))
+    }
+
+    pub fn get_stylos_note(&self, note_id: &str) -> Result<Option<StylosNote>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT note_id, from_instance, from_agent_id, to_instance, to_agent_id, body,
+                    column_name, result_text, injection_state, created_at_ms, updated_at_ms, injected_at_ms
+             FROM stylos_notes WHERE note_id = ?1",
+            rusqlite::params![note_id],
+            map_note_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn list_stylos_notes(
+        &self,
+        to_instance: Option<&str>,
+        to_agent_id: Option<&str>,
+        column: Option<NoteColumn>,
+    ) -> Result<Vec<StylosNote>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT note_id, from_instance, from_agent_id, to_instance, to_agent_id, body,
+                    column_name, result_text, injection_state, created_at_ms, updated_at_ms, injected_at_ms
+             FROM stylos_notes
+             WHERE (?1 IS NULL OR to_instance = ?1)
+               AND (?2 IS NULL OR to_agent_id = ?2)
+               AND (?3 IS NULL OR column_name = ?3)
+             ORDER BY created_at_ms ASC",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![to_instance, to_agent_id, column.map(|c| c.as_str())],
+            map_note_row,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn move_stylos_note(&self, note_id: &str, column: NoteColumn) -> Result<Option<StylosNote>> {
+        let now_ms = now_unix_ms();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE stylos_notes SET column_name = ?2, updated_at_ms = ?3 WHERE note_id = ?1",
+            rusqlite::params![note_id, column.as_str(), now_ms],
+        )?;
+        drop(conn);
+        self.get_stylos_note(note_id)
+    }
+
+    pub fn update_stylos_note_result(
+        &self,
+        note_id: &str,
+        result_text: Option<&str>,
+    ) -> Result<Option<StylosNote>> {
+        let now_ms = now_unix_ms();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE stylos_notes SET result_text = ?2, updated_at_ms = ?3 WHERE note_id = ?1",
+            rusqlite::params![note_id, result_text, now_ms],
+        )?;
+        drop(conn);
+        self.get_stylos_note(note_id)
+    }
+
+    pub fn next_stylos_note_for_injection(
+        &self,
+        to_instance: &str,
+        to_agent_id: &str,
+    ) -> Result<Option<StylosNote>> {
+        let conn = self.conn.lock().unwrap();
+        let in_progress = conn
+            .query_row(
+                "SELECT note_id, from_instance, from_agent_id, to_instance, to_agent_id, body,
+                        column_name, result_text, injection_state, created_at_ms, updated_at_ms, injected_at_ms
+                 FROM stylos_notes
+                 WHERE to_instance = ?1 AND to_agent_id = ?2 AND injection_state = 'pending'
+                   AND column_name = 'in_progress'
+                 ORDER BY created_at_ms ASC
+                 LIMIT 1",
+                rusqlite::params![to_instance, to_agent_id],
+                map_note_row,
+            )
+            .optional()?;
+        if in_progress.is_some() {
+            return Ok(in_progress);
+        }
+        conn.query_row(
+            "SELECT note_id, from_instance, from_agent_id, to_instance, to_agent_id, body,
+                    column_name, result_text, injection_state, created_at_ms, updated_at_ms, injected_at_ms
+             FROM stylos_notes
+             WHERE to_instance = ?1 AND to_agent_id = ?2 AND injection_state = 'pending'
+               AND column_name = 'todo'
+             ORDER BY created_at_ms ASC
+             LIMIT 1",
+            rusqlite::params![to_instance, to_agent_id],
+            map_note_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn mark_stylos_note_injected(&self, note_id: &str) -> Result<Option<StylosNote>> {
+        let now_ms = now_unix_ms();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE stylos_notes
+             SET injection_state = 'injected', injected_at_ms = ?2, updated_at_ms = ?2
+             WHERE note_id = ?1",
+            rusqlite::params![note_id, now_ms],
+        )?;
+        drop(conn);
+        self.get_stylos_note(note_id)
+    }
+
     pub fn search(&self, args: SearchArgs) -> Result<Vec<SearchHit>> {
         if !self.fts5 {
             return Ok(vec![]);
@@ -686,6 +869,26 @@ impl DbHandle {
     }
 }
 
+
+fn map_note_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StylosNote> {
+    let column_raw: String = row.get(6)?;
+    let injection_raw: String = row.get(8)?;
+    Ok(StylosNote {
+        note_id: row.get(0)?,
+        from_instance: row.get(1)?,
+        from_agent_id: row.get(2)?,
+        to_instance: row.get(3)?,
+        to_agent_id: row.get(4)?,
+        body: row.get(5)?,
+        column: NoteColumn::from_str(&column_raw).ok_or_else(|| rusqlite::Error::InvalidColumnType(6, "column_name".into(), rusqlite::types::Type::Text))?,
+        result_text: row.get(7)?,
+        injection_state: NoteInjectionState::from_str(&injection_raw).ok_or_else(|| rusqlite::Error::InvalidColumnType(8, "injection_state".into(), rusqlite::types::Type::Text))?,
+        created_at_ms: row.get(9)?,
+        updated_at_ms: row.get(10)?,
+        injected_at_ms: row.get(11)?,
+    })
+}
+
 pub struct RecallArgs {
     pub session_id: Option<uuid::Uuid>,
     pub project_dir: Option<std::path::PathBuf>,
@@ -718,4 +921,80 @@ pub struct SearchHit {
     pub turn_seq: u32,
     pub role: String,
     pub snippet: String,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteColumn {
+    Todo,
+    InProgress,
+    Done,
+}
+
+impl NoteColumn {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Todo => "todo",
+            Self::InProgress => "in_progress",
+            Self::Done => "done",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "todo" => Some(Self::Todo),
+            "in_progress" => Some(Self::InProgress),
+            "done" => Some(Self::Done),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteInjectionState {
+    Pending,
+    Injected,
+}
+
+impl NoteInjectionState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Injected => "injected",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(Self::Pending),
+            "injected" => Some(Self::Injected),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StylosNote {
+    pub note_id: String,
+    pub from_instance: Option<String>,
+    pub from_agent_id: Option<String>,
+    pub to_instance: String,
+    pub to_agent_id: String,
+    pub body: String,
+    pub column: NoteColumn,
+    pub result_text: Option<String>,
+    pub injection_state: NoteInjectionState,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub injected_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateNoteArgs {
+    pub note_id: String,
+    pub from_instance: Option<String>,
+    pub from_agent_id: Option<String>,
+    pub to_instance: String,
+    pub to_agent_id: String,
+    pub body: String,
 }
