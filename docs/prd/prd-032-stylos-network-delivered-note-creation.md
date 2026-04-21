@@ -262,5 +262,5 @@ If the implementation changes tool descriptions or result payload wording to ref
 - [x] return receiver acknowledgement with created note identity where practical
 - [x] keep receiver-side note validation and insertion aligned with the current durable notes schema
 - [x] ensure non-Stylos builds fail clearly for non-local targets while preserving local note creation
-- [ ] update architecture and runtime docs to reflect the unified create path clearly
+- [x] update architecture and runtime docs to reflect the unified create path clearly
 - [x] update `docs/README.md` with this PRD entry
