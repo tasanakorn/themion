@@ -1357,7 +1357,7 @@ async fn handle_note_query(
     let Some(agent) = snapshot.agents.into_iter().find(|a| a.agent_id == req.to_agent_id) else {
         return NoteReply { accepted: false, agent_id: req.to_agent_id, request_id: req.request_id, note_id: None, reason: Some("not_found".to_string()) };
     };
-    let note_id = format!("note-{}", Uuid::new_v4());
+    let note_id = Uuid::new_v4().to_string();
     let created = query_context.notes_db().create_stylos_note(CreateNoteArgs {
         note_id: note_id.clone(),
         from_instance: req.from,

@@ -7,8 +7,10 @@ use crate::workflow::{
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::fs;
+#[cfg(feature = "stylos")]
 use std::future::Future;
 use std::path::PathBuf;
+#[cfg(feature = "stylos")]
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +23,7 @@ fn parse_note_column(value: &str) -> Option<NoteColumn> {
 fn stylos_note_to_json(note: &crate::db::StylosNote) -> Value {
     json!({
         "note_id": note.note_id,
+        "note_slug": note.note_slug,
         "from_instance": note.from_instance,
         "from_agent_id": note.from_agent_id,
         "to_instance": note.to_instance,
@@ -34,7 +37,6 @@ fn stylos_note_to_json(note: &crate::db::StylosNote) -> Value {
         "injected_at_ms": note.injected_at_ms,
     })
 }
-
 
 #[cfg(feature = "stylos")]
 type StylosToolFuture = Pin<Box<dyn Future<Output = Result<String>> + Send>>;
@@ -230,7 +232,7 @@ pub fn tool_definitions() -> Value {
                         "body": { "type": "string" },
                         "from_instance": { "type": "string" },
                         "from_agent_id": { "type": "string" },
-                        "note_id": { "type": "string" }
+                        "note_id": { "type": "string", "description": "Optional UUID note identifier. When omitted, one is generated." }
                     },
                     "required": ["to_instance", "to_agent_id", "body"]
                 }
@@ -483,7 +485,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             let to_instance = args["to_instance"].as_str().ok_or_else(|| anyhow::anyhow!("missing to_instance"))?;
             let to_agent_id = args["to_agent_id"].as_str().ok_or_else(|| anyhow::anyhow!("missing to_agent_id"))?;
             let body = args["body"].as_str().ok_or_else(|| anyhow::anyhow!("missing body"))?;
-            let note_id = args["note_id"].as_str().map(str::to_string).unwrap_or_else(|| format!("note-{}", Uuid::new_v4()));
+            let note_id = args["note_id"].as_str().map(str::to_string).unwrap_or_else(|| Uuid::new_v4().to_string());
             let note = ctx.db.create_stylos_note(CreateNoteArgs {
                 note_id,
                 from_instance: args["from_instance"].as_str().map(str::to_string),

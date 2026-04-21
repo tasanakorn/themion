@@ -256,7 +256,7 @@ Stylos collaboration now also supports durable notes backed by SQLite.
 Current behavior:
 
 - note records live in the main `system.db` SQLite database
-- each note stores `note_id`, optional sender identity, exact target instance `<hostname>:<pid>`, target `agent_id`, body, board column, result text, and millisecond timestamps
+- each note stores canonical UUID `note_id`, globally unique human-friendly `note_slug`, optional sender identity, exact target instance `<hostname>:<pid>`, target `agent_id`, body, board column, result text, and millisecond timestamps
 - phase-1 board columns are exactly `todo`, `in_progress`, and `done`
 - newly created notes start in `todo`
 - notes are model-visible through dedicated note tools rather than transcript scraping

@@ -162,7 +162,7 @@ Current behavior:
 - `notes/request` validates the target agent from the current exported snapshot
 - accepted notes are persisted in SQLite immediately rather than rejected when the agent is busy
 - persisted notes start in column `todo` with millisecond timestamps
-- `themion-core` exposes note tools for create/list/read/move/update-result operations using durable `note_id` values
+- `themion-core` exposes note tools for create/list/read/move/update-result operations using canonical durable UUID `note_id` values and returns companion `note_slug` metadata for human-readable inspection
 - the TUI checks for pending local notes on tick when no local turn is active
 - idle injection prefers pending `in_progress` notes; `todo` is considered only when no pending `in_progress` note exists for that agent
 - injected notes use a note-specific prompt wrapper and are marked injected to avoid duplicate delivery

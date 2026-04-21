@@ -3,6 +3,7 @@ use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 fn now_unix() -> i64 {
     SystemTime::now()
@@ -144,9 +145,10 @@ fn has_fts5(conn: &Connection) -> bool {
         Ok(r) => r,
         Err(_) => return false,
     };
-    let found = rows.filter_map(|r| r.ok()).any(|o| o == "ENABLE_FTS5");
-    found
+    let has = rows.filter_map(|r| r.ok()).any(|o| o == "ENABLE_FTS5");
+    has
 }
+
 
 fn ensure_column(conn: &Connection, table: &str, col: &str, decl: &str) -> Result<()> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
@@ -158,6 +160,143 @@ fn ensure_column(conn: &Connection, table: &str, col: &str, decl: &str) -> Resul
     Ok(())
 }
 
+fn generate_note_slug(note_id: &str, body: &str) -> String {
+    let mut slug = body
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    while slug.contains("--") {
+        slug = slug.replace("--", "-");
+    }
+    let slug = slug.trim_matches('-');
+    let prefix: String = if slug.is_empty() {
+        "note".to_string()
+    } else {
+        slug.chars().take(32).collect()
+    };
+    let suffix: String = note_id.chars().filter(|c| *c != '-').take(8).collect();
+    format!("{prefix}-{suffix}")
+}
+
+fn note_slug_exists(conn: &Connection, slug: &str, exclude_note_id: Option<&str>) -> Result<bool> {
+    let sql = if exclude_note_id.is_some() {
+        "SELECT 1 FROM stylos_notes WHERE note_slug = ?1 AND note_id != ?2 LIMIT 1"
+    } else {
+        "SELECT 1 FROM stylos_notes WHERE note_slug = ?1 LIMIT 1"
+    };
+    let exists = if let Some(note_id) = exclude_note_id {
+        conn.query_row(sql, rusqlite::params![slug, note_id], |_| Ok(()))
+            .optional()?
+            .is_some()
+    } else {
+        conn.query_row(sql, rusqlite::params![slug], |_| Ok(()))
+            .optional()?
+            .is_some()
+    };
+    Ok(exists)
+}
+
+fn make_unique_note_slug(
+    conn: &Connection,
+    note_id: &str,
+    body: &str,
+    exclude_note_id: Option<&str>,
+) -> Result<String> {
+    let base = generate_note_slug(note_id, body);
+    if !note_slug_exists(conn, &base, exclude_note_id)? {
+        return Ok(base);
+    }
+    for i in 2..=10_000 {
+        let candidate = format!("{base}-{i}");
+        if !note_slug_exists(conn, &candidate, exclude_note_id)? {
+            return Ok(candidate);
+        }
+    }
+    anyhow::bail!("failed to allocate unique note_slug")
+}
+
+fn migrate_stylos_notes_identifiers(conn: &Connection) -> Result<()> {
+    ensure_column(conn, "stylos_notes", "note_slug", "TEXT")?;
+
+    let mut duplicate_stmt = conn.prepare(
+        "SELECT note_slug, GROUP_CONCAT(note_id, ', '), COUNT(*)
+         FROM stylos_notes
+         WHERE note_slug IS NOT NULL AND TRIM(note_slug) != ''
+         GROUP BY note_slug
+         HAVING COUNT(*) > 1",
+    )?;
+    let duplicate_rows = duplicate_stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    let mut duplicate_summaries = Vec::new();
+    for row in duplicate_rows {
+        let (slug, note_ids, count) = row?;
+        duplicate_summaries.push(format!("slug={slug} count={count} note_ids=[{note_ids}]"));
+    }
+    drop(duplicate_stmt);
+    if !duplicate_summaries.is_empty() {
+        eprintln!(
+            "warning: found duplicate stylos note slugs before migration: {}",
+            duplicate_summaries.join("; ")
+        );
+    }
+
+    let mut stmt = conn.prepare("SELECT note_id, note_slug, body FROM stylos_notes ORDER BY created_at_ms ASC")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+
+    let mut updates = Vec::new();
+    for row in rows {
+        let (old_note_id, note_slug, body) = row?;
+        let new_note_id = match Uuid::parse_str(&old_note_id) {
+            Ok(uuid) => uuid.to_string(),
+            Err(_) => Uuid::new_v4().to_string(),
+        };
+        let existing_slug = note_slug.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let slug = if let Some(existing) = existing_slug {
+            let cleaned = existing.to_string();
+            if note_slug_exists(conn, &cleaned, Some(&old_note_id))? {
+                make_unique_note_slug(conn, &new_note_id, &body, Some(&old_note_id))?
+            } else {
+                cleaned
+            }
+        } else {
+            make_unique_note_slug(conn, &new_note_id, &body, Some(&old_note_id))?
+        };
+        if new_note_id != old_note_id || note_slug.as_deref() != Some(slug.as_str()) {
+            updates.push((old_note_id, new_note_id, slug));
+        }
+    }
+    drop(stmt);
+
+    for (old_note_id, new_note_id, slug) in updates {
+        conn.execute(
+            "UPDATE stylos_notes SET note_id = ?2, note_slug = ?3 WHERE note_id = ?1",
+            rusqlite::params![old_note_id, new_note_id, slug],
+        )?;
+    }
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_stylos_notes_note_slug ON stylos_notes(note_slug)",
+        [],
+    )?;
+    Ok(())
+}
+
 fn init_schema(conn: &Connection, fts5: bool) -> Result<()> {
     conn.execute_batch(SCHEMA_BASE)?;
     ensure_column(conn, "agent_sessions", "current_workflow", "TEXT")?;
@@ -165,39 +304,14 @@ fn init_schema(conn: &Connection, fts5: bool) -> Result<()> {
     ensure_column(conn, "agent_sessions", "workflow_status", "TEXT")?;
     ensure_column(conn, "agent_sessions", "current_phase_result", "TEXT")?;
     ensure_column(conn, "agent_sessions", "current_agent", "TEXT")?;
-    ensure_column(
-        conn,
-        "agent_sessions",
-        "workflow_last_updated_turn_seq",
-        "INTEGER",
-    )?;
+    ensure_column(conn, "agent_sessions", "workflow_last_updated_turn_seq", "INTEGER")?;
     ensure_column(conn, "agent_sessions", "workflow_started_at", "INTEGER")?;
     ensure_column(conn, "agent_sessions", "workflow_updated_at", "INTEGER")?;
     ensure_column(conn, "agent_sessions", "workflow_completed_at", "INTEGER")?;
-    ensure_column(
-        conn,
-        "agent_sessions",
-        "current_phase_retry_count",
-        "INTEGER",
-    )?;
-    ensure_column(
-        conn,
-        "agent_sessions",
-        "current_phase_retry_limit",
-        "INTEGER",
-    )?;
-    ensure_column(
-        conn,
-        "agent_sessions",
-        "previous_phase_retry_count",
-        "INTEGER",
-    )?;
-    ensure_column(
-        conn,
-        "agent_sessions",
-        "previous_phase_retry_limit",
-        "INTEGER",
-    )?;
+    ensure_column(conn, "agent_sessions", "current_phase_retry_count", "INTEGER")?;
+    ensure_column(conn, "agent_sessions", "current_phase_retry_limit", "INTEGER")?;
+    ensure_column(conn, "agent_sessions", "previous_phase_retry_count", "INTEGER")?;
+    ensure_column(conn, "agent_sessions", "previous_phase_retry_limit", "INTEGER")?;
     ensure_column(conn, "agent_sessions", "phase_entered_via", "TEXT")?;
     ensure_column(conn, "agent_turns", "workflow_name", "TEXT")?;
     ensure_column(conn, "agent_turns", "phase_start", "TEXT")?;
@@ -206,33 +320,14 @@ fn init_schema(conn: &Connection, fts5: bool) -> Result<()> {
     ensure_column(conn, "agent_turns", "phase_result_at_start", "TEXT")?;
     ensure_column(conn, "agent_turns", "workflow_status_at_end", "TEXT")?;
     ensure_column(conn, "agent_turns", "phase_result_at_end", "TEXT")?;
-    ensure_column(
-        conn,
-        "agent_turns",
-        "workflow_continues_after_turn",
-        "INTEGER",
-    )?;
+    ensure_column(conn, "agent_turns", "workflow_continues_after_turn", "INTEGER")?;
     ensure_column(conn, "agent_turns", "turn_end_reason", "TEXT")?;
     ensure_column(conn, "agent_messages", "workflow_name", "TEXT")?;
     ensure_column(conn, "agent_messages", "phase_name", "TEXT")?;
-    ensure_column(
-        conn,
-        "agent_workflow_transitions",
-        "retry_current_count",
-        "INTEGER",
-    )?;
-    ensure_column(
-        conn,
-        "agent_workflow_transitions",
-        "retry_previous_count",
-        "INTEGER",
-    )?;
-    ensure_column(
-        conn,
-        "agent_workflow_transitions",
-        "phase_entered_via",
-        "TEXT",
-    )?;
+    ensure_column(conn, "agent_workflow_transitions", "retry_current_count", "INTEGER")?;
+    ensure_column(conn, "agent_workflow_transitions", "retry_previous_count", "INTEGER")?;
+    ensure_column(conn, "agent_workflow_transitions", "phase_entered_via", "TEXT")?;
+    migrate_stylos_notes_identifiers(conn)?;
     if fts5 {
         conn.execute_batch(SCHEMA_FTS5)?;
     }
@@ -654,8 +749,14 @@ impl DbHandle {
 
     pub fn create_stylos_note(&self, args: CreateNoteArgs) -> Result<StylosNote> {
         let now_ms = now_unix_ms();
+        let note_id = Uuid::parse_str(&args.note_id)
+            .map(|uuid| uuid.to_string())
+            .unwrap_or_else(|_| Uuid::new_v4().to_string());
+        let conn = self.conn.lock().unwrap();
+        let note_slug = make_unique_note_slug(&conn, &note_id, &args.body, None)?;
         let note = StylosNote {
-            note_id: args.note_id,
+            note_id: note_id.clone(),
+            note_slug: note_slug.clone(),
             from_instance: args.from_instance,
             from_agent_id: args.from_agent_id,
             to_instance: args.to_instance,
@@ -668,14 +769,14 @@ impl DbHandle {
             updated_at_ms: now_ms,
             injected_at_ms: None,
         };
-        let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO stylos_notes (
-                note_id, from_instance, from_agent_id, to_instance, to_agent_id, body,
+                note_id, note_slug, from_instance, from_agent_id, to_instance, to_agent_id, body,
                 column_name, result_text, injection_state, created_at_ms, updated_at_ms, injected_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
                 note.note_id,
+                note.note_slug,
                 note.from_instance,
                 note.from_agent_id,
                 note.to_instance,
@@ -690,13 +791,14 @@ impl DbHandle {
             ],
         )?;
         drop(conn);
-        self.get_stylos_note(&note.note_id)?.ok_or_else(|| anyhow::anyhow!("note insert failed"))
+        self.get_stylos_note(&note_id)?
+            .ok_or_else(|| anyhow::anyhow!("note insert failed"))
     }
 
     pub fn get_stylos_note(&self, note_id: &str) -> Result<Option<StylosNote>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT note_id, from_instance, from_agent_id, to_instance, to_agent_id, body,
+            "SELECT note_id, note_slug, from_instance, from_agent_id, to_instance, to_agent_id, body,
                     column_name, result_text, injection_state, created_at_ms, updated_at_ms, injected_at_ms
              FROM stylos_notes WHERE note_id = ?1",
             rusqlite::params![note_id],
@@ -714,7 +816,7 @@ impl DbHandle {
     ) -> Result<Vec<StylosNote>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT note_id, from_instance, from_agent_id, to_instance, to_agent_id, body,
+            "SELECT note_id, note_slug, from_instance, from_agent_id, to_instance, to_agent_id, body,
                     column_name, result_text, injection_state, created_at_ms, updated_at_ms, injected_at_ms
              FROM stylos_notes
              WHERE (?1 IS NULL OR to_instance = ?1)
@@ -767,7 +869,7 @@ impl DbHandle {
         let conn = self.conn.lock().unwrap();
         let in_progress = conn
             .query_row(
-                "SELECT note_id, from_instance, from_agent_id, to_instance, to_agent_id, body,
+                "SELECT note_id, note_slug, from_instance, from_agent_id, to_instance, to_agent_id, body,
                         column_name, result_text, injection_state, created_at_ms, updated_at_ms, injected_at_ms
                  FROM stylos_notes
                  WHERE to_instance = ?1 AND to_agent_id = ?2 AND injection_state = 'pending'
@@ -782,7 +884,7 @@ impl DbHandle {
             return Ok(in_progress);
         }
         conn.query_row(
-            "SELECT note_id, from_instance, from_agent_id, to_instance, to_agent_id, body,
+            "SELECT note_id, note_slug, from_instance, from_agent_id, to_instance, to_agent_id, body,
                     column_name, result_text, injection_state, created_at_ms, updated_at_ms, injected_at_ms
              FROM stylos_notes
              WHERE to_instance = ?1 AND to_agent_id = ?2 AND injection_state = 'pending'
@@ -869,23 +971,23 @@ impl DbHandle {
     }
 }
 
-
 fn map_note_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StylosNote> {
-    let column_raw: String = row.get(6)?;
-    let injection_raw: String = row.get(8)?;
+    let column_raw: String = row.get(7)?;
+    let injection_raw: String = row.get(9)?;
     Ok(StylosNote {
         note_id: row.get(0)?,
-        from_instance: row.get(1)?,
-        from_agent_id: row.get(2)?,
-        to_instance: row.get(3)?,
-        to_agent_id: row.get(4)?,
-        body: row.get(5)?,
-        column: NoteColumn::from_str(&column_raw).ok_or_else(|| rusqlite::Error::InvalidColumnType(6, "column_name".into(), rusqlite::types::Type::Text))?,
-        result_text: row.get(7)?,
-        injection_state: NoteInjectionState::from_str(&injection_raw).ok_or_else(|| rusqlite::Error::InvalidColumnType(8, "injection_state".into(), rusqlite::types::Type::Text))?,
-        created_at_ms: row.get(9)?,
-        updated_at_ms: row.get(10)?,
-        injected_at_ms: row.get(11)?,
+        note_slug: row.get(1)?,
+        from_instance: row.get(2)?,
+        from_agent_id: row.get(3)?,
+        to_instance: row.get(4)?,
+        to_agent_id: row.get(5)?,
+        body: row.get(6)?,
+        column: NoteColumn::from_str(&column_raw).ok_or_else(|| rusqlite::Error::InvalidColumnType(7, "column_name".into(), rusqlite::types::Type::Text))?,
+        result_text: row.get(8)?,
+        injection_state: NoteInjectionState::from_str(&injection_raw).ok_or_else(|| rusqlite::Error::InvalidColumnType(9, "injection_state".into(), rusqlite::types::Type::Text))?,
+        created_at_ms: row.get(10)?,
+        updated_at_ms: row.get(11)?,
+        injected_at_ms: row.get(12)?,
     })
 }
 
@@ -922,7 +1024,6 @@ pub struct SearchHit {
     pub role: String,
     pub snippet: String,
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoteColumn {
@@ -976,6 +1077,7 @@ impl NoteInjectionState {
 #[derive(Debug, Clone)]
 pub struct StylosNote {
     pub note_id: String,
+    pub note_slug: String,
     pub from_instance: Option<String>,
     pub from_agent_id: Option<String>,
     pub to_instance: String,
