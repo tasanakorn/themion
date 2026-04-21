@@ -78,7 +78,9 @@ When adding code:
 - Do not rewrite large files unnecessarily.
 - Do not touch generated/build output such as `target/`.
 - Do not edit lockfiles unless a dependency change is required.
-- When changing crate versions in `Cargo.toml`, consider whether `Cargo.lock` should be updated and committed in the same task.
+- When changing crate versions in `Cargo.toml`, always check whether `Cargo.lock` changed as a result.
+- If a version bump changes `Cargo.lock`, stage and commit the lockfile with the related `Cargo.toml` changes in the same commit unless the user explicitly asks for separate commits.
+- Before committing a version bump, inspect `git status` so you can see whether `Cargo.lock` or other generated dependency metadata also changed.
 - Read the relevant file before editing it.
 - Verify tool availability before depending on non-standard local commands.
 
@@ -121,6 +123,7 @@ Typical feature checks for `themion-cli`:
 - Use clear commit messages.
 - Do not include unrelated modifications in a commit.
 - Before `git add -A` or committing all pending changes, inspect `git status` and confirm there are no unrelated edits.
+- When a task changes dependency manifests or version metadata, confirm whether related generated files such as `Cargo.lock` also need to be staged before committing.
 
 ## Lessons learned
 
@@ -132,7 +135,7 @@ Typical feature checks for `themion-cli`:
 - If asked to commit, keep commits scoped unless the user explicitly requests committing all pending changes.
 - Feature-flag regressions are easy to miss; when touching gated code, verify the crate still builds with the feature enabled and disabled as relevant.
 - When editing code, avoid leaving newly introduced warnings behind; either fix them in the touched area or call them out clearly if blocked.
-- When bumping crate versions, check whether `Cargo.lock` changed and whether it should be staged with the related `Cargo.toml` updates.
+- When bumping crate versions, do not stop at editing `Cargo.toml`; explicitly check `git status` for `Cargo.lock` and include it in the same commit when it changed.
 
 ## When updating docs
 
