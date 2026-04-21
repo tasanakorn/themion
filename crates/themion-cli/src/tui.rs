@@ -15,7 +15,7 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
@@ -72,6 +72,18 @@ enum Entry {
     TurnDone { summary: String, stats: String },
     Stats(String),
     Blank,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NavigationMode {
+    FollowTail,
+    BrowsedHistory,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReviewMode {
+    Closed,
+    Transcript,
 }
 
 pub struct AgentHandle {
@@ -244,6 +256,9 @@ pub struct App<'a> {
     running: bool,
     agent_busy: bool,
     scroll_offset: usize,
+    navigation_mode: NavigationMode,
+    review_mode: ReviewMode,
+    review_scroll_offset: usize,
     history: Vec<String>,
     history_pos: Option<usize>,
     history_draft: String,
@@ -323,7 +338,10 @@ impl<'a> App<'a> {
                 session.model,
             )),
             Entry::Assistant(format!("project directory: {}", project_display)),
-            Entry::Assistant("type /config to change settings, /exit to quit".to_string()),
+            Entry::Assistant(
+                "type /config to change settings, /exit to quit, Alt-t transcript review"
+                    .to_string(),
+            ),
             Entry::Blank,
         ];
 
@@ -359,6 +377,9 @@ impl<'a> App<'a> {
             running: true,
             agent_busy: false,
             scroll_offset: 0,
+            navigation_mode: NavigationMode::FollowTail,
+            review_mode: ReviewMode::Closed,
+            review_scroll_offset: 0,
             history: Vec::new(),
             history_pos: None,
             history_draft: String::new(),
@@ -406,6 +427,27 @@ impl<'a> App<'a> {
     #[allow(dead_code)]
     fn main_agent_mut(&mut self) -> Option<&mut AgentHandle> {
         self.agents.iter_mut().find(|h| has_role(h, "main"))
+    }
+
+    fn enter_browsed_history(&mut self) {
+        self.navigation_mode = NavigationMode::BrowsedHistory;
+    }
+
+    fn return_to_latest(&mut self) {
+        self.scroll_offset = 0;
+        self.review_scroll_offset = 0;
+        self.navigation_mode = NavigationMode::FollowTail;
+        self.review_mode = ReviewMode::Closed;
+    }
+
+    fn open_transcript_review(&mut self) {
+        self.review_mode = ReviewMode::Transcript;
+        self.navigation_mode = NavigationMode::BrowsedHistory;
+        self.review_scroll_offset = 0;
+    }
+
+    fn close_transcript_review(&mut self) {
+        self.review_mode = ReviewMode::Closed;
     }
 
     fn history_up(&mut self) {
@@ -970,11 +1012,68 @@ impl<'a> App<'a> {
     }
 
     fn scroll_up(&mut self) {
-        self.scroll_offset += 3;
+        match self.review_mode {
+            ReviewMode::Transcript => {
+                self.review_scroll_offset += 3;
+            }
+            ReviewMode::Closed => {
+                self.scroll_offset += 3;
+                self.enter_browsed_history();
+            }
+        }
     }
 
     fn scroll_down(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(3);
+        match self.review_mode {
+            ReviewMode::Transcript => {
+                self.review_scroll_offset = self.review_scroll_offset.saturating_sub(3);
+            }
+            ReviewMode::Closed => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                if self.scroll_offset == 0 {
+                    self.navigation_mode = NavigationMode::FollowTail;
+                }
+            }
+        }
+    }
+
+    fn page_up(&mut self, amount: usize) {
+        match self.review_mode {
+            ReviewMode::Transcript => {
+                self.review_scroll_offset = self.review_scroll_offset.saturating_add(amount.max(1));
+            }
+            ReviewMode::Closed => {
+                self.scroll_offset = self.scroll_offset.saturating_add(amount.max(1));
+                self.enter_browsed_history();
+            }
+        }
+    }
+
+    fn page_down(&mut self, amount: usize) {
+        match self.review_mode {
+            ReviewMode::Transcript => {
+                self.review_scroll_offset = self.review_scroll_offset.saturating_sub(amount.max(1));
+            }
+            ReviewMode::Closed => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(amount.max(1));
+                if self.scroll_offset == 0 {
+                    self.navigation_mode = NavigationMode::FollowTail;
+                }
+            }
+        }
+    }
+
+    fn jump_to_top(&mut self, total_visual: usize, height: usize) {
+        let max_scroll = total_visual.saturating_sub(height);
+        match self.review_mode {
+            ReviewMode::Transcript => {
+                self.review_scroll_offset = max_scroll;
+            }
+            ReviewMode::Closed => {
+                self.scroll_offset = max_scroll;
+                self.enter_browsed_history();
+            }
+        }
     }
 
     fn submit_shell_command(&mut self, command: &str, app_tx: &mpsc::UnboundedSender<AppEvent>) {
@@ -1073,7 +1172,7 @@ impl<'a> App<'a> {
         self.history_pos = None;
         self.history_draft = String::new();
         self.input = make_input();
-        self.scroll_offset = 0;
+        self.return_to_latest();
 
         if text == "/exit" || text == "/quit" {
             self.running = false;
@@ -1477,6 +1576,22 @@ fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Lin
     lines
 }
 
+fn scroll_from_bottom(offset_from_bottom: usize, total_visual: usize, height: usize) -> u16 {
+    let max_scroll = total_visual.saturating_sub(height);
+    max_scroll.saturating_sub(offset_from_bottom) as u16
+}
+
+fn review_area(area: Rect) -> Rect {
+    let width = area.width.saturating_mul(85).saturating_div(100).max(20);
+    let height = area.height.saturating_mul(85).saturating_div(100).max(10);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
 fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
     let input_text = app.input.lines().join("\n");
@@ -1519,12 +1634,15 @@ fn draw(f: &mut Frame, app: &App) {
     let height = chunks[0].height as usize;
     let width = chunks[0].width;
 
-    let conv_base = Paragraph::new(lines)
+    let conv_base = Paragraph::new(lines.clone())
         .wrap(Wrap { trim: false })
         .block(Block::default());
     let total_visual = conv_base.line_count(width);
-    let max_scroll = total_visual.saturating_sub(height);
-    let scroll = max_scroll.saturating_sub(app.scroll_offset) as u16;
+    let scroll = if app.navigation_mode == NavigationMode::FollowTail {
+        scroll_from_bottom(0, total_visual, height)
+    } else {
+        scroll_from_bottom(app.scroll_offset, total_visual, height)
+    };
 
     f.render_widget(Clear, chunks[0]);
     f.render_widget(conv_base.scroll((scroll, 0)), chunks[0]);
@@ -1536,11 +1654,13 @@ fn draw(f: &mut Frame, app: &App) {
         .block(input_block);
     f.render_widget(input_para, chunks[1]);
 
-    let (cursor_row, cursor_col) = app.input.cursor();
-    let cursor_x = chunks[1].x + 2 + cursor_col as u16;
-    let cursor_y = chunks[1].y + 1 + cursor_row as u16;
-    if cursor_y < chunks[1].bottom() && cursor_x < chunks[1].right() {
-        f.set_cursor_position((cursor_x, cursor_y));
+    if app.review_mode == ReviewMode::Closed {
+        let (cursor_row, cursor_col) = app.input.cursor();
+        let cursor_x = chunks[1].x + 2 + cursor_col as u16;
+        let cursor_y = chunks[1].y + 1 + cursor_row as u16;
+        if cursor_y < chunks[1].bottom() && cursor_x < chunks[1].right() {
+            f.set_cursor_position((cursor_x, cursor_y));
+        }
     }
 
     let project_leaf = app
@@ -1556,9 +1676,16 @@ fn draw(f: &mut Frame, app: &App) {
         Some(StylosRuntimeState::Error(_)) => "stylos: error".to_string(),
         None => "stylos: off".to_string(),
     };
+    let nav = match app.review_mode {
+        ReviewMode::Transcript => "review",
+        ReviewMode::Closed => match app.navigation_mode {
+            NavigationMode::FollowTail => "tail",
+            NavigationMode::BrowsedHistory => "browse",
+        },
+    };
     #[cfg(feature = "stylos")]
     let bar_top = format!(
-        " {} | {} | {} | {} | flow: {} | phase: {} | agent: {}",
+        " {} | {} | {} | {} | flow: {} | phase: {} | agent: {} | nav: {}",
         app.session.active_profile,
         app.session.model,
         project_leaf,
@@ -1566,19 +1693,21 @@ fn draw(f: &mut Frame, app: &App) {
         app.workflow_state.workflow_name,
         app.workflow_state.phase_name,
         activity,
+        nav,
     );
     #[cfg(not(feature = "stylos"))]
     let bar_top = format!(
-        " {} | {} | {} | flow: {} | phase: {} | agent: {}",
+        " {} | {} | {} | flow: {} | phase: {} | agent: {} | nav: {}",
         app.session.active_profile,
         app.session.model,
         project_leaf,
         app.workflow_state.workflow_name,
         app.workflow_state.phase_name,
         activity,
+        nav,
     );
     let bar_bottom = format!(
-        " {} | in:{} out:{} cached:{} | ctx:{}",
+        " {} | in:{} out:{} cached:{} | ctx:{} | PgUp/PgDn page | Alt-g latest | Alt-t review",
         build_rate_limit_statusline(app.status_rate_limits.as_ref()),
         format_human_count(app.session_tokens.tokens_in),
         format_human_count(app.session_tokens.tokens_out),
@@ -1596,6 +1725,27 @@ fn draw(f: &mut Frame, app: &App) {
             ),
         chunks[2],
     );
+
+    if app.review_mode == ReviewMode::Transcript {
+        let review = review_area(area);
+        let review_block = Block::default()
+            .title(" Transcript review ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan));
+        let review_inner = review_block.inner(review);
+        let review_lines = build_lines(&app.entries, &None);
+        let review_para = Paragraph::new(review_lines)
+            .wrap(Wrap { trim: false })
+            .block(review_block);
+        let review_total = review_para.line_count(review_inner.width.max(1));
+        let review_scroll = scroll_from_bottom(
+            app.review_scroll_offset,
+            review_total,
+            review_inner.height as usize,
+        );
+        f.render_widget(Clear, review);
+        f.render_widget(review_para.scroll((review_scroll, 0)), review);
+    }
 }
 
 pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyhow::Result<()> {
@@ -1804,13 +1954,18 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
 
                 match (key.code, key.modifiers) {
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.running = false,
+                    (KeyCode::Esc, _) if app.review_mode == ReviewMode::Transcript => {
+                        app.close_transcript_review()
+                    }
                     (KeyCode::Esc, _) if app.agent_busy => app.request_interrupt(),
                     (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
                         let tx = app_tx.clone();
                         app.submit_input(&tx);
                     }
                     (KeyCode::Enter, KeyModifiers::NONE) => {
-                        if app.paste_burst.newline_should_insert_instead_of_submit(now) {
+                        if app.review_mode != ReviewMode::Closed {
+                            app.close_transcript_review();
+                        } else if app.paste_burst.newline_should_insert_instead_of_submit(now) {
                             app.input.insert_newline();
                             app.paste_burst.extend_window(now);
                         } else {
@@ -1825,24 +1980,51 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                         }
                         app.input.insert_newline();
                     }
-                    (KeyCode::PageUp, _) | (KeyCode::Up, KeyModifiers::ALT) => app.scroll_up(),
-                    (KeyCode::PageDown, _) | (KeyCode::Down, KeyModifiers::ALT) => {
-                        app.scroll_down()
+                    (KeyCode::PageUp, _) => {
+                        let page = area_page_height(&terminal, &app);
+                        app.page_up(page);
                     }
-                    (KeyCode::Up, KeyModifiers::NONE) => app.history_up(),
-                    (KeyCode::Down, KeyModifiers::NONE) => app.history_down(),
+                    (KeyCode::PageDown, _) => {
+                        let page = area_page_height(&terminal, &app);
+                        app.page_down(page);
+                    }
+                    (KeyCode::Up, KeyModifiers::ALT) => app.scroll_up(),
+                    (KeyCode::Down, KeyModifiers::ALT) => app.scroll_down(),
+                    (KeyCode::Char('g'), KeyModifiers::ALT) => app.return_to_latest(),
+                    (KeyCode::Char('t'), KeyModifiers::ALT) => {
+                        if app.review_mode == ReviewMode::Transcript {
+                            app.close_transcript_review();
+                        } else {
+                            app.open_transcript_review();
+                        }
+                    }
+                    (KeyCode::Home, KeyModifiers::ALT) => {
+                        let (total, height) = current_total_and_height(&terminal, &app);
+                        app.jump_to_top(total, height);
+                    }
+                    (KeyCode::Up, KeyModifiers::NONE) if app.review_mode == ReviewMode::Closed => {
+                        app.history_up()
+                    }
+                    (KeyCode::Down, KeyModifiers::NONE)
+                        if app.review_mode == ReviewMode::Closed =>
+                    {
+                        app.history_down()
+                    }
                     _ => {
-                        app.input.input(key);
-                        match key.code {
-                            KeyCode::Char(_) => {
-                                let has_ctrl_or_alt = key.modifiers.contains(KeyModifiers::CONTROL)
-                                    || key.modifiers.contains(KeyModifiers::ALT);
-                                if has_ctrl_or_alt {
-                                    app.paste_burst.clear_window_after_non_char();
+                        if app.review_mode == ReviewMode::Closed {
+                            app.input.input(key);
+                            match key.code {
+                                KeyCode::Char(_) => {
+                                    let has_ctrl_or_alt =
+                                        key.modifiers.contains(KeyModifiers::CONTROL)
+                                            || key.modifiers.contains(KeyModifiers::ALT);
+                                    if has_ctrl_or_alt {
+                                        app.paste_burst.clear_window_after_non_char();
+                                    }
                                 }
+                                KeyCode::Enter => {}
+                                _ => app.paste_burst.clear_window_after_non_char(),
                             }
-                            KeyCode::Enter => {}
-                            _ => app.paste_burst.clear_window_after_non_char(),
                         }
                     }
                 }
@@ -1995,6 +2177,44 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
     Ok(())
 }
 
+fn area_page_height(terminal: &Terminal<CrosstermBackend<std::io::Stdout>>, app: &App<'_>) -> usize {
+    let area = terminal.size().map(|r| r.height as usize).unwrap_or(24);
+    let reserved = 8usize + 3usize;
+    let conv = area.saturating_sub(reserved).max(1);
+    if app.review_mode == ReviewMode::Transcript {
+        conv.saturating_mul(85).saturating_div(100).saturating_sub(2).max(1)
+    } else {
+        conv.saturating_sub(1).max(1)
+    }
+}
+
+fn current_total_and_height(
+    terminal: &Terminal<CrosstermBackend<std::io::Stdout>>,
+    app: &App<'_>,
+) -> (usize, usize) {
+    let size = terminal
+        .size()
+        .map(|s| Rect::new(0, 0, s.width, s.height))
+        .unwrap_or(Rect::new(0, 0, 80, 24));
+    let lines = match app.review_mode {
+        ReviewMode::Transcript => build_lines(&app.entries, &None),
+        ReviewMode::Closed => build_lines(&app.entries, &app.pending),
+    };
+    let area = if app.review_mode == ReviewMode::Transcript {
+        review_area(size)
+    } else {
+        size
+    };
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(Block::default());
+    let height = if app.review_mode == ReviewMode::Transcript {
+        area.height.saturating_sub(2) as usize
+    } else {
+        area.height.saturating_sub(11) as usize
+    }
+    .max(1);
+    (para.line_count(area.width.max(1)), height)
+}
+
 fn unix_epoch_now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2033,7 +2253,7 @@ mod tests {
 
     #[test]
     fn validate_agent_roles_rejects_two_main() {
-        let agents = vec![handle("a", &["main"]), handle("b", &["main"])];
+        let agents = vec![handle("a", &["main"]), handle("b", &["main"] )];
         assert!(validate_agent_roles(&agents).is_err());
     }
 

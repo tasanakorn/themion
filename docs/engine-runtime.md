@@ -97,3 +97,17 @@ That means:
 - strict local `agent_id` execution targeting has landed for the current process-local agent set
 - the query layer still relies on snapshot-based selection and a CLI-local in-process bridge rather than a durable scheduler
 - this preserves the current harness architecture while still making the query and task surface useful for discovery, request submission, and best-effort status lookup
+
+## CLI-local transcript review boundary
+
+Long-session transcript navigation in the TUI is a CLI-local display concern and does not change the core harness loop.
+
+That means:
+
+- follow-tail versus browsed-history state lives in `crates/themion-cli/src/tui.rs`
+- the read-only transcript review overlay uses the current in-memory `Entry` list already held by the TUI for the active session
+- browsing old content does not alter `themion-core::Agent` message history, turn boundaries, SQLite persistence, tool semantics, or prompt assembly
+- streamed assistant chunks continue to arrive through normal `AgentEvent` handling; the CLI only changes whether the current viewport follows the latest content automatically
+- persistent history tools such as `history_recall` and `history_search` remain the mechanism for model-visible access to older stored history outside the current prompt window
+
+This feature improves user-facing review behavior without changing runtime semantics in `themion-core`.

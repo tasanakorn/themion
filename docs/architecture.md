@@ -217,3 +217,20 @@ Task lifecycle tracking is process-local and in-memory. Accepted tasks start as 
 ## TUI (tui.rs)
 
 The TUI still boots with one main interactive agent in the first shipped step, but its runtime agent descriptor now uses explicit roles rather than relying only on an `is_interactive` boolean. The initial main agent carries `roles = ["main", "interactive"]`.
+
+### Long-session chat navigation
+
+Long-session transcript review is now a CLI-local navigation feature in `crates/themion-cli/src/tui.rs`.
+
+Current behavior:
+
+- the main conversation pane starts in follow-tail mode and stays pinned to the latest content while the user has not browsed upward
+- scrolling upward or paging upward moves the UI into browsed-history mode instead of relying only on the implicit `scroll_offset == 0` convention
+- while in browsed-history mode, new streamed output continues to append but does not forcibly snap the viewport back to the bottom
+- `Alt-g` returns to the latest content and restores follow-tail mode
+- `PageUp` and `PageDown` perform page-sized navigation rather than the old tiny fixed-step behavior
+- `Alt-t` opens a read-only transcript review overlay for the current in-memory session transcript; `Esc`, `Enter`, or `Alt-t` closes it
+- transcript review uses the current `Entry` list as its source transcript and keeps review navigation local to the CLI rather than changing persistence or harness semantics
+- the status bar exposes the current navigation state as `tail`, `browse`, or `review`
+
+This keeps long-history usability in the TUI itself rather than depending on terminal scrollback, which remains unreliable in alternate-screen environments.
