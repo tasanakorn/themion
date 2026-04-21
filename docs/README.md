@@ -41,6 +41,7 @@
 | PRD-029 | [Stylos Notes Board Phase 1 — Replace Ephemeral Talk with Durable Note Intake and Board Sections](prd/prd-029-stylos-notes-board-phase-1.md) | Implemented | v0.16.0 | `themion-core`, `themion-cli`, docs |
 | PRD-030 | [Stylos Notes Table Identifier Hardening and Human-Friendly Slugs](prd/prd-030-stylos-notes-table-uuid-and-slug.md) | Implemented | v0.16.1 | `themion-core`, `themion-cli`, docs |
 | PRD-031 | [Rename Local Notes Tools from `stylos_` to `board_`](prd/prd-031-rename-local-note-tools-to-board-prefix.md) | Implemented | v0.17.0 | `themion-core`, `themion-cli`, docs |
+| PRD-032 | [Stylos Network-Delivered Note Creation When `stylos` Feature Is Enabled](prd/prd-032-stylos-network-delivered-note-creation.md) | Implemented | v0.18.0 | `themion-core`, `themion-cli`, docs |
 
 ## Roadmap note
 
