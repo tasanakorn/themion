@@ -218,9 +218,9 @@ fn stylos_tool_definitions() -> Vec<Value> {
             },
             "required":[]
         })),
-        stylos_tool("stylos_query_agents_git", "Ask which agents are attached to git repositories, optionally matching a specific repo identity.", json!({
+        stylos_tool("stylos_query_agents_git", "Ask which agents are attached to git repositories, optionally matching a specific repo identity. Prefer remote in normalized form like <host>/<owner>/<repo> when you can infer it safely, for example github.com/tasanakorn/stele. If the user names a supported forge explicitly, you may normalize before calling. If the host is omitted and there is no documented safe default, ask for clarification instead of guessing. Do not rely on responders to parse conversational phrases.", json!({
             "type":"object","properties":{
-                "remote":{"type":"string","description":"Optional git remote to match across normalized repo forms."},
+                "remote":{"type":"string","description":"Optional git selector. Prefer normalized comparable identity like <host>/<owner>/<repo>; raw remotes are also accepted when needed."},
                 "exclude_self":{"type":"boolean","description":"Whether to exclude the current Themion instance from discovery results. Defaults to true."}
             },"required":[]
         })),
