@@ -807,6 +807,9 @@ impl<'a> App<'a> {
 
     #[cfg(feature = "stylos")]
     fn maybe_log_sender_side_stylos_talk(&mut self) {
+        if self.active_remote_request.is_some() {
+            return;
+        }
         let Some(Entry::ToolDone) = self.entries.last() else {
             return;
         };
@@ -1226,16 +1229,6 @@ impl<'a> App<'a> {
             }
             self.push(Entry::Blank);
             return;
-        }
-
-        #[cfg(feature = "stylos")]
-        if let Some(remote) = self.active_remote_request.as_ref() {
-            let sender = remote.from.as_deref().unwrap_or("unknown sender");
-            let target = remote.to.as_deref().unwrap_or("unknown target");
-            self.push(Entry::RemoteEvent(format!(
-                "Stylos talk from={} to={}",
-                sender, target,
-            )));
         }
 
         #[cfg(feature = "stylos")]
@@ -2115,9 +2108,12 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     .unwrap_or_else(|| "interactive".to_string());
                 if app.agent_busy {
                     let sender = request.from.as_deref().unwrap_or("unknown sender");
+                    let sender_agent = request.from_agent_id.as_deref().unwrap_or("unknown");
+                    let target_instance = request.to.as_deref().unwrap_or("unknown target");
+                    let target_agent = request.to_agent_id.as_deref().unwrap_or(target.as_str());
                     app.push(Entry::RemoteEvent(format!(
-                        "Stylos hear from={} for={} rejected: local agent busy",
-                        sender, target
+                        "Stylos hear from={} from_agent_id={} to={} to_agent_id={} rejected: local agent busy",
+                        sender, sender_agent, target_instance, target_agent
                     )));
                     if let (Some(handle), Some(task_id)) =
                         (app.stylos.as_ref(), request.task_id.clone())
@@ -2134,9 +2130,12 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     }
                 } else {
                     let sender = request.from.as_deref().unwrap_or("unknown sender");
+                    let sender_agent = request.from_agent_id.as_deref().unwrap_or("unknown");
+                    let target_instance = request.to.as_deref().unwrap_or("unknown target");
+                    let target_agent = request.to_agent_id.as_deref().unwrap_or(target.as_str());
                     app.push(Entry::RemoteEvent(format!(
-                        "Stylos hear from={} to={}",
-                        sender, target
+                        "Stylos hear from={} from_agent_id={} to={} to_agent_id={}",
+                        sender, sender_agent, target_instance, target_agent
                     )));
                     app.active_remote_request = Some(request.clone());
                     app.submit_text(request.prompt, &app_tx);
@@ -2347,7 +2346,7 @@ mod tests {
 
     #[test]
     fn validate_agent_roles_rejects_two_main() {
-        let agents = vec![handle("a", &["main"]), handle("b", &["main"])];
+        let agents = vec![handle("a", &["main"]), handle("b", &["main"] )];
         assert!(validate_agent_roles(&agents).is_err());
     }
 
@@ -2407,7 +2406,9 @@ mod tests {
             task_id: None,
             request_id: None,
             from: Some("peer-1:1234".to_string()),
+            from_agent_id: Some("main".to_string()),
             to: Some("peer-2:5678".to_string()),
+            to_agent_id: Some("worker".to_string()),
         };
         let target = request.agent_id.as_deref();
         let index = target

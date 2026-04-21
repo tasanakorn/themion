@@ -15,7 +15,7 @@
 | PRD-003 | [OpenAI Codex Subscription Provider](prd/prd-003-openai-codex-provider.md)                                  | Implemented   | v0.3.0  | `themion-core`, `themion-cli`, workspace |
 | PRD-004 | [Direct Shell Command Prefix in the TUI](prd/prd-004-direct-shell-command-prefix.md)                        | Implemented   | v0.3.0  | `themion-cli`, `themion-core`            |
 | PRD-005 | [Model Context Window Refresh and Statusline Display](prd/prd-005-model-context-window-refresh-and-statusline.md) | Implemented | v0.3.0 | `themion-core`, `themion-cli`, docs      |
-| PRD-006 | [Workflow and Phase Model for the Harness Engine](prd/prd-006-workflow-phase-model-for-harness-engine.md) | Implemented | v0.4.0 | `themion-core`, `themion-cli`, docs      |
+| PRD-006 | [Workflow and Phase Model for the Harness Engine](prd/prd-006-workflow-and-phase-model-for-harness-engine.md) | Implemented | v0.4.0 | `themion-core`, `themion-cli`, docs      |
 | PRD-007 | [Lite Workflow Activation and Runtime Structure](prd/prd-007-lite-workflow-activation-and-runtime-structure.md) | Implemented | v0.5.0 | `themion-core`, `themion-cli`, docs      |
 | PRD-008 | [Workflow Phase Retry and Recovery Policy](prd/prd-008-workflow-phase-retry-and-recovery-policy.md)         | Implemented   | v0.5.0  | `themion-core`, `themion-cli`, docs      |
 | PRD-009 | [Domain-Prefixed Tool Naming Convention](prd/prd-009-domain-prefixed-tool-naming-convention.md)             | Implemented   | v0.5.1  | `themion-core`, docs                     |
@@ -37,6 +37,7 @@
 | PRD-025 | [Long-Session Chat History Navigation in the TUI](prd/prd-025-long-session-chat-history-navigation.md) | Implemented | v0.14.0 | `themion-cli`, docs |
 | PRD-026 | [Stylos Talk Sender Identity, Prompt Wiring, Busy-Peer Reply Handling, and Lightweight Wait Tool](prd/prd-026-stylos-talk-sender-identity-and-reply-wiring.md) | Implemented | v0.15.0 | `themion-core`, `themion-cli`, docs |
 | PRD-027 | [Sender-Side Stylos Talk `from` and `to` Identifier Semantics](prd/prd-027-stylos-talk-from-and-to-identifiers.md) | Implemented | v0.15.1 | `themion-cli`, docs |
+| PRD-028 | [Receiver-Side Stylos Talk Logging Should Not Duplicate `hear` and `talk`](prd/prd-028-receiver-side-stylos-talk-logging-should-not-duplicate-hear-and-talk.md) | Implemented | v0.15.2 | `themion-cli`, docs |
 
 ## Roadmap note
 

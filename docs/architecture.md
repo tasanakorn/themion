@@ -210,8 +210,10 @@ Examples:
 
 - `status` returns the current process snapshot and supports optional `agent_id` and `role` filtering. Filters can be used independently or together. Unknown filters return `not_found`.
 - `talk` accepts mandatory target `instance`, optional `to_agent_id`, and optional `wait_for_idle_timeout_ms`; sender identity is resolved automatically by the local runtime.
-- accepted `talk` requests are injected into the local agent turn as a peer-message wrapper with exact `from=<hostname>:<pid>` and `to=<hostname>:<pid>` identifiers, plus reply guidance using `***QRU***`.;
+- accepted `talk` requests are injected into the local agent turn as a peer-message wrapper with exact `from=<hostname>:<pid>` and `to=<hostname>:<pid>` identifiers, plus reply guidance using `***QRU***`.
+- when an inbound Stylos talk is received, the receiver-side TUI emits one `Stylos hear from=<from> from_agent_id=<from_agent_id> to=<to> to_agent_id=<to_agent_id>` line using the inbound payload fields directly.
 - when an outbound `stylos_request_talk` call is accepted, the sender-side TUI emits `Stylos talk to=<hostname>:<pid> from=<hostname>:<pid>` using the same exact identifier format.
+- receiver-side inbound `hear` logging and sender-side outbound `talk` logging remain distinct; one inbound delivery must not also surface as a receiver-side `Stylos talk ...` line.
 - `talk` keeps acknowledgement-oriented semantics: it reports delivery acceptance or rejection and does not wait for the remote agent’s final natural-language answer.
 - when the target agent is busy and `wait_for_idle_timeout_ms` is positive, the CLI query layer polls the exported snapshot until the peer becomes `idle` or `nap` or the timeout expires; timeout produces `timed_out_waiting_for_idle`.
 - `tasks/request` filters local candidates using the current snapshot, optional `preferred_agent_id`, optional `required_roles`, and optional `require_git_repo`, then chooses deterministically by sorted `agent_id`.

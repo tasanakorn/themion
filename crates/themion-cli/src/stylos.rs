@@ -80,7 +80,9 @@ pub struct StylosRemotePromptRequest {
     #[allow(dead_code)]
     pub request_id: Option<String>,
     pub from: Option<String>,
+    pub from_agent_id: Option<String>,
     pub to: Option<String>,
+    pub to_agent_id: Option<String>,
 }
 
 type StylosSnapshotFuture = Pin<Box<dyn Future<Output = StylosStatusSnapshot> + Send>>;
@@ -1250,7 +1252,9 @@ async fn handle_talk_query(
                 task_id: None,
                 request_id: req.request_id.clone(),
                 from: Some(sender.clone()),
+                from_agent_id: Some("main".to_string()),
                 to: Some(target),
+                to_agent_id: Some(agent.agent_id.clone()),
             });
             return TalkReply {
                 accepted: result.is_ok(),
@@ -1353,7 +1357,9 @@ async fn handle_task_request_query(
         task_id: Some(task_id.clone()),
         request_id: req.request_id.clone(),
         from: None,
+        from_agent_id: None,
         to: None,
+        to_agent_id: None,
     });
     if let Err(reason) = submit_result {
         query_context

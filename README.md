@@ -1,6 +1,6 @@
 # themion
 
-> Just another AI agent. Started as a weekend experiment — works on purpose. Built in Rust, runs in your terminal.
+> A terminal AI agent in Rust with a core local runtime, tool use, persistent history, and optional Stylos-powered mesh visibility and delegation.
 
 ```
 ████████╗██╗  ██╗███████╗███╗   ███╗██╗ ██████╗ ███╗   ██╗
@@ -11,9 +11,18 @@
    ╚═╝   ╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝
 ```
 
-themion is a Rust-powered AI agent with a full-featured TUI. Give it a task in plain English and watch it reason, call tools, and produce results — all from your terminal.
+themion is a Rust-powered AI agent with a full-featured TUI. Give it a task in plain English and it can reason, call tools, inspect your workspace, and produce results directly from your terminal.
+
+Themion keeps its core runtime local: workflows, tool execution, model calls, and persistent history all live in the current process. When built with the optional `stylos` feature, it can also participate in a mesh for presence, discovery, direct queries, talk, and lightweight task delegation across other Themion processes.
 
 > After 0.2.0, themion will use themion to help develop itself.
+
+## What Themion is
+
+- **A local agent runtime** — the main loop, tools, prompt assembly, workflow state, and session history run in-process
+- **A terminal-first UI** — Ratatui-based interaction with streaming output, keyboard navigation, and direct shell shortcuts
+- **A multi-backend coding agent** — Codex is the recommended default, with support for other OpenAI-compatible backends
+- **An optional Stylos consumer** — Stylos extends Themion with mesh visibility and controlled cross-process coordination; it does not replace Themion's execution engine
 
 ## Features
 
@@ -24,8 +33,61 @@ themion is a Rust-powered AI agent with a full-featured TUI. Give it a task in p
 - **Persistent session history** — SQLite-backed conversation history with windowed context and keyword search
 - **Multi-profile support** — Switch between providers and models on the fly with `/config profile use`
 - **Flexible backends** — Codex is the recommended default, with OpenRouter and local OpenAI-compatible servers like llama.cpp, Ollama, or LM Studio as alternatives
+- **Optional Stylos integration** — When compiled with `--features stylos`, discover other Themion processes, inspect status, send direct talk requests, and delegate lightweight tasks
 - **Print mode** — Pipe a single prompt and get a result; perfect for scripting
 - **Single binary** — Ships as one statically-linked executable with no runtime dependencies
+
+## Why Stylos in Themion?
+
+Stylos gives Themion a network-facing coordination layer without moving core agent execution out of process.
+
+In Themion, Stylos is used for:
+
+- **presence and discovery** — find live or free agents across the mesh
+- **status inspection** — query a specific Themion process for its current agent snapshot
+- **direct talk** — send sender-aware peer messages into another Themion agent's normal runtime
+- **lightweight task delegation** — enqueue work to another process and poll for status or results
+
+Stylos is **not** Themion's runtime. Themion still owns:
+
+- prompt construction and instruction injection
+- workflow and phase handling
+- tool execution
+- model/provider calls
+- persistent session history
+- the local TUI and operator experience
+
+What Stylos does **not** do in Themion:
+
+- it does not move core execution out of process
+- it does not provide a distributed scheduler or durable remote job system
+- it does not replace the local workflow/runtime loop
+
+A useful way to think about it:
+
+- **Themion** = local agent runtime and UX
+- **Stylos** = mesh visibility, addressing, and lightweight delegation between Themion processes
+
+## Stylos integration model
+
+When Stylos is enabled, Themion exposes one Stylos session per process and the status/query model supports multiple in-process agents through one process snapshot. In the first shipped step, Themion still usually boots one main interactive agent, but the reporting and query model already supports multiple agents per process.
+
+Key ideas:
+
+- **one process, one Stylos session**
+- **the status/query model can report multiple in-process agents from that process**
+- **discovery queries are mesh-wide** (`agents/alive`, `agents/free`, `agents/git`)
+- **direct queries target a specific instance** using `<hostname>:<pid>`
+- **Stylos session identity is hostname-based; direct Themion instance query paths use `<hostname>:<pid>`** as an application-level Themion path so multiple local processes can be addressed distinctly
+
+Example:
+
+- use discovery to find candidate agents across the mesh
+- use a direct instance query like `.../instances/<hostname>:<pid>/query/status` to inspect one specific Themion process
+
+Remote talk and task requests are accepted into the target process's normal local runtime; they are not synchronous remote execution. Task lifecycle tracking is lightweight and currently process-local and in-memory.
+
+This keeps remote coordination pragmatic: a remote task request is accepted into the target process and then runs through that agent's normal local runtime rather than becoming a separate distributed execution system.
 
 ## Installation
 
