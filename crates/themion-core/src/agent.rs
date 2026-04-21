@@ -72,6 +72,10 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+fn self_session_id_fallback() -> String {
+    "session-bound".to_string()
+}
+
 fn tool_call_detail(name: &str, args_json: &str) -> String {
     let args: serde_json::Value = serde_json::from_str(args_json).unwrap_or_default();
     let t = |key: &str| truncate(args[key].as_str().unwrap_or("?"), 60);
@@ -82,13 +86,30 @@ fn tool_call_detail(name: &str, args_json: &str) -> String {
         "fs_list_directory" | "list_directory" => format!("ls: {}", t("path")),
         "history_recall" | "recall_history" => format!(
             "history_recall: session={}",
-            truncate(args["session_id"].as_str().unwrap_or("current"), 60)
+            truncate(
+                &args["session_id"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| self_session_id_fallback()),
+                60
+            )
         ),
         "history_search" | "search_history" => format!("history_search: {}", t("query")),
         "workflow_get_state" | "get_workflow_state" => "workflow: inspect".to_string(),
         "workflow_set_active" | "set_workflow" => format!("workflow: set {}", t("workflow")),
         "workflow_set_phase" | "set_workflow_phase" => format!("workflow: phase {}", t("phase")),
         "workflow_complete" | "complete_workflow" => format!("workflow: complete {}", t("outcome")),
+        "stylos_request_talk" => format!(
+            "stylos_request_talk instance={} to_agent_id={}",
+            t("instance"),
+            truncate(
+                &args["to_agent_id"]
+                    .as_str()
+                    .or_else(|| args["agent_id"].as_str())
+                    .unwrap_or("main"),
+                60,
+            )
+        ),
         _ => name.to_string(),
     }
 }

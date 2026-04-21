@@ -69,6 +69,7 @@ tools.rs
   ├─ tool_definitions() → JSON schema array (sent every request)
   ├─ call_tool(name, args, ctx: &ToolCtx) → String
   │    ├─ fs_read_file, fs_write_file, fs_list_directory, shell_run_command  (ignore ctx)
+  │    ├─ time_sleep  ──► bounded non-shell wait for short sleeps
   │    ├─ history_recall  ──► ctx.db.recall(RecallArgs)
   │    ├─ history_search  ──► ctx.db.search(SearchArgs)
   │    └─ workflow_*  ──► workflow state inspection / transitions
@@ -124,6 +125,8 @@ Codex uses the OpenAI Responses API rather than Chat Completions. Its stream con
 ## Tools (tools.rs)
 
 All tools receive a `&ToolCtx` carrying the DB handle and session identity. Filesystem tools ignore it; history tools and workflow tools use it. Tool call display labels are truncated to 60 chars to keep TUI lines readable.
+
+`time_sleep` is a built-in bounded wait helper for short pauses. It accepts `ms`, rejects values above 30,000, and lets the agent express lightweight waiting without shelling out to `sleep`.
 
 ## Persistent History (db.rs)
 
@@ -206,7 +209,11 @@ Examples:
 ### Request and task query behavior
 
 - `status` returns the current process snapshot and supports optional `agent_id` and `role` filtering. Filters can be used independently or together. Unknown filters return `not_found`.
-- `talk` validates that the requested agent exists and is currently `idle` or `nap`, then enqueues the message through the CLI-local remote prompt bridge and routes execution to that local agent when present, returning an acknowledgement or rejection.
+- `talk` accepts mandatory target `instance`, optional `to_agent_id`, and optional `wait_for_idle_timeout_ms`; sender identity is resolved automatically by the local runtime.
+- accepted `talk` requests are injected into the local agent turn as a peer-message wrapper with exact `from=<hostname>:<pid>` and `to=<hostname>:<pid>` identifiers, plus reply guidance using `***QRU***`.;
+- when an outbound `stylos_request_talk` call is accepted, the sender-side TUI emits `Stylos talk to=<hostname>:<pid> from=<hostname>:<pid>` using the same exact identifier format.
+- `talk` keeps acknowledgement-oriented semantics: it reports delivery acceptance or rejection and does not wait for the remote agent’s final natural-language answer.
+- when the target agent is busy and `wait_for_idle_timeout_ms` is positive, the CLI query layer polls the exported snapshot until the peer becomes `idle` or `nap` or the timeout expires; timeout produces `timed_out_waiting_for_idle`.
 - `tasks/request` filters local candidates using the current snapshot, optional `preferred_agent_id`, optional `required_roles`, and optional `require_git_repo`, then chooses deterministically by sorted `agent_id`.
 - `tasks/status` returns the current in-memory lifecycle state for a previously accepted task.
 - `tasks/result` returns immediately for terminal tasks, returns current non-terminal state when `wait_timeout_ms` is omitted or zero, and otherwise waits up to the requested timeout clamped to 60,000 ms.

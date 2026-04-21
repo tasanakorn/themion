@@ -67,7 +67,8 @@ The query layer makes best-effort decisions from the current local snapshot rath
 That includes:
 
 - `free` discovery using exported `activity_status`
-- `talk` acceptance requiring the requested agent to be present and currently `idle` or `nap`
+- `talk` acceptance requiring the requested agent to be present and currently `idle` or `nap`, unless the caller provides positive `wait_for_idle_timeout_ms`
+- `talk` busy-peer waiting polling the exported snapshot until the target becomes available or the timeout expires
 - `tasks/request` candidate selection using the exported agent list, role metadata, git-repo metadata, and current activity state
 - Zenoh-level `stylos_query_nodes` using `session.info()` from the active local Stylos session rather than Themion mesh queryables
 
@@ -97,6 +98,45 @@ That means:
 - strict local `agent_id` execution targeting has landed for the current process-local agent set
 - the query layer still relies on snapshot-based selection and a CLI-local in-process bridge rather than a durable scheduler
 - this preserves the current harness architecture while still making the query and task surface useful for discovery, request submission, and best-effort status lookup
+
+## Sender-aware talk prompt injection
+
+Stylos `talk` now resolves sender identity automatically and carries exact instance identifiers through the CLI-local bridge:
+
+- sender-side local instance `from` resolved automatically as exact `<hostname>:<pid>`
+- mandatory target `to` in exact `<hostname>:<pid>` form
+- optional `to_agent_id` on the request input, defaulting to `main`
+- optional `request_id`
+- optional `wait_for_idle_timeout_ms`
+
+When a `talk` request is accepted, the CLI does not inject the raw message directly. Instead it wraps the message in a peer-message prompt that tells the receiving agent:
+
+- who sent the message
+- which local agent received it
+- that it should reply only when a materially useful response is needed
+- that `***QRU***` means no further reply is normally needed
+- that empty acknowledgements and thank-you-only replies should be avoided
+
+This keeps sender identity and reply guidance visible to the model in the harness prompt path rather than hidden only in transport metadata.
+
+When the local agent invokes `stylos_request_talk` and the request is accepted, the TUI also emits a sender-side chat-panel event line in exact identifier form:
+
+- `Stylos talk to=<hostname>:<pid> from=<hostname>:<pid>`
+
+This sender-side log is distinct from generic tool-call text and is intended to make outbound peer messaging visible in the chat transcript.
+
+## Lightweight wait tool
+
+`themion-core` now exposes a built-in `time_sleep` tool for short bounded waits.
+
+Current behavior:
+
+- accepts `ms`
+- sleeps without invoking the shell
+- rejects durations above 30,000 ms
+- returns structured JSON with the slept duration
+
+This is intended for lightweight pauses and retry gaps. It is not a general scheduler or background timer system.
 
 ## CLI-local transcript review boundary
 

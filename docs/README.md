@@ -35,6 +35,8 @@
 | PRD-023 | [Use External Stylos Repository Instead of Vendored Workspace Copy](prd/prd-023-use-external-stylos-repository-instead-of-vendored-workspace-copy.md) | Implemented   | v0.13.0 | workspace, `themion-cli`, docs |
 | PRD-024 | [Client-Side Git Repo Identity Normalization for Stylos Agent Git Queries](prd/prd-024-client-side-git-repo-identity-normalization-for-stylos-agent-git-queries.md) | Implemented   | v0.13.1 | `themion-core`, `themion-cli`, docs |
 | PRD-025 | [Long-Session Chat History Navigation in the TUI](prd/prd-025-long-session-chat-history-navigation.md) | Implemented | v0.14.0 | `themion-cli`, docs |
+| PRD-026 | [Stylos Talk Sender Identity, Prompt Wiring, Busy-Peer Reply Handling, and Lightweight Wait Tool](prd/prd-026-stylos-talk-sender-identity-and-reply-wiring.md) | Implemented | v0.15.0 | `themion-core`, `themion-cli`, docs |
+| PRD-027 | [Sender-Side Stylos Talk `from` and `to` Identifier Semantics](prd/prd-027-stylos-talk-from-and-to-identifiers.md) | Implemented | v0.15.1 | `themion-cli`, docs |
 
 ## Roadmap note
 

@@ -69,7 +69,12 @@ enum Entry {
     ToolCall(String),
     ToolDone,
     Status(String),
-    TurnDone { summary: String, stats: String },
+    #[cfg(feature = "stylos")]
+    RemoteEvent(String),
+    TurnDone {
+        summary: String,
+        stats: String,
+    },
     Stats(String),
     Blank,
 }
@@ -723,6 +728,8 @@ impl<'a> App<'a> {
             }
             AgentEvent::ToolEnd => {
                 self.push(Entry::ToolDone);
+                #[cfg(feature = "stylos")]
+                self.maybe_log_sender_side_stylos_talk();
                 self.set_agent_activity(AgentActivity::WaitingAfterTool);
             }
             AgentEvent::Status(text) => {
@@ -795,6 +802,33 @@ impl<'a> App<'a> {
                     self.last_assistant_text = None;
                 }
             }
+        }
+    }
+
+    #[cfg(feature = "stylos")]
+    fn maybe_log_sender_side_stylos_talk(&mut self) {
+        let Some(Entry::ToolDone) = self.entries.last() else {
+            return;
+        };
+        let Some(Entry::ToolCall(detail)) = self.entries.iter().rev().nth(1) else {
+            return;
+        };
+        if !detail.starts_with("stylos_request_talk") {
+            return;
+        }
+        let Some(handle) = self.stylos.as_ref() else {
+            return;
+        };
+        let local_instance = match handle.state() {
+            StylosRuntimeState::Active { instance, .. } => instance.as_str(),
+            _ => return,
+        };
+
+        if let Some(target) = extract_stylos_talk_target_from_detail(detail) {
+            self.push(Entry::RemoteEvent(format!(
+                "Stylos talk to={} from={}",
+                target, local_instance,
+            )));
         }
     }
 
@@ -1195,6 +1229,16 @@ impl<'a> App<'a> {
         }
 
         #[cfg(feature = "stylos")]
+        if let Some(remote) = self.active_remote_request.as_ref() {
+            let sender = remote.from.as_deref().unwrap_or("unknown sender");
+            let target = remote.to.as_deref().unwrap_or("unknown target");
+            self.push(Entry::RemoteEvent(format!(
+                "Stylos talk from={} to={}",
+                sender, target,
+            )));
+        }
+
+        #[cfg(feature = "stylos")]
         let target_agent_id = self
             .active_remote_request
             .as_ref()
@@ -1225,6 +1269,22 @@ impl<'a> App<'a> {
         let text: String = self.input.lines().join("\n");
         self.submit_text(text, app_tx);
     }
+}
+
+
+#[cfg(feature = "stylos")]
+fn extract_stylos_talk_target_from_detail(detail: &str) -> Option<&str> {
+    let prefix = "stylos_request_talk ";
+    let rest = detail.strip_prefix(prefix)?;
+    for field in rest.split_whitespace() {
+        if let Some(value) = field.strip_prefix("instance=") {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+    }
+    None
 }
 
 fn format_human_count(n: u64) -> String {
@@ -1508,6 +1568,13 @@ fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Lin
                         Span::raw(part.to_string()),
                     ]));
                 }
+            }
+            #[cfg(feature = "stylos")]
+            Entry::RemoteEvent(text) => {
+                lines.push(Line::from(vec![Span::styled(
+                    format!("  󰀂 {}", text),
+                    Style::default().fg(Color::Magenta),
+                )]));
             }
             Entry::Banner(text) => {
                 for part in text.lines() {
@@ -2032,12 +2099,26 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
             Some(AppEvent::Tick) => app.on_tick(),
             #[cfg(feature = "stylos")]
             Some(AppEvent::StylosCmd(cmd)) => {
+                #[cfg(feature = "stylos")]
+                app.push(Entry::RemoteEvent(format!(
+                    "Stylos cmd scope=local preview={}",
+                    cmd.prompt.lines().next().unwrap_or("")
+                )));
                 app.active_remote_request = None;
                 app.submit_text(cmd.prompt, &app_tx);
             }
             #[cfg(feature = "stylos")]
             Some(AppEvent::StylosRemotePrompt(request)) => {
+                let target = request
+                    .agent_id
+                    .clone()
+                    .unwrap_or_else(|| "interactive".to_string());
                 if app.agent_busy {
+                    let sender = request.from.as_deref().unwrap_or("unknown sender");
+                    app.push(Entry::RemoteEvent(format!(
+                        "Stylos hear from={} for={} rejected: local agent busy",
+                        sender, target
+                    )));
                     if let (Some(handle), Some(task_id)) =
                         (app.stylos.as_ref(), request.task_id.clone())
                     {
@@ -2052,6 +2133,11 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                         });
                     }
                 } else {
+                    let sender = request.from.as_deref().unwrap_or("unknown sender");
+                    app.push(Entry::RemoteEvent(format!(
+                        "Stylos hear from={} to={}",
+                        sender, target
+                    )));
                     app.active_remote_request = Some(request.clone());
                     app.submit_text(request.prompt, &app_tx);
                 }
@@ -2177,12 +2263,18 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
     Ok(())
 }
 
-fn area_page_height(terminal: &Terminal<CrosstermBackend<std::io::Stdout>>, app: &App<'_>) -> usize {
+fn area_page_height(
+    terminal: &Terminal<CrosstermBackend<std::io::Stdout>>,
+    app: &App<'_>,
+) -> usize {
     let area = terminal.size().map(|r| r.height as usize).unwrap_or(24);
     let reserved = 8usize + 3usize;
     let conv = area.saturating_sub(reserved).max(1);
     if app.review_mode == ReviewMode::Transcript {
-        conv.saturating_mul(85).saturating_div(100).saturating_sub(2).max(1)
+        conv.saturating_mul(85)
+            .saturating_div(100)
+            .saturating_sub(2)
+            .max(1)
     } else {
         conv.saturating_sub(1).max(1)
     }
@@ -2205,7 +2297,9 @@ fn current_total_and_height(
     } else {
         size
     };
-    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(Block::default());
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default());
     let height = if app.review_mode == ReviewMode::Transcript {
         area.height.saturating_sub(2) as usize
     } else {
@@ -2253,7 +2347,7 @@ mod tests {
 
     #[test]
     fn validate_agent_roles_rejects_two_main() {
-        let agents = vec![handle("a", &["main"]), handle("b", &["main"] )];
+        let agents = vec![handle("a", &["main"]), handle("b", &["main"])];
         assert!(validate_agent_roles(&agents).is_err());
     }
 
@@ -2312,6 +2406,8 @@ mod tests {
             agent_id: Some("worker".to_string()),
             task_id: None,
             request_id: None,
+            from: Some("peer-1:1234".to_string()),
+            to: Some("peer-2:5678".to_string()),
         };
         let target = request.agent_id.as_deref();
         let index = target
@@ -2319,5 +2415,23 @@ mod tests {
             .or_else(|| agents.iter().position(is_interactive_handle))
             .unwrap();
         assert_eq!(agents[index].agent_id, "worker");
+    }
+
+
+    #[test]
+    fn extract_stylos_talk_target_from_detail_reads_exact_instance() {
+        let detail = "stylos_request_talk instance=node-2:77, to_agent_id=main, message=hello";
+        assert_eq!(extract_stylos_talk_target_from_detail(detail), Some("node-2:77,"));
+    }
+
+    #[test]
+    fn sender_side_stylos_talk_log_format_is_exact() {
+        let target = extract_stylos_talk_target_from_detail(
+            "stylos_request_talk instance=node-2:77 to_agent_id=main"
+        )
+        .unwrap();
+        let text = format!("Stylos talk to={} from={}", target, "node-1:42");
+        assert_eq!(text, "Stylos talk to=node-2:77 from=node-1:42");
+        assert!(!text.contains('/'));
     }
 }
