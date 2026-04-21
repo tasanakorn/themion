@@ -11,12 +11,15 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 #[cfg(feature = "stylos")]
 type StylosToolFuture = Pin<Box<dyn Future<Output = Result<String>> + Send>>;
 #[cfg(feature = "stylos")]
 pub type StylosToolInvoker = Arc<dyn Fn(String, Value) -> StylosToolFuture + Send + Sync>;
+
+const MAX_SLEEP_MS: u64 = 30_000;
 
 pub struct ToolCtx {
     pub db: Arc<DbHandle>,
@@ -90,12 +93,26 @@ pub fn tool_definitions() -> Value {
         json!({
             "type": "function",
             "function": {
+                "name": "time_sleep",
+                "description": "Sleep for a short bounded duration without invoking the shell.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ms": { "type": "integer", "description": "Milliseconds to sleep. Max 30000." }
+                    },
+                    "required": ["ms"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "history_recall",
                 "description": "Retrieve earlier conversation messages from persistent history.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "session_id": { "type": "string", "description": "UUID of session. Defaults to current." },
+                        "session_id": { "type": "string", "description": "UUID of session. Optional; omitted means use the active session." },
                         "project_dir": { "type": "string", "description": "Filter by project directory." },
                         "limit": { "type": "integer", "description": "Max messages (default 20, max 200)." },
                         "direction": { "type": "string", "enum": ["newest", "oldest"] }
@@ -228,8 +245,14 @@ fn stylos_tool_definitions() -> Vec<Value> {
         stylos_tool("stylos_query_status", "Ask one instance for its current process and agent status. Optional agent_id and role filters may be provided independently or together.", json!({
             "type":"object","properties":{"instance":{"type":"string"},"agent_id":{"type":"string"},"role":{"type":"string"}},"required":["instance"]
         })),
-        stylos_tool("stylos_request_talk", "Submit a user-style message to one target agent.", json!({
-            "type":"object","properties":{"instance":{"type":"string"},"agent_id":{"type":"string"},"message":{"type":"string"},"request_id":{"type":"string"}},"required":["instance","agent_id","message"]
+        stylos_tool("stylos_request_talk", "Submit a sender-aware user-style message to one target instance. Sender identity is resolved automatically by the app; do not pass sender fields. Optional to_agent_id selects the target local agent and defaults to main.", json!({
+            "type":"object","properties":{
+                "instance":{"type":"string","description":"Target instance identifier in exact <hostname>:<pid> form."},
+                "to_agent_id":{"type":"string","description":"Optional target agent id on the remote instance. Defaults to main."},
+                "message":{"type":"string"},
+                "request_id":{"type":"string"},
+                "wait_for_idle_timeout_ms":{"type":"integer","description":"Optional bounded wait in milliseconds for target availability."}
+            },"required":["instance","message"]
         })),
         stylos_tool("stylos_request_task", "Submit a structured task request for local agent routing.", json!({
             "type":"object","properties":{"instance":{"type":"string"},"task":{"type":"string"},"preferred_agent_id":{"type":"string"},"required_roles":{"type":"array","items":{"type":"string"}},"require_git_repo":{"type":"boolean"},"request_id":{"type":"string"}},"required":["instance","task"]
@@ -309,6 +332,16 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             Ok(format!("{stdout}{stderr}"))
+        }
+        "time_sleep" => {
+            let ms = args["ms"]
+                .as_u64()
+                .ok_or_else(|| anyhow::anyhow!("missing ms"))?;
+            if ms > MAX_SLEEP_MS {
+                anyhow::bail!("ms exceeds maximum {MAX_SLEEP_MS}");
+            }
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            Ok(json!({"slept_ms": ms}).to_string())
         }
         "history_recall" | "recall_history" => {
             let session_id = args["session_id"]

@@ -30,6 +30,7 @@ const GIT_STATUS_TTL: Duration = Duration::from_secs(30);
 const TASK_RETENTION: Duration = Duration::from_secs(30 * 60);
 const MAX_WAIT_TIMEOUT_MS: u64 = 60_000;
 const DISCOVERY_QUERY_TIMEOUT_MS: u64 = 1_500;
+const TALK_POLL_INTERVAL_MS: u64 = 300;
 
 #[derive(Clone, Debug)]
 pub enum StylosRuntimeState {
@@ -78,6 +79,8 @@ pub struct StylosRemotePromptRequest {
     pub task_id: Option<String>,
     #[allow(dead_code)]
     pub request_id: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
 }
 
 type StylosSnapshotFuture = Pin<Box<dyn Future<Output = StylosStatusSnapshot> + Send>>;
@@ -161,9 +164,16 @@ impl StylosToolBridge {
             "stylos_request_talk" => {
                 let instance = required_string(&args, "instance")?;
                 let req = TalkRequest {
-                    agent_id: required_string(&args, "agent_id")?,
+                    to_agent_id: optional_string(&args, "to_agent_id")
+                        .or_else(|| optional_string(&args, "agent_id"))
+                        .unwrap_or_else(|| "main".to_string()),
                     message: required_string(&args, "message")?,
                     request_id: optional_string(&args, "request_id"),
+                    from: Some(self.instance.clone()),
+                    to: Some(instance.clone()),
+                    wait_for_idle_timeout_ms: args
+                        .get("wait_for_idle_timeout_ms")
+                        .and_then(|v| v.as_u64()),
                 };
                 serde_json::to_value(
                     self.query_instance::<TalkReply, _>(&instance, "talk", Some(&req))
@@ -196,8 +206,12 @@ impl StylosToolBridge {
                     task_id: required_string(&args, "task_id")?,
                 };
                 serde_json::to_value(
-                    self.query_instance::<TaskLookupReply, _>(&instance, "tasks/status", Some(&req))
-                        .await?,
+                    self.query_instance::<TaskLookupReply, _>(
+                        &instance,
+                        "tasks/status",
+                        Some(&req),
+                    )
+                    .await?,
                 )?
             }
             "stylos_query_task_result" => {
@@ -207,8 +221,12 @@ impl StylosToolBridge {
                     wait_timeout_ms: args.get("wait_timeout_ms").and_then(|v| v.as_u64()),
                 };
                 serde_json::to_value(
-                    self.query_instance::<TaskLookupReply, _>(&instance, "tasks/result", Some(&req))
-                        .await?,
+                    self.query_instance::<TaskLookupReply, _>(
+                        &instance,
+                        "tasks/result",
+                        Some(&req),
+                    )
+                    .await?,
                 )?
             }
             _ => anyhow::bail!("unknown stylos tool: {name}"),
@@ -282,8 +300,7 @@ impl StylosToolBridge {
                     let sample = reply
                         .into_result()
                         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-                    let value =
-                        serde_cbor::from_slice::<T>(sample.payload().to_bytes().as_ref())?;
+                    let value = serde_cbor::from_slice::<T>(sample.payload().to_bytes().as_ref())?;
                     if decoded.is_some() {
                         anyhow::bail!(
                             "protocol error: multiple replies for direct Stylos query key {key}"
@@ -294,9 +311,9 @@ impl StylosToolBridge {
                 Ok(None) | Err(_) => break,
             }
         }
-        decoded.ok_or_else(|| anyhow::anyhow!(
-            "timeout/offline: no responder for Stylos query key {key}"
-        ))
+        decoded.ok_or_else(|| {
+            anyhow::anyhow!("timeout/offline: no responder for Stylos query key {key}")
+        })
     }
 }
 
@@ -336,7 +353,8 @@ impl StylosToolBridge {
                         Ok(sample) => sample,
                         Err(err) => return Err(anyhow::anyhow!(err.to_string())),
                     };
-                    let decoded = serde_cbor::from_slice::<T>(sample.payload().to_bytes().as_ref())?;
+                    let decoded =
+                        serde_cbor::from_slice::<T>(sample.payload().to_bytes().as_ref())?;
                     if exclude_self && decoded.instance() == self.instance {
                         continue;
                     }
@@ -348,7 +366,6 @@ impl StylosToolBridge {
         Ok(out)
     }
 }
-
 
 trait DiscoveryInstanceOwned {
     fn instance(&self) -> &str;
@@ -584,9 +601,12 @@ struct GitQueryRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct TalkRequest {
-    agent_id: String,
+    to_agent_id: String,
     message: String,
     request_id: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    wait_for_idle_timeout_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -888,8 +908,14 @@ async fn start_inner(
     let q_alive_key = format!("stylos/{}/themion/query/agents/alive", realm);
     let q_free_key = format!("stylos/{}/themion/query/agents/free", realm);
     let q_git_key = format!("stylos/{}/themion/query/agents/git", realm);
-    let q_status_key = format!("stylos/{}/themion/instances/{}/query/status", realm, key_instance);
-    let q_talk_key = format!("stylos/{}/themion/instances/{}/query/talk", realm, key_instance);
+    let q_status_key = format!(
+        "stylos/{}/themion/instances/{}/query/status",
+        realm, key_instance
+    );
+    let q_talk_key = format!(
+        "stylos/{}/themion/instances/{}/query/talk",
+        realm, key_instance
+    );
     let q_task_request_key = format!(
         "stylos/{}/themion/instances/{}/query/tasks/request",
         realm, key_instance
@@ -1176,54 +1202,85 @@ async fn handle_talk_query(
             reason: Some("invalid_request".to_string()),
         };
     };
-    let Some(snapshot) = current_snapshot(snapshot_provider).await else {
+    let wait_for_idle_timeout_ms = req.wait_for_idle_timeout_ms.unwrap_or(0);
+    if wait_for_idle_timeout_ms > MAX_WAIT_TIMEOUT_MS {
         return TalkReply {
             accepted: false,
-            agent_id: req.agent_id,
+            agent_id: req.to_agent_id,
             request_id: req.request_id,
             correlation_id: None,
-            reason: Some("snapshot_unavailable".to_string()),
-        };
-    };
-    let agent = snapshot
-        .agents
-        .into_iter()
-        .find(|a| a.agent_id == req.agent_id);
-    let Some(agent) = agent else {
-        return TalkReply {
-            accepted: false,
-            agent_id: req.agent_id,
-            request_id: req.request_id,
-            correlation_id: None,
-            reason: Some("not_found".to_string()),
-        };
-    };
-    if !matches!(agent.activity_status.as_str(), "idle" | "nap") {
-        return TalkReply {
-            accepted: false,
-            agent_id: agent.agent_id,
-            request_id: req.request_id,
-            correlation_id: None,
-            reason: Some("agent_busy".to_string()),
+            reason: Some("wait_for_idle_timeout_ms_too_large".to_string()),
         };
     }
-    let correlation_id = format!("talk-{}", Uuid::new_v4());
-    let result = query_context.submit_prompt(StylosRemotePromptRequest {
-        prompt: req.message,
-        agent_id: Some(agent.agent_id.clone()),
-        task_id: None,
-        request_id: req.request_id.clone(),
-    });
-    TalkReply {
-        accepted: result.is_ok(),
-        agent_id: agent.agent_id,
-        request_id: req.request_id,
-        correlation_id: if result.is_ok() {
-            Some(correlation_id)
-        } else {
-            None
-        },
-        reason: result.err(),
+
+    let deadline = Instant::now() + Duration::from_millis(wait_for_idle_timeout_ms);
+
+    loop {
+        let Some(snapshot) = current_snapshot(snapshot_provider).await else {
+            return TalkReply {
+                accepted: false,
+                agent_id: req.to_agent_id,
+                request_id: req.request_id,
+                correlation_id: None,
+                reason: Some("snapshot_unavailable".to_string()),
+            };
+        };
+        let agent = snapshot
+            .agents
+            .into_iter()
+            .find(|a| a.agent_id == req.to_agent_id);
+        let Some(agent) = agent else {
+            return TalkReply {
+                accepted: false,
+                agent_id: req.to_agent_id,
+                request_id: req.request_id,
+                correlation_id: None,
+                reason: Some("not_found".to_string()),
+            };
+        };
+
+        if matches!(agent.activity_status.as_str(), "idle" | "nap") {
+            let correlation_id = format!("talk-{}", Uuid::new_v4());
+            let sender = render_instance_identifier(req.from.as_deref());
+            let target = render_instance_identifier(req.to.as_deref());
+            let prompt = build_peer_message_prompt(&sender, &target, &agent.agent_id, &req.message);
+            let result = query_context.submit_prompt(StylosRemotePromptRequest {
+                prompt,
+                agent_id: Some(agent.agent_id.clone()),
+                task_id: None,
+                request_id: req.request_id.clone(),
+                from: Some(sender.clone()),
+                to: Some(target),
+            });
+            return TalkReply {
+                accepted: result.is_ok(),
+                agent_id: agent.agent_id,
+                request_id: req.request_id,
+                correlation_id: if result.is_ok() {
+                    Some(correlation_id)
+                } else {
+                    None
+                },
+                reason: result.err(),
+            };
+        }
+
+        if wait_for_idle_timeout_ms == 0 || Instant::now() >= deadline {
+            return TalkReply {
+                accepted: false,
+                agent_id: agent.agent_id,
+                request_id: req.request_id,
+                correlation_id: None,
+                reason: Some(if wait_for_idle_timeout_ms == 0 {
+                    "agent_busy".to_string()
+                } else {
+                    "timed_out_waiting_for_idle".to_string()
+                }),
+            };
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        tokio::time::sleep(remaining.min(Duration::from_millis(TALK_POLL_INTERVAL_MS))).await;
     }
 }
 
@@ -1295,6 +1352,8 @@ async fn handle_task_request_query(
         agent_id: Some(agent.agent_id.clone()),
         task_id: Some(task_id.clone()),
         request_id: req.request_id.clone(),
+        from: None,
+        to: None,
     });
     if let Err(reason) = submit_result {
         query_context
@@ -1618,6 +1677,33 @@ fn unix_epoch_now_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn render_instance_identifier(instance: Option<&str>) -> String {
+    instance
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("external")
+        .to_string()
+}
+
+fn build_peer_message_prompt(
+    sender: &str,
+    target: &str,
+    local_agent_id: &str,
+    message: &str,
+) -> String {
+    format!(
+        "type=peer_message from={sender} to={target} to_agent_id={local_agent_id}
+
+Reply through Stylos talk if and only if a useful response is needed.
+If your response completes the exchange and no further reply should be sent, include ***QRU***.
+Do not send empty acknowledgements or thank-you-only replies.
+Prefer one concise useful response rather than a conversational back-and-forth.
+Treat received ***QRU*** as a strong signal that no reply is needed unless there is important corrective information.
+
+{message}"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1760,6 +1846,25 @@ mod tests {
             .await;
         let entry = registry.wait_for_terminal("task-1", 10).await.unwrap();
         assert_eq!(entry.state, "queued");
+    }
+
+    #[test]
+    fn sender_identity_falls_back_for_external_sender() {
+        assert_eq!(render_instance_identifier(None), "external");
+    }
+
+    #[test]
+    fn instance_identifier_uses_instance_only() {
+        assert_eq!(render_instance_identifier(Some("node-1:42")), "node-1:42");
+        assert_eq!(render_instance_identifier(None), "external");
+    }
+
+    #[test]
+    fn peer_prompt_mentions_qru_and_sender() {
+        let prompt = build_peer_message_prompt("node-1:42", "node-2:77", "main", "hello");
+        assert!(prompt.contains("***QRU***"));
+        assert!(prompt.contains("type=peer_message from=node-1:42 to=node-2:77 to_agent_id=main"));
+        assert!(prompt.contains("hello"));
     }
 }
 

@@ -126,6 +126,8 @@ Typical feature checks for `themion-cli`:
 - Do not assume common local tools such as `rg` are available; fall back to standard shell tools or verified alternatives.
 - When adding a new exported/status field, trace where it is produced and consumed so paired changes land together.
 - For activity/status transitions, track both the state value and the time the state changed so downstream consumers can interpret snapshots correctly.
+- Keep debug and protocol text formats consistent across producers, consumers, and tests; if you choose a structured format, reuse it everywhere.
+- For low-level or debug-oriented message headers, prefer explicit `key=value` fields with a stable type tag such as `type=peer_message` rather than positional text.
 - If asked to commit, keep commits scoped unless the user explicitly requests committing all pending changes.
 - Feature-flag regressions are easy to miss; when touching gated code, verify the crate still builds with the feature enabled and disabled as relevant.
 - When editing code, avoid leaving newly introduced warnings behind; either fix them in the touched area or call them out clearly if blocked.
