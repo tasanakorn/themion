@@ -192,6 +192,8 @@ Current normalization behavior:
 - trims surrounding `/`
 - ignores a trailing `.git`
 - emits canonical keys in the form `<host>/<owner>/<repo>`
+- accepts query selectors either as raw remotes or as direct comparable identities such as `github.com/example/themion`
+- requester-side normalization is preferred when the selector depends on caller-local context such as SSH aliases, mirror rewrites, or other shorthand the responder cannot safely reconstruct
 - returns no normalized key for unsupported hosts, so matching falls back to exact raw remote comparison instead of guessing
 
 Examples:
