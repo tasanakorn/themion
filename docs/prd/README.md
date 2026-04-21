@@ -43,6 +43,18 @@ Start each PRD with a title and metadata block like the existing PRDs:
 
 Default status should be `Proposed` unless there is a clear reason to use another status.
 
+### Summary / TL;DR
+
+After the metadata block, add a short plain-language summary section before the main body:
+
+- Use the heading `## Summary`.
+- Keep it short, usually 3–7 flat bullets.
+- Explain the proposal in simple terms so a reader can quickly understand the approach without reading the full PRD.
+- Prefer direct language such as "keep X, add Y, avoid Z" over abstract product or architecture phrasing.
+- When useful, include one bullet for the main problem, one for the proposed approach, and one for what explicitly stays unchanged.
+
+This section is for fast comprehension, not for replacing the full PRD.
+
 ### Short semver guideline
 
 Use the PRD `Version` field to record the intended release target using semantic versioning:
@@ -67,6 +79,7 @@ Use these top-level sections in this order when they are relevant:
 8. Testing
 
 Rules:
+- The `## Summary` section appears before these canonical sections.
 - Omit sections that would only contain placeholders.
 - Do not add filler text such as `None` just to preserve numbering.
 - Keep top-level headings as `##`.
@@ -113,6 +126,13 @@ Rules:
 - Make verification observable and concrete.
 - Prefer behavior-focused validation over vague statements.
 
+### Implementation checklist
+- If the PRD describes intended implementation work in enough detail to guide coding, add an `## Implementation checklist` section near the end of the PRD.
+- Use markdown task list items such as `- [ ]` while the work is proposed or in progress.
+- Update items to `- [x]` as implementation lands when the PRD is later updated to reflect shipped work.
+- Keep the checklist scoped to concrete implementation slices implied by the PRD; do not turn it into a generic restatement of every paragraph.
+- Omit the section only when the PRD is purely exploratory, historical, or otherwise not pretending to define an implementation path.
+
 ## Style
 
 Match the style of neighboring PRDs:
@@ -122,6 +142,7 @@ Match the style of neighboring PRDs:
 - Similar metadata formatting.
 - Similar table formatting.
 - Use blockquote admonitions only when actually needed, such as supersession notes.
+- Keep the `## Summary` section plain-language and easy to skim.
 
 The finished PRD should look visually consistent with nearby PRDs in `docs/prd/`.
 
@@ -141,9 +162,11 @@ Before finishing:
 - PRD number is the next sequential number.
 - Filename matches `prd-NNN-<slug>.md`.
 - Header metadata is complete.
+- Add a `## Summary` section after the metadata block.
 - Top-level sections follow the required order.
 - Empty sections were omitted.
 - Major design choices include inline `Alternative considered` notes.
 - Testing uses `step → verify:` lines.
+- Add an `Implementation checklist` section when the PRD defines an implementation path.
 - `docs/README.md` PRD table was updated.
 - Structure and voice match recent PRDs.
