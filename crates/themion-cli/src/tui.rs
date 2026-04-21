@@ -51,6 +51,8 @@ enum AppEvent {
     StylosCmd(crate::stylos::StylosCmdRequest),
     #[cfg(feature = "stylos")]
     StylosRemotePrompt(StylosRemotePromptRequest),
+    #[cfg(feature = "stylos")]
+    StylosEvent(String),
     LoginPrompt {
         user_code: String,
         verification_uri: String,
@@ -313,6 +315,8 @@ impl<'a> App<'a> {
             db.clone(),
             #[cfg(feature = "stylos")]
             stylos_tool_bridge.clone(),
+            #[cfg(feature = "stylos")]
+            "main",
         )
         .expect("failed to build agent");
         let initial_model_info = session.model_info.clone();
@@ -825,9 +829,6 @@ impl<'a> App<'a> {
         let Some(Entry::ToolCall(detail)) = self.entries.iter().rev().nth(1) else {
             return;
         };
-        if !detail.starts_with("stylos_request_talk") {
-            return;
-        }
         let Some(handle) = self.stylos.as_ref() else {
             return;
         };
@@ -836,10 +837,25 @@ impl<'a> App<'a> {
             _ => return,
         };
 
-        if let Some(target) = extract_stylos_talk_target_from_detail(detail) {
+        if detail.starts_with("stylos_request_talk") {
+            if let Some(target) = extract_stylos_talk_target_from_detail(detail) {
+                self.push(Entry::RemoteEvent(format!(
+                    "Stylos talk to={} from={}",
+                    target, local_instance,
+                )));
+            }
+            return;
+        }
+
+        if detail.starts_with("board_create_note") {
+            let mode = if self.stylos_tool_bridge.is_some() {
+                "send request via stylos"
+            } else {
+                "create local"
+            };
             self.push(Entry::RemoteEvent(format!(
-                "Stylos talk to={} from={}",
-                target, local_instance,
+                "board_create_note {} from={} detail={}",
+                mode, local_instance, detail
             )));
         }
     }
@@ -961,6 +977,8 @@ impl<'a> App<'a> {
                             self.db.clone(),
                             #[cfg(feature = "stylos")]
                             self.stylos_tool_bridge.clone(),
+                            #[cfg(feature = "stylos")]
+                            "main",
                         ) {
                             Ok(new_agent) => {
                                 let db = self.db.clone();
@@ -1276,7 +1294,9 @@ impl<'a> App<'a> {
         let Some(instance) = self.local_stylos_instance.clone() else {
             return;
         };
-        let Some(agent_id) = self.agents.iter().find(|h| is_interactive_handle(h)).map(|h| h.agent_id.clone()) else {
+        let interactive_agent_id = self.agents.iter().find(|h| is_interactive_handle(h)).map(|h| h.agent_id.clone());
+        let main_agent_id = self.agents.iter().find(|h| h.roles.iter().any(|r| r == "main")).map(|h| h.agent_id.clone());
+        let Some(agent_id) = interactive_agent_id.or(main_agent_id) else {
             return;
         };
         let Ok(Some(note)) = self.db.next_stylos_note_for_injection(&instance, &agent_id) else {
@@ -1414,9 +1434,17 @@ fn stylos_tool_invoker(
     bridge.map(|bridge| {
         std::sync::Arc::new(move |name: String, args: serde_json::Value| {
             let bridge = bridge.clone();
+            let local_agent_id = args
+                .get("_local_agent_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
             let fut: std::pin::Pin<
                 Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>,
-            > = Box::pin(async move { bridge.invoke(&name, args).await });
+            > = Box::pin(async move {
+                bridge
+                    .invoke(local_agent_id.as_deref(), &name, args)
+                    .await
+            });
             fut
         }) as themion_core::tools::StylosToolInvoker
     })
@@ -1428,6 +1456,7 @@ fn build_agent(
     project_dir: PathBuf,
     db: Arc<DbHandle>,
     #[cfg(feature = "stylos")] stylos_tool_bridge: Option<StylosToolBridge>,
+    #[cfg(feature = "stylos")] local_agent_id: &str,
 ) -> anyhow::Result<Agent> {
     use themion_core::ChatBackend;
     let client: Box<dyn ChatBackend + Send + Sync> = match session.provider.as_str() {
@@ -1477,6 +1506,8 @@ fn build_agent(
         project_dir,
         db,
     );
+    #[cfg(feature = "stylos")]
+    agent.set_local_agent_id(Some(local_agent_id.to_string()));
     #[cfg(feature = "stylos")]
     agent.set_stylos_tool_invoker(stylos_tool_invoker(stylos_tool_bridge));
     Ok(agent)
@@ -1944,7 +1975,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
     });
 
     #[cfg(feature = "stylos")]
-    let stylos_handle = Some(crate::stylos::start(&stylos_cfg, &session, &project_dir).await);
+    let stylos_handle = Some(crate::stylos::start(&stylos_cfg, &session, &project_dir, db.clone()).await);
 
     let mut app = App::new(
         session,
@@ -1972,6 +2003,14 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
             tokio::spawn(async move {
                 while let Some(request) = prompt_rx.recv().await {
                     let _ = app_tx_prompt.send(AppEvent::StylosRemotePrompt(request));
+                }
+            });
+        }
+        if let Some(mut event_rx) = handle.take_event_rx() {
+            let app_tx_event = app_tx.clone();
+            tokio::spawn(async move {
+                while let Some(event) = event_rx.recv().await {
+                    let _ = app_tx_event.send(AppEvent::StylosEvent(event));
                 }
             });
         }
@@ -2149,6 +2188,10 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 app.submit_text(cmd.prompt, &app_tx);
             }
             #[cfg(feature = "stylos")]
+            Some(AppEvent::StylosEvent(text)) => {
+                app.push(Entry::RemoteEvent(text));
+            }
+            #[cfg(feature = "stylos")]
             Some(AppEvent::StylosRemotePrompt(request)) => {
                 let target = request
                     .agent_id
@@ -2159,10 +2202,24 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     let sender_agent = request.from_agent_id.as_deref().unwrap_or("unknown");
                     let target_instance = request.to.as_deref().unwrap_or("unknown target");
                     let target_agent = request.to_agent_id.as_deref().unwrap_or(target.as_str());
-                    app.push(Entry::RemoteEvent(format!(
-                        "Stylos hear from={} from_agent_id={} to={} to_agent_id={} rejected: local agent busy",
-                        sender, sender_agent, target_instance, target_agent
-                    )));
+                    if request.prompt.starts_with("type=stylos_note ") {
+                        let note_id = request
+                            .prompt
+                            .lines()
+                            .next()
+                            .and_then(|line| line.split_whitespace().find(|part| part.starts_with("note_id=")))
+                            .and_then(|part| part.strip_prefix("note_id="))
+                            .unwrap_or("unknown");
+                        app.push(Entry::RemoteEvent(format!(
+                            "Stylos note receive note_id={} from={} from_agent_id={} to={} to_agent_id={} rejected: local agent busy",
+                            note_id, sender, sender_agent, target_instance, target_agent
+                        )));
+                    } else {
+                        app.push(Entry::RemoteEvent(format!(
+                            "Stylos hear from={} from_agent_id={} to={} to_agent_id={} rejected: local agent busy",
+                            sender, sender_agent, target_instance, target_agent
+                        )));
+                    }
                     if let (Some(handle), Some(task_id)) =
                         (app.stylos.as_ref(), request.task_id.clone())
                     {
@@ -2181,10 +2238,31 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     let sender_agent = request.from_agent_id.as_deref().unwrap_or("unknown");
                     let target_instance = request.to.as_deref().unwrap_or("unknown target");
                     let target_agent = request.to_agent_id.as_deref().unwrap_or(target.as_str());
-                    app.push(Entry::RemoteEvent(format!(
-                        "Stylos hear from={} from_agent_id={} to={} to_agent_id={}",
-                        sender, sender_agent, target_instance, target_agent
-                    )));
+                    if request.prompt.starts_with("type=stylos_note ") {
+                        let note_id = request
+                            .prompt
+                            .lines()
+                            .next()
+                            .and_then(|line| line.split_whitespace().find(|part| part.starts_with("note_id=")))
+                            .and_then(|part| part.strip_prefix("note_id="))
+                            .unwrap_or("unknown");
+                        let column = request
+                            .prompt
+                            .lines()
+                            .next()
+                            .and_then(|line| line.split_whitespace().find(|part| part.starts_with("column=")))
+                            .and_then(|part| part.strip_prefix("column="))
+                            .unwrap_or("unknown");
+                        app.push(Entry::RemoteEvent(format!(
+                            "Stylos note receive note_id={} from={} from_agent_id={} to={} to_agent_id={} column={}",
+                            note_id, sender, sender_agent, target_instance, target_agent, column
+                        )));
+                    } else {
+                        app.push(Entry::RemoteEvent(format!(
+                            "Stylos hear from={} from_agent_id={} to={} to_agent_id={}",
+                            sender, sender_agent, target_instance, target_agent
+                        )));
+                    }
                     app.active_remote_request = Some(request.clone());
                     app.submit_text(request.prompt, &app_tx);
                 }
@@ -2243,6 +2321,8 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     app.db.clone(),
                     #[cfg(feature = "stylos")]
                     app.stylos_tool_bridge.clone(),
+                    #[cfg(feature = "stylos")]
+                    "main",
                 ) {
                     Ok(mut new_agent) => {
                         new_agent.refresh_model_info().await;

@@ -94,6 +94,7 @@ type StylosSnapshotProvider = Arc<dyn Fn() -> StylosSnapshotFuture + Send + Sync
 #[derive(Clone)]
 pub struct StylosQueryContext {
     prompt_tx: mpsc::UnboundedSender<StylosRemotePromptRequest>,
+    event_tx: mpsc::UnboundedSender<String>,
     task_registry: TaskRegistry,
     notes_db: Arc<themion_core::db::DbHandle>,
     local_instance: String,
@@ -104,6 +105,12 @@ impl StylosQueryContext {
         self.prompt_tx
             .send(request)
             .map_err(|_| "prompt queue unavailable".to_string())
+    }
+
+    pub fn submit_event(&self, event: String) -> Result<(), String> {
+        self.event_tx
+            .send(event)
+            .map_err(|_| "event queue unavailable".to_string())
     }
 
     pub fn task_registry(&self) -> &TaskRegistry {
@@ -127,7 +134,7 @@ pub struct StylosToolBridge {
 }
 
 impl StylosToolBridge {
-    pub async fn invoke(&self, name: &str, args: serde_json::Value) -> anyhow::Result<String> {
+    pub async fn invoke(&self, local_agent_id: Option<&str>, name: &str, args: serde_json::Value) -> anyhow::Result<String> {
         let reply = match name {
             "stylos_query_agents_alive" => {
                 let exclude_self = optional_bool(&args, "exclude_self").unwrap_or(true);
@@ -185,6 +192,7 @@ impl StylosToolBridge {
                     message: required_string(&args, "message")?,
                     request_id: optional_string(&args, "request_id"),
                     from: Some(self.instance.clone()),
+                    from_agent_id: local_agent_id.map(str::to_string),
                     to: Some(instance.clone()),
                     wait_for_idle_timeout_ms: args
                         .get("wait_for_idle_timeout_ms")
@@ -192,6 +200,21 @@ impl StylosToolBridge {
                 };
                 serde_json::to_value(
                     self.query_instance::<TalkReply, _>(&instance, "talk", Some(&req))
+                        .await?,
+                )?
+            }
+            "board_create_note" => {
+                let instance = required_string(&args, "to_instance")?;
+                let req = NoteRequest {
+                    to_agent_id: required_string(&args, "to_agent_id")?,
+                    body: required_string(&args, "body")?,
+                    request_id: optional_string(&args, "request_id"),
+                    from: Some(self.instance.clone()),
+                    from_agent_id: local_agent_id.map(str::to_string),
+                    to: Some(instance.clone()),
+                };
+                serde_json::to_value(
+                    self.query_instance::<NoteReply, _>(&instance, "notes/request", Some(&req))
                         .await?,
                 )?
             }
@@ -421,6 +444,7 @@ pub struct StylosHandle {
     cmd_task: Option<JoinHandle<()>>,
     cmd_rx: Option<mpsc::UnboundedReceiver<StylosCmdRequest>>,
     prompt_rx: Option<mpsc::UnboundedReceiver<StylosRemotePromptRequest>>,
+    event_rx: Option<mpsc::UnboundedReceiver<String>>,
     snapshot_provider: Arc<RwLock<Option<StylosSnapshotProvider>>>,
     query_context: StylosQueryContext,
 }
@@ -428,6 +452,7 @@ pub struct StylosHandle {
 impl StylosHandle {
     pub fn off() -> Self {
         let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
         let notes_db = themion_core::db::DbHandle::open_in_memory().expect("in-memory notes db");
         Self {
             state: StylosRuntimeState::Off,
@@ -437,9 +462,11 @@ impl StylosHandle {
             cmd_task: None,
             cmd_rx: None,
             prompt_rx: Some(prompt_rx),
+            event_rx: Some(event_rx),
             snapshot_provider: Arc::new(RwLock::new(None)),
             query_context: StylosQueryContext {
                 prompt_tx,
+                event_tx,
                 task_registry: TaskRegistry::new(),
                 notes_db,
                 local_instance: String::new(),
@@ -457,6 +484,10 @@ impl StylosHandle {
 
     pub fn take_prompt_rx(&mut self) -> Option<mpsc::UnboundedReceiver<StylosRemotePromptRequest>> {
         self.prompt_rx.take()
+    }
+
+    pub fn take_event_rx(&mut self) -> Option<mpsc::UnboundedReceiver<String>> {
+        self.event_rx.take()
     }
 
     pub fn query_context(&self) -> StylosQueryContext {
@@ -623,6 +654,7 @@ struct TalkRequest {
     message: String,
     request_id: Option<String>,
     from: Option<String>,
+    from_agent_id: Option<String>,
     to: Option<String>,
     wait_for_idle_timeout_ms: Option<u64>,
 }
@@ -809,12 +841,13 @@ pub async fn start(
     settings: &StylosConfig,
     session: &Session,
     project_dir: &PathBuf,
+    notes_db: Arc<themion_core::db::DbHandle>,
 ) -> StylosHandle {
     if !settings.enabled() {
         return StylosHandle::off();
     }
 
-    match start_inner(settings, session, project_dir).await {
+    match start_inner(settings, session, project_dir, notes_db).await {
         Ok(handle) => handle,
         Err(err) => {
             let mut handle = StylosHandle::off();
@@ -828,6 +861,7 @@ async fn start_inner(
     settings: &StylosConfig,
     session: &Session,
     project_dir: &PathBuf,
+    notes_db: Arc<themion_core::db::DbHandle>,
 ) -> Result<StylosHandle, String> {
     let hostname = derive_hostname().unwrap_or_else(|| "themion".to_string());
     let git_status = inspect_git_project(project_dir);
@@ -870,10 +904,11 @@ async fn start_inner(
     let ct = CancellationToken::new();
     let snapshot_provider = Arc::new(RwLock::new(None::<StylosSnapshotProvider>));
     let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
     let task_registry = TaskRegistry::new();
-    let notes_db = themion_core::db::DbHandle::open_in_memory().map_err(|e| e.to_string())?;
     let query_context = StylosQueryContext {
         prompt_tx,
+        event_tx,
         task_registry: task_registry.clone(),
         notes_db,
         local_instance: key_instance.clone(),
@@ -1155,6 +1190,7 @@ async fn start_inner(
         cmd_task: Some(cmd_task),
         cmd_rx: Some(cmd_rx),
         prompt_rx: Some(prompt_rx),
+        event_rx: Some(event_rx),
         snapshot_provider,
         query_context,
     })
@@ -1306,7 +1342,7 @@ async fn handle_talk_query(
                 task_id: None,
                 request_id: req.request_id.clone(),
                 from: Some(sender.clone()),
-                from_agent_id: Some("main".to_string()),
+                from_agent_id: req.from_agent_id.clone(),
                 to: Some(target),
                 to_agent_id: Some(agent.agent_id.clone()),
             });
@@ -1358,16 +1394,53 @@ async fn handle_note_query(
         return NoteReply { accepted: false, agent_id: req.to_agent_id, request_id: req.request_id, note_id: None, reason: Some("not_found".to_string()) };
     };
     let note_id = Uuid::new_v4().to_string();
+    let _ = query_context.submit_event(format!(
+        "received note create request via stylos from={} from_agent_id={} to={} to_agent_id={}",
+        req.from.as_deref().unwrap_or("unknown sender"),
+        req.from_agent_id.as_deref().unwrap_or("unknown"),
+        req.to.as_deref().unwrap_or(query_context.local_instance()),
+        req.to_agent_id,
+    ));
     let created = query_context.notes_db().create_stylos_note(CreateNoteArgs {
         note_id: note_id.clone(),
-        from_instance: req.from,
-        from_agent_id: req.from_agent_id,
+        from_instance: req.from.clone(),
+        from_agent_id: req.from_agent_id.clone(),
         to_instance: query_context.local_instance().to_string(),
         to_agent_id: agent.agent_id.clone(),
-        body: req.body,
+        body: req.body.clone(),
     });
     match created {
-        Ok(_) => NoteReply { accepted: true, agent_id: agent.agent_id, request_id: req.request_id, note_id: Some(note_id), reason: None },
+        Ok(note) => {
+            let _ = query_context.submit_event(format!(
+                "created stylos note in db note_id={} from={} from_agent_id={} to={} to_agent_id={} column={}",
+                note.note_id,
+                note.from_instance.as_deref().unwrap_or("unknown sender"),
+                note.from_agent_id.as_deref().unwrap_or("unknown"),
+                note.to_instance,
+                note.to_agent_id,
+                note.column.as_str(),
+            ));
+            let prompt = build_note_prompt(
+                &note.note_id,
+                note.from_instance.as_deref(),
+                note.from_agent_id.as_deref(),
+                &note.to_instance,
+                &note.to_agent_id,
+                note.column,
+                &note.body,
+            );
+            let _ = query_context.submit_prompt(StylosRemotePromptRequest {
+                prompt,
+                agent_id: Some(note.to_agent_id.clone()),
+                task_id: None,
+                request_id: req.request_id.clone(),
+                from: note.from_instance.clone(),
+                from_agent_id: note.from_agent_id.clone(),
+                to: Some(note.to_instance.clone()),
+                to_agent_id: Some(note.to_agent_id.clone()),
+            });
+            NoteReply { accepted: true, agent_id: agent.agent_id, request_id: req.request_id, note_id: Some(note_id), reason: None }
+        },
         Err(err) => NoteReply { accepted: false, agent_id: agent.agent_id, request_id: req.request_id, note_id: None, reason: Some(err.to_string()) },
     }
 }

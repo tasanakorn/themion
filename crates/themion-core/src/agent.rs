@@ -110,6 +110,14 @@ fn tool_call_detail(name: &str, args_json: &str) -> String {
                 60,
             )
         ),
+        "board_create_note" => format!(
+            "board_create_note to_instance={} to_agent_id={}",
+            t("to_instance"),
+            truncate(
+                args["to_agent_id"].as_str().unwrap_or("main"),
+                60,
+            )
+        ),
         _ => name.to_string(),
     }
 }
@@ -128,6 +136,8 @@ pub struct Agent {
     turn_seq_counter: u32,
     model_info: Option<ModelInfo>,
     workflow_state: WorkflowState,
+    #[cfg(feature = "stylos")]
+    local_agent_id: Option<String>,
     #[cfg(feature = "stylos")]
     stylos_tool_invoker: Option<crate::tools::StylosToolInvoker>,
 }
@@ -152,6 +162,8 @@ impl Agent {
             turn_seq_counter: 0,
             model_info: None,
             workflow_state: WorkflowState::default(),
+            #[cfg(feature = "stylos")]
+            local_agent_id: None,
             #[cfg(feature = "stylos")]
             stylos_tool_invoker: None,
         }
@@ -204,6 +216,8 @@ impl Agent {
             model_info: None,
             workflow_state,
             #[cfg(feature = "stylos")]
+            local_agent_id: None,
+            #[cfg(feature = "stylos")]
             stylos_tool_invoker: None,
         }
     }
@@ -215,6 +229,11 @@ impl Agent {
     #[cfg(feature = "stylos")]
     pub fn set_stylos_tool_invoker(&mut self, invoker: Option<crate::tools::StylosToolInvoker>) {
         self.stylos_tool_invoker = invoker;
+    }
+
+    #[cfg(feature = "stylos")]
+    pub fn set_local_agent_id(&mut self, agent_id: Option<String>) {
+        self.local_agent_id = agent_id;
     }
 
     pub fn clear_context(&mut self) {
@@ -1158,7 +1177,11 @@ impl Agent {
                     workflow_state: Some(self.workflow_state.clone()),
                     turn_seq: Some(turn_seq),
                     #[cfg(feature = "stylos")]
+                    local_agent_id: self.local_agent_id.clone(),
+                    #[cfg(feature = "stylos")]
                     stylos_tool_invoker: self.stylos_tool_invoker.clone(),
+                    #[cfg(feature = "stylos")]
+                    stylos_enabled: self.stylos_tool_invoker.is_some(),
                 };
                 let result =
                     tools::call_tool(&tc.function.name, &tc.function.arguments, &tool_ctx).await;
