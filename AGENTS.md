@@ -78,6 +78,7 @@ When adding code:
 - Do not rewrite large files unnecessarily.
 - Do not touch generated/build output such as `target/`.
 - Do not edit lockfiles unless a dependency change is required.
+- When changing crate versions in `Cargo.toml`, consider whether `Cargo.lock` should be updated and committed in the same task.
 - Read the relevant file before editing it.
 - Verify tool availability before depending on non-standard local commands.
 
@@ -131,6 +132,7 @@ Typical feature checks for `themion-cli`:
 - If asked to commit, keep commits scoped unless the user explicitly requests committing all pending changes.
 - Feature-flag regressions are easy to miss; when touching gated code, verify the crate still builds with the feature enabled and disabled as relevant.
 - When editing code, avoid leaving newly introduced warnings behind; either fix them in the touched area or call them out clearly if blocked.
+- When bumping crate versions, check whether `Cargo.lock` changed and whether it should be staged with the related `Cargo.toml` updates.
 
 ## When updating docs
 
