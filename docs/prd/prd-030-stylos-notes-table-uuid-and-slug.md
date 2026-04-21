@@ -1,6 +1,6 @@
 # PRD-030: Stylos Notes Table Identifier Hardening and Human-Friendly Slugs
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Version:** v0.16.1
 - **Scope:** `themion-core`, `themion-cli`, docs
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
@@ -226,15 +226,15 @@ If the implementation changes any persisted identifier values for existing notes
 
 ## Implementation checklist
 
-- [ ] add `note_slug` to the durable notes schema
-- [ ] require canonical `note_id` values to be UUIDs
-- [ ] enforce uniqueness for `note_id`
-- [ ] enforce uniqueness for `note_slug`
-- [ ] update note persistence structs and row mapping to include `note_slug`
-- [ ] update note creation paths to generate or validate UUID `note_id`
-- [ ] add unique slug generation with collision handling
-- [ ] migrate existing note rows to include unique `note_slug` values
-- [ ] define and implement migration behavior for existing non-UUID `note_id` values
-- [ ] return `note_slug` in note metadata where appropriate
-- [ ] update architecture and runtime docs for the two-identifier note model
-- [ ] update `docs/README.md` with this PRD entry
+- [x] add `note_slug` to the durable notes schema
+- [x] require canonical `note_id` values to be UUIDs
+- [x] enforce uniqueness for `note_id`
+- [x] enforce uniqueness for `note_slug`
+- [x] update note persistence structs and row mapping to include `note_slug`
+- [x] update note creation paths to generate or validate UUID `note_id`
+- [x] add unique slug generation with collision handling
+- [x] migrate existing note rows to include unique `note_slug` values
+- [x] define and implement migration behavior for existing non-UUID `note_id` values
+- [x] return `note_slug` in note metadata where appropriate
+- [x] update architecture and runtime docs for the two-identifier note model
+- [x] update `docs/README.md` with this PRD entry
