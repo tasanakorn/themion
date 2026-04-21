@@ -72,6 +72,7 @@ tools.rs
   │    ├─ time_sleep  ──► bounded non-shell wait for short sleeps
   │    ├─ history_recall  ──► ctx.db.recall(RecallArgs)
   │    ├─ history_search  ──► ctx.db.search(SearchArgs)
+  │    ├─ board_*  ──► local durable notes board operations
   │    └─ workflow_*  ──► workflow state inspection / transitions
   └─ ToolCtx { db: Arc<DbHandle>, session_id, project_dir }
 ```
@@ -128,6 +129,8 @@ All tools receive a `&ToolCtx` carrying the DB handle and session identity. File
 
 `time_sleep` is a built-in bounded wait helper for short pauses. It accepts `ms`, rejects values above 30,000, and lets the agent express lightweight waiting without shelling out to `sleep`.
 
+Durable note operations are exposed as `board_*` tools. These board tools manipulate local SQLite-backed note state for create/list/read/move/update-result operations. Stylos remains the transport and intake layer for remote note delivery and related mesh behavior.
+
 ## Persistent History (db.rs)
 
 Database path: `$XDG_DATA_HOME/themion/system.db` (default `~/.local/share/themion/system.db`). Created on first run; WAL mode enabled on every open for safe multi-process access.
@@ -171,11 +174,11 @@ Matching injected Stylos tools in `themion-core` now include:
 - `stylos_request_task`
 - `stylos_query_task_status`
 - `stylos_query_task_result`
-- `stylos_create_note`
-- `stylos_list_notes`
-- `stylos_read_note`
-- `stylos_move_note`
-- `stylos_update_note_result`
+- `board_create_note`
+- `board_list_notes`
+- `board_read_note`
+- `board_move_note`
+- `board_update_note_result`
 
 `stylos_query_nodes` is a Zenoh-session-level check, not a Themion mesh discovery queryable. It inspects the current local Zenoh session via `session.info()` and returns the local session ZID plus currently known peer and router ZIDs.
 
@@ -259,7 +262,7 @@ Current behavior:
 - each note stores canonical UUID `note_id`, globally unique human-friendly `note_slug`, optional sender identity, exact target instance `<hostname>:<pid>`, target `agent_id`, body, board column, result text, and millisecond timestamps
 - phase-1 board columns are exactly `todo`, `in_progress`, and `done`
 - newly created notes start in `todo`
-- notes are model-visible through dedicated note tools rather than transcript scraping
+- notes are model-visible through dedicated `board_*` note tools rather than transcript scraping
 - idle-time delivery prefers the oldest pending `in_progress` note for an agent; a `todo` note is injected only when that agent has no pending `in_progress` note
 - once injected, the note is marked so it is not injected repeatedly by default
 

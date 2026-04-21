@@ -222,8 +222,8 @@ pub fn tool_definitions() -> Value {
         json!({
             "type": "function",
             "function": {
-                "name": "stylos_create_note",
-                "description": "Create a durable Stylos note targeted to an instance and agent.",
+                "name": "board_create_note",
+                "description": "Create a durable local board note targeted to an instance and agent.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -241,8 +241,8 @@ pub fn tool_definitions() -> Value {
         json!({
             "type": "function",
             "function": {
-                "name": "stylos_list_notes",
-                "description": "List durable Stylos notes, optionally filtered by target instance, agent, or column.",
+                "name": "board_list_notes",
+                "description": "List durable local board notes, optionally filtered by target instance, agent, or column.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -257,8 +257,8 @@ pub fn tool_definitions() -> Value {
         json!({
             "type": "function",
             "function": {
-                "name": "stylos_read_note",
-                "description": "Read one durable Stylos note by note_id.",
+                "name": "board_read_note",
+                "description": "Read one durable local board note by note_id.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -271,8 +271,8 @@ pub fn tool_definitions() -> Value {
         json!({
             "type": "function",
             "function": {
-                "name": "stylos_move_note",
-                "description": "Move a durable Stylos note between todo, in_progress, and done.",
+                "name": "board_move_note",
+                "description": "Move a durable local board note between todo, in_progress, and done.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -286,8 +286,8 @@ pub fn tool_definitions() -> Value {
         json!({
             "type": "function",
             "function": {
-                "name": "stylos_update_note_result",
-                "description": "Attach or update result text on a durable Stylos note.",
+                "name": "board_update_note_result",
+                "description": "Attach or update result text on a durable local board note.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -481,7 +481,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 Err(e) => Ok(format!("Error: {e}")),
             }
         }
-        "stylos_create_note" => {
+        "board_create_note" => {
             let to_instance = args["to_instance"].as_str().ok_or_else(|| anyhow::anyhow!("missing to_instance"))?;
             let to_agent_id = args["to_agent_id"].as_str().ok_or_else(|| anyhow::anyhow!("missing to_agent_id"))?;
             let body = args["body"].as_str().ok_or_else(|| anyhow::anyhow!("missing body"))?;
@@ -496,7 +496,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             })?;
             Ok(stylos_note_to_json(&note).to_string())
         }
-        "stylos_list_notes" => {
+        "board_list_notes" => {
             let column = args["column"].as_str().map(|v| parse_note_column(v).ok_or_else(|| anyhow::anyhow!("invalid column"))).transpose()?;
             let notes = ctx.db.list_stylos_notes(
                 args["to_instance"].as_str(),
@@ -505,7 +505,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             )?;
             Ok(Value::Array(notes.iter().map(stylos_note_to_json).collect()).to_string())
         }
-        "stylos_read_note" => {
+        "board_read_note" => {
             let note_id = args["note_id"].as_str().ok_or_else(|| anyhow::anyhow!("missing note_id"))?;
             let note = ctx.db.get_stylos_note(note_id)?;
             Ok(match note {
@@ -513,7 +513,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 None => json!({"found": false, "note_id": note_id}).to_string(),
             })
         }
-        "stylos_move_note" => {
+        "board_move_note" => {
             let note_id = args["note_id"].as_str().ok_or_else(|| anyhow::anyhow!("missing note_id"))?;
             let column = parse_note_column(args["column"].as_str().ok_or_else(|| anyhow::anyhow!("missing column"))?)
                 .ok_or_else(|| anyhow::anyhow!("invalid column"))?;
@@ -523,7 +523,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 None => json!({"found": false, "note_id": note_id}).to_string(),
             })
         }
-        "stylos_update_note_result" => {
+        "board_update_note_result" => {
             let note_id = args["note_id"].as_str().ok_or_else(|| anyhow::anyhow!("missing note_id"))?;
             let result_text = args["result_text"].as_str().ok_or_else(|| anyhow::anyhow!("missing result_text"))?;
             let note = ctx.db.update_stylos_note_result(note_id, Some(result_text))?;
