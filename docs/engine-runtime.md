@@ -160,9 +160,13 @@ PRD-029 phase 1 adds a durable board-backed note path.
 Current behavior:
 
 - `notes/request` validates the target agent from the current exported snapshot
+- when the `stylos` feature is enabled, `board_create_note` always reaches note creation through `notes/request`, including self-targeted delivery to the current local instance
 - accepted notes are persisted in SQLite immediately rather than rejected when the agent is busy
 - persisted notes start in column `todo` with millisecond timestamps
 - `themion-core` exposes `board_*` note tools for create/list/read/move/update-result operations using canonical durable UUID `note_id` values and returns companion `note_slug` metadata for human-readable inspection
+- sender `from` and `from_agent_id` are forwarded from the calling runtime context into Stylos note delivery so receiver-side logs and stored note metadata reflect the actual calling agent
+- successful receiver-side note insertion emits `created stylos note in db note_id=<uuid> ...` before the note is queued for later injection
+- inbound note delivery logging is distinct from talk logging: note delivery uses `Stylos note receive ...`, while talk delivery uses `Stylos hear ...`
 - the TUI checks for pending local notes on tick when no local turn is active
 - idle injection prefers pending `in_progress` notes; `todo` is considered only when no pending `in_progress` note exists for that agent
 - injected notes use a note-specific prompt wrapper and are marked injected to avoid duplicate delivery

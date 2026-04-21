@@ -221,7 +221,10 @@ Examples:
 - accepted `talk` requests are injected into the local agent turn as a peer-message wrapper with exact `from=<hostname>:<pid>` and `to=<hostname>:<pid>` identifiers, plus reply guidance using `***QRU***`.
 - when an inbound Stylos talk is received, the receiver-side TUI emits one `Stylos hear from=<from> from_agent_id=<from_agent_id> to=<to> to_agent_id=<to_agent_id>` line using the inbound payload fields directly.
 - when an outbound `stylos_request_talk` call is accepted, the sender-side TUI emits `Stylos talk to=<hostname>:<pid> from=<hostname>:<pid>` using the same exact identifier format.
-- receiver-side inbound `hear` logging and sender-side outbound `talk` logging remain distinct; one inbound delivery must not also surface as a receiver-side `Stylos talk ...` line.
+- `notes/request` accepts note-creation delivery for a target instance and agent; sender instance and sender agent identity are resolved automatically by the local runtime.
+- when an inbound Stylos note delivery is accepted for local processing, the receiver-side TUI emits `Stylos note receive note_id=<uuid> from=<from> from_agent_id=<from_agent_id> to=<to> to_agent_id=<to_agent_id> column=todo` rather than reusing `Stylos hear ...` talk logging.
+- when a receiver-side note delivery is stored successfully, the runtime emits `created stylos note in db note_id=<uuid> from=<from> from_agent_id=<from_agent_id> to=<to> to_agent_id=<to_agent_id> column=todo`.
+- receiver-side inbound note logging and talk logging remain distinct; one inbound note delivery must not surface as a `Stylos hear ...` talk event.
 - `talk` keeps acknowledgement-oriented semantics: it reports delivery acceptance or rejection and does not wait for the remote agent’s final natural-language answer.
 - when the target agent is busy and `wait_for_idle_timeout_ms` is positive, the CLI query layer polls the exported snapshot until the peer becomes `idle` or `nap` or the timeout expires; timeout produces `timed_out_waiting_for_idle`.
 - `tasks/request` filters local candidates using the current snapshot, optional `preferred_agent_id`, optional `required_roles`, and optional `require_git_repo`, then chooses deterministically by sorted `agent_id`.
@@ -263,6 +266,9 @@ Current behavior:
 - phase-1 board columns are exactly `todo`, `in_progress`, and `done`
 - newly created notes start in `todo`
 - notes are model-visible through dedicated `board_*` note tools rather than transcript scraping
+- when the `stylos` feature is enabled, `board_create_note` always submits through the Stylos `notes/request` path, even when the destination instance is the current local instance
+- in Stylos-enabled builds, the receiver-side `notes/request` handler is the canonical create path that validates the target agent, creates the note row in local SQLite, and returns the created `note_id`
+- `board_list_notes`, `board_read_note`, `board_move_note`, and `board_update_note_result` remain local board operations against the receiving instance's SQLite state after creation
 - idle-time delivery prefers the oldest pending `in_progress` note for an agent; a `todo` note is injected only when that agent has no pending `in_progress` note
 - once injected, the note is marked so it is not injected repeatedly by default
 
