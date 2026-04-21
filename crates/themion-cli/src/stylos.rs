@@ -9,8 +9,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use stylos_config::{Endpoints, IdentitySection, StylosConfig as SessionConfig, ZenohSection};
-use stylos_session::SessionOverrides;
+use stylos::{
+    Endpoints, IdentitySection, SessionOverrides, StylosConfig as SessionConfig, ZenohSection,
+};
 use themion_core::client_codex::ApiCallRateLimitReport;
 use themion_core::workflow::WorkflowState;
 use tokio::sync::{mpsc, Notify, RwLock};
@@ -803,7 +804,7 @@ async fn start_inner(
     };
 
     let session_handle = Arc::new(
-        stylos_session::open_session(&cfg, &overrides)
+        stylos::open_session(&cfg, &overrides)
             .await
             .map_err(|e| e.to_string())?,
     );

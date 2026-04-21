@@ -1,8 +1,0 @@
-[package]
-name = "stylos-common"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-thiserror = { workspace = true }
-json5 = { workspace = true }

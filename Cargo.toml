@@ -2,11 +2,6 @@
 members = [
     "crates/themion-core",
     "crates/themion-cli",
-    "vendor/stylos/stylos-common",
-    "vendor/stylos/stylos-identity",
-    "vendor/stylos/stylos-config",
-    "vendor/stylos/stylos-transport",
-    "vendor/stylos/stylos-session",
 ]
 resolver = "2"
 
@@ -29,6 +24,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 json5 = "0.4"
 thiserror = "1"
 zenoh = "=1.9.0"
+stylos = { git = "https://github.com/tasanakorn/stylos.git", rev = "73b30ca7314257e6c28ce2d82cf72102cb2da94f" }
 
 [workspace.package]
 version = "0.1.0"

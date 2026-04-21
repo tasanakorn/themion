@@ -32,6 +32,7 @@
 | PRD-020 | [Stylos Git Metadata Cache and Remote URL Simplification](prd/prd-020-stylos-git-metadata-cache-and-remote-url-simplification.md) | Implemented | v0.10.1 | `themion-cli`, docs |
 | PRD-021 | [Single-Process Multi-Agent Runtime and Multi-Agent Stylos Status Reporting](prd/prd-021-single-process-multi-agent-runtime-and-stylos-reporting.md) | Implemented | v0.11.0 | `themion-core`, `themion-cli`, docs |
 | PRD-022 | [Stylos Queryables for Agent Presence, Availability, and Task Requests](prd/prd-022-stylos-queryables-for-agent-presence-availability-and-task-requests.md) | Implemented | v0.12.1 | `themion-cli`, `themion-core`, docs |
+| PRD-023 | [Use External Stylos Repository Instead of Vendored Workspace Copy](prd/prd-023-use-external-stylos-repository-instead-of-vendored-workspace-copy.md) | Implemented | v0.13.0 | workspace, `themion-cli`, docs |
 
 ## Roadmap note
 
