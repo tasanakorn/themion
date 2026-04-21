@@ -147,25 +147,36 @@ Discovery queryables are mesh-wide and are not addressed to a single instance:
 
 Per-instance queryables target one Themion process:
 
-- `stylos/<realm>/themion/<instance>/query/status`
-- `stylos/<realm>/themion/<instance>/query/talk`
-- `stylos/<realm>/themion/<instance>/query/tasks/request`
-- `stylos/<realm>/themion/<instance>/query/tasks/status`
-- `stylos/<realm>/themion/<instance>/query/tasks/result`
+- `stylos/<realm>/themion/instances/<instance>/query/status`
+- `stylos/<realm>/themion/instances/<instance>/query/talk`
+- `stylos/<realm>/themion/instances/<instance>/query/tasks/request`
+- `stylos/<realm>/themion/instances/<instance>/query/tasks/status`
+- `stylos/<realm>/themion/instances/<instance>/query/tasks/result`
+
+The direct instance identifier is transport-safe `<hostname>:<pid>`, not a slash-delimited path.
 
 All of these queryables live in `crates/themion-cli/src/stylos.rs` and are registered only when the `stylos` cargo feature is enabled.
 
 Matching injected Stylos tools in `themion-core` now include:
 
+- `stylos_query_agents_alive`
+- `stylos_query_agents_free`
+- `stylos_query_agents_git`
 - `stylos_query_nodes`
+- `stylos_query_status`
+- `stylos_request_talk`
+- `stylos_request_task`
+- `stylos_query_task_status`
+- `stylos_query_task_result`
 
-This tool is a Zenoh-session-level check, not a Themion mesh discovery queryable. It inspects the current local Zenoh session via `session.info()` and returns the local session ZID plus currently known peer and router ZIDs.
+`stylos_query_nodes` is a Zenoh-session-level check, not a Themion mesh discovery queryable. It inspects the current local Zenoh session via `session.info()` and returns the local session ZID plus currently known peer and router ZIDs.
 
 ### Discovery behavior
 
 - `alive` returns one reply per responding instance with that instance identity, session ID, and its current agent list.
 - `free` uses the current exported activity state and returns only agents whose `activity_status` is `idle` or `nap`.
 - `git` returns only agents whose `project_dir_is_git_repo` is true. When the request includes a `remote`, the handler matches against normalized repo keys when possible and falls back to exact raw-remote comparison for unsupported forms.
+- injected discovery tools accept `exclude_self`; when omitted, it defaults to `true` and filters out replies from the current instance.
 - `stylos_query_nodes` returns a local network snapshot with `self_zid`, `peer_zids`, and `router_zids` gathered from the active Zenoh session.
 
 The reply payloads include per-agent fields already present in the status snapshot plus normalized `git_repo_keys` derived from exported `git_remotes`.
@@ -192,11 +203,12 @@ Examples:
 
 ### Request and task query behavior
 
-- `status` returns the current process snapshot and supports optional `agent_id` or `role` filtering. Supplying both returns `invalid_request`. Unknown filters return `not_found`.
+- `status` returns the current process snapshot and supports optional `agent_id` and `role` filtering. Filters can be used independently or together. Unknown filters return `not_found`.
 - `talk` validates that the requested agent exists and is currently `idle` or `nap`, then enqueues the message through the CLI-local remote prompt bridge and routes execution to that local agent when present, returning an acknowledgement or rejection.
 - `tasks/request` filters local candidates using the current snapshot, optional `preferred_agent_id`, optional `required_roles`, and optional `require_git_repo`, then chooses deterministically by sorted `agent_id`.
 - `tasks/status` returns the current in-memory lifecycle state for a previously accepted task.
 - `tasks/result` returns immediately for terminal tasks, returns current non-terminal state when `wait_timeout_ms` is omitted or zero, and otherwise waits up to the requested timeout clamped to 60,000 ms.
+- injected per-instance Stylos tools issue direct Zenoh queries to the addressed instance key, enforce single-reply expectations, and distinguish transport no-reply from responder-side `not_found` payloads.
 
 Task lifecycle tracking is process-local and in-memory. Accepted tasks start as `queued`, move to `running` when the selected local agent turn begins, and then to `completed` or `failed`. Lifecycle records currently expire after 30 minutes.
 

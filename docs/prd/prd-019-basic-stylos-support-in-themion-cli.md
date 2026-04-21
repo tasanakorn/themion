@@ -114,7 +114,7 @@ The first-pass Stylos feature should do only three runtime things when enabled:
 A canonical Themion key shape should follow the Stylos grammar:
 
 ```text
-stylos/<realm>/themion/<instance>/<leaf>
+stylos/<realm>/themion/instances/<instance>/<leaf>
 ```
 
 Initial leaves:

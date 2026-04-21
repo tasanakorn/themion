@@ -1,6 +1,8 @@
 use crate::config::{save_profiles, Config, ProfileConfig};
 #[cfg(feature = "stylos")]
-use crate::stylos::{tool_bridge, StylosHandle, StylosRemotePromptRequest, StylosRuntimeState, StylosToolBridge};
+use crate::stylos::{
+    tool_bridge, StylosHandle, StylosRemotePromptRequest, StylosRuntimeState, StylosToolBridge,
+};
 use crate::{format_stats, Session};
 use crossterm::{
     event::{
@@ -112,7 +114,10 @@ fn is_interactive_handle(handle: &AgentHandle) -> bool {
 fn validate_agent_roles(agents: &[AgentHandle]) -> anyhow::Result<()> {
     let main_count = agents.iter().filter(|h| has_role(h, "main")).count();
     if main_count != 1 {
-        anyhow::bail!("invalid agent roles: expected exactly one main agent, found {}", main_count);
+        anyhow::bail!(
+            "invalid agent roles: expected exactly one main agent, found {}",
+            main_count
+        );
     }
     let interactive_count = agents.iter().filter(|h| has_role(h, "interactive")).count();
     if interactive_count > 1 {
@@ -153,7 +158,8 @@ fn build_stylos_status_snapshot(
     let agents = agent_sources
         .into_iter()
         .map(|agent| {
-            let git_status = crate::stylos::GitStatusCache::new(agent.project_dir.clone()).snapshot();
+            let git_status =
+                crate::stylos::GitStatusCache::new(agent.project_dir.clone()).snapshot();
             crate::stylos::StylosAgentStatusSnapshot {
                 agent_id: agent.agent_id,
                 label: agent.label,
@@ -278,8 +284,15 @@ impl<'a> App<'a> {
     ) -> Self {
         #[cfg(feature = "stylos")]
         let stylos_tool_bridge = stylos.as_ref().and_then(tool_bridge);
-        let agent = build_agent(&session, session_id, project_dir.clone(), db.clone(), #[cfg(feature = "stylos")] stylos_tool_bridge.clone())
-            .expect("failed to build agent");
+        let agent = build_agent(
+            &session,
+            session_id,
+            project_dir.clone(),
+            db.clone(),
+            #[cfg(feature = "stylos")]
+            stylos_tool_bridge.clone(),
+        )
+        .expect("failed to build agent");
         let initial_model_info = session.model_info.clone();
         let handle = AgentHandle {
             agent: Some(agent),
@@ -605,7 +618,9 @@ impl<'a> App<'a> {
         match ev {
             AgentEvent::LlmStart => {
                 #[cfg(feature = "stylos")]
-                if let (Some(remote), Some(handle)) = (self.active_remote_request.as_ref(), self.stylos.as_ref()) {
+                if let (Some(remote), Some(handle)) =
+                    (self.active_remote_request.as_ref(), self.stylos.as_ref())
+                {
                     if let Some(task_id) = remote.task_id.clone() {
                         let query_context = handle.query_context();
                         tokio::task::block_in_place(|| {
@@ -627,7 +642,10 @@ impl<'a> App<'a> {
                 #[cfg(feature = "stylos")]
                 {
                     let next = match self.last_assistant_text.take() {
-                        Some(mut existing) => { existing.push_str(&chunk); existing }
+                        Some(mut existing) => {
+                            existing.push_str(&chunk);
+                            existing
+                        }
                         None => chunk.clone(),
                     };
                     self.last_assistant_text = Some(next);
@@ -684,13 +702,18 @@ impl<'a> App<'a> {
             }
             AgentEvent::TurnDone(stats) => {
                 #[cfg(feature = "stylos")]
-                if let (Some(remote), Some(handle)) = (self.active_remote_request.take(), self.stylos.as_ref()) {
+                if let (Some(remote), Some(handle)) =
+                    (self.active_remote_request.take(), self.stylos.as_ref())
+                {
                     if let Some(task_id) = remote.task_id {
                         let result_text = self.last_assistant_text.clone();
                         let query_context = handle.query_context();
                         tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(async move {
-                                query_context.task_registry().set_completed(&task_id, result_text, None).await;
+                                query_context
+                                    .task_registry()
+                                    .set_completed(&task_id, result_text, None)
+                                    .await;
                             });
                         });
                     }
@@ -848,7 +871,8 @@ impl<'a> App<'a> {
                             new_session_id,
                             self.project_dir.clone(),
                             self.db.clone(),
-                            #[cfg(feature = "stylos")] self.stylos_tool_bridge.clone(),
+                            #[cfg(feature = "stylos")]
+                            self.stylos_tool_bridge.clone(),
                         ) {
                             Ok(new_agent) => {
                                 let db = self.db.clone();
@@ -1018,10 +1042,7 @@ impl<'a> App<'a> {
             }
         });
 
-        let handle = self
-            .agents
-            .get_mut(agent_index)
-            .expect("agent index valid");
+        let handle = self.agents.get_mut(agent_index).expect("agent index valid");
         let mut agent = handle.agent.take().expect("agent available when not busy");
         let handle_session_id = handle.session_id;
         agent.set_event_tx(event_tx);
@@ -1187,12 +1208,15 @@ fn build_rate_limit_statusline(report: Option<&ApiCallRateLimitReport>) -> Strin
 }
 
 #[cfg(feature = "stylos")]
-fn stylos_tool_invoker(bridge: Option<StylosToolBridge>) -> Option<themion_core::tools::StylosToolInvoker> {
+fn stylos_tool_invoker(
+    bridge: Option<StylosToolBridge>,
+) -> Option<themion_core::tools::StylosToolInvoker> {
     bridge.map(|bridge| {
         std::sync::Arc::new(move |name: String, args: serde_json::Value| {
             let bridge = bridge.clone();
-            let fut: std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>> =
-                Box::pin(async move { bridge.invoke(&name, args).await });
+            let fut: std::pin::Pin<
+                Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>,
+            > = Box::pin(async move { bridge.invoke(&name, args).await });
             fut
         }) as themion_core::tools::StylosToolInvoker
     })
@@ -1832,11 +1856,16 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
             #[cfg(feature = "stylos")]
             Some(AppEvent::StylosRemotePrompt(request)) => {
                 if app.agent_busy {
-                    if let (Some(handle), Some(task_id)) = (app.stylos.as_ref(), request.task_id.clone()) {
+                    if let (Some(handle), Some(task_id)) =
+                        (app.stylos.as_ref(), request.task_id.clone())
+                    {
                         let query_context = handle.query_context();
                         tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(async move {
-                                query_context.task_registry().set_failed(&task_id, "agent_busy".to_string()).await;
+                                query_context
+                                    .task_registry()
+                                    .set_failed(&task_id, "agent_busy".to_string())
+                                    .await;
                             });
                         });
                     }
@@ -1897,7 +1926,8 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     new_session_id,
                     app.project_dir.clone(),
                     app.db.clone(),
-                    #[cfg(feature = "stylos")] app.stylos_tool_bridge.clone(),
+                    #[cfg(feature = "stylos")]
+                    app.stylos_tool_bridge.clone(),
                 ) {
                     Ok(mut new_agent) => {
                         new_agent.refresh_model_info().await;
@@ -1972,7 +2002,6 @@ fn unix_epoch_now_ms() -> u64 {
         .as_millis() as u64
 }
 
-
 #[cfg(all(test, feature = "stylos"))]
 mod tests {
     use super::*;
@@ -1989,7 +2018,10 @@ mod tests {
 
     #[test]
     fn validate_agent_roles_accepts_one_main_and_one_interactive() {
-        let agents = vec![handle("main", &["main", "interactive"]), handle("worker", &["background"])];
+        let agents = vec![
+            handle("main", &["main", "interactive"]),
+            handle("worker", &["background"]),
+        ];
         validate_agent_roles(&agents).unwrap();
     }
 
@@ -2001,7 +2033,7 @@ mod tests {
 
     #[test]
     fn validate_agent_roles_rejects_two_main() {
-        let agents = vec![handle("a", &["main"]), handle("b", &["main"] )];
+        let agents = vec![handle("a", &["main"]), handle("b", &["main"])];
         assert!(validate_agent_roles(&agents).is_err());
     }
 
@@ -2051,7 +2083,10 @@ mod tests {
 
     #[test]
     fn targeted_remote_request_prefers_matching_agent_id() {
-        let agents = vec![handle("main", &["main", "interactive"]), handle("worker", &["background"])];
+        let agents = vec![
+            handle("main", &["main", "interactive"]),
+            handle("worker", &["background"]),
+        ];
         let request = StylosRemotePromptRequest {
             prompt: "hi".to_string(),
             agent_id: Some("worker".to_string()),

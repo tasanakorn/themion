@@ -102,105 +102,113 @@ impl StylosQueryContext {
 
 #[derive(Clone)]
 pub struct StylosToolBridge {
-    instance: String,
     realm: String,
+    instance: String,
     session: Arc<zenoh::Session>,
-    snapshot_provider: Arc<RwLock<Option<StylosSnapshotProvider>>>,
-    query_context: StylosQueryContext,
-    session_id: String,
 }
 
 impl StylosToolBridge {
     pub async fn invoke(&self, name: &str, args: serde_json::Value) -> anyhow::Result<String> {
         let reply = match name {
-            "stylos_query_agents_alive" => serde_json::to_value(
-                self.query_discovery::<serde_json::Value>(
-                    &format!("stylos/{}/themion/query/agents/alive", self.realm),
-                    None,
-                )
-                .await?,
-            )?,
-            "stylos_query_agents_free" => serde_json::to_value(
-                self.query_discovery::<serde_json::Value>(
-                    &format!("stylos/{}/themion/query/agents/free", self.realm),
-                    None,
-                )
-                .await?,
-            )?,
+            "stylos_query_agents_alive" => {
+                let exclude_self = optional_bool(&args, "exclude_self").unwrap_or(true);
+                serde_json::to_value(
+                    self.query_discovery::<serde_json::Value>(
+                        &format!("stylos/{}/themion/query/agents/alive", self.realm),
+                        None,
+                        exclude_self,
+                    )
+                    .await?,
+                )?
+            }
+            "stylos_query_agents_free" => {
+                let exclude_self = optional_bool(&args, "exclude_self").unwrap_or(true);
+                serde_json::to_value(
+                    self.query_discovery::<serde_json::Value>(
+                        &format!("stylos/{}/themion/query/agents/free", self.realm),
+                        None,
+                        exclude_self,
+                    )
+                    .await?,
+                )?
+            }
             "stylos_query_agents_git" => {
-                let req = serde_json::from_value::<GitQueryRequest>(args)?;
+                let req = serde_json::from_value::<GitQueryRequest>(args.clone())?;
+                let exclude_self = req.exclude_self.unwrap_or(true);
                 let payload = serde_cbor::to_vec(&req)?;
                 serde_json::to_value(
                     self.query_discovery::<serde_json::Value>(
                         &format!("stylos/{}/themion/query/agents/git", self.realm),
                         Some(payload),
+                        exclude_self,
                     )
                     .await?,
                 )?
             }
             "stylos_query_nodes" => serde_json::to_value(self.query_zenoh_nodes().await?)?,
             "stylos_query_status" => {
-                let instance = args.get("instance").and_then(|v| v.as_str()).unwrap_or_default();
-                if instance != self.instance {
-                    json_error("not_found")
-                } else {
-                    let req = StatusFilterRequest {
-                        agent_id: args.get("agent_id").and_then(|v| v.as_str()).map(str::to_string),
-                        role: args.get("role").and_then(|v| v.as_str()).map(str::to_string),
-                    };
-                    serde_json::to_value(build_status_reply(&self.snapshot_provider, &self.instance, &self.session_id, Some(req)).await)?
-                }
+                let instance = required_string(&args, "instance")?;
+                let req = StatusFilterRequest {
+                    agent_id: optional_string(&args, "agent_id"),
+                    role: optional_string(&args, "role"),
+                };
+                serde_json::to_value(
+                    self.query_instance::<ToolStatusReply, _>(&instance, "status", Some(&req))
+                        .await?,
+                )?
             }
             "stylos_request_talk" => {
+                let instance = required_string(&args, "instance")?;
                 let req = TalkRequest {
-                    agent_id: args.get("agent_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                    message: args.get("message").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                    request_id: args.get("request_id").and_then(|v| v.as_str()).map(str::to_string),
+                    agent_id: required_string(&args, "agent_id")?,
+                    message: required_string(&args, "message")?,
+                    request_id: optional_string(&args, "request_id"),
                 };
-                let instance = args.get("instance").and_then(|v| v.as_str()).unwrap_or_default();
-                if instance != self.instance {
-                    json_error("not_found")
-                } else {
-                    serde_json::to_value(handle_talk_query(&self.snapshot_provider, &self.query_context, Some(req)).await)?
-                }
+                serde_json::to_value(
+                    self.query_instance::<TalkReply, _>(&instance, "talk", Some(&req))
+                        .await?,
+                )?
             }
             "stylos_request_task" => {
-                let instance = args.get("instance").and_then(|v| v.as_str()).unwrap_or_default();
-                if instance != self.instance {
-                    json_error("not_found")
-                } else {
-                    let req = TaskRequestPayload {
-                        task: args.get("task").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                        preferred_agent_id: args.get("preferred_agent_id").and_then(|v| v.as_str()).map(str::to_string),
-                        required_roles: args.get("required_roles").and_then(|v| serde_json::from_value(v.clone()).ok()),
-                        require_git_repo: args.get("require_git_repo").and_then(|v| v.as_bool()),
-                        request_id: args.get("request_id").and_then(|v| v.as_str()).map(str::to_string),
-                    };
-                    serde_json::to_value(handle_task_request_query(&self.snapshot_provider, &self.query_context, Some(req)).await)?
-                }
+                let instance = required_string(&args, "instance")?;
+                let req = TaskRequestPayload {
+                    task: required_string(&args, "task")?,
+                    preferred_agent_id: optional_string(&args, "preferred_agent_id"),
+                    required_roles: args
+                        .get("required_roles")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok()),
+                    require_git_repo: args.get("require_git_repo").and_then(|v| v.as_bool()),
+                    request_id: optional_string(&args, "request_id"),
+                };
+                serde_json::to_value(
+                    self.query_instance::<TaskRequestReply, _>(
+                        &instance,
+                        "tasks/request",
+                        Some(&req),
+                    )
+                    .await?,
+                )?
             }
             "stylos_query_task_status" => {
-                let instance = args.get("instance").and_then(|v| v.as_str()).unwrap_or_default();
-                if instance != self.instance {
-                    json_error("not_found")
-                } else {
-                    let req = TaskLookupRequest {
-                        task_id: args.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                    };
-                    serde_json::to_value(handle_task_status_query(&self.query_context, Some(req)).await)?
-                }
+                let instance = required_string(&args, "instance")?;
+                let req = TaskLookupRequest {
+                    task_id: required_string(&args, "task_id")?,
+                };
+                serde_json::to_value(
+                    self.query_instance::<TaskLookupReply, _>(&instance, "tasks/status", Some(&req))
+                        .await?,
+                )?
             }
             "stylos_query_task_result" => {
-                let instance = args.get("instance").and_then(|v| v.as_str()).unwrap_or_default();
-                if instance != self.instance {
-                    json_error("not_found")
-                } else {
-                    let req = TaskResultRequest {
-                        task_id: args.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                        wait_timeout_ms: args.get("wait_timeout_ms").and_then(|v| v.as_u64()),
-                    };
-                    serde_json::to_value(handle_task_result_query(&self.query_context, Some(req)).await)?
-                }
+                let instance = required_string(&args, "instance")?;
+                let req = TaskResultRequest {
+                    task_id: required_string(&args, "task_id")?,
+                    wait_timeout_ms: args.get("wait_timeout_ms").and_then(|v| v.as_u64()),
+                };
+                serde_json::to_value(
+                    self.query_instance::<TaskLookupReply, _>(&instance, "tasks/result", Some(&req))
+                        .await?,
+                )?
             }
             _ => anyhow::bail!("unknown stylos tool: {name}"),
         };
@@ -208,13 +216,17 @@ impl StylosToolBridge {
     }
 }
 
-
 impl StylosToolBridge {
     async fn query_zenoh_nodes(&self) -> anyhow::Result<ZenohNodesReply> {
         let info = self.session.info();
         let self_zid = info.zid().await.to_string();
-        let mut peer_zids: Vec<String> = info.peers_zid().await.map(|zid| zid.to_string()).collect();
-        let mut router_zids: Vec<String> = info.routers_zid().await.map(|zid| zid.to_string()).collect();
+        let mut peer_zids: Vec<String> =
+            info.peers_zid().await.map(|zid| zid.to_string()).collect();
+        let mut router_zids: Vec<String> = info
+            .routers_zid()
+            .await
+            .map(|zid| zid.to_string())
+            .collect();
         peer_zids.sort();
         peer_zids.dedup();
         router_zids.sort();
@@ -225,12 +237,77 @@ impl StylosToolBridge {
             router_zids,
         })
     }
+
+    async fn query_instance<T, P>(
+        &self,
+        instance: &str,
+        leaf: &str,
+        payload: Option<&P>,
+    ) -> anyhow::Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+        P: Serialize,
+    {
+        let key = format!(
+            "stylos/{}/themion/instances/{}/query/{}",
+            self.realm, instance, leaf
+        );
+        let encoded_payload = match payload {
+            Some(payload) => Some(serde_cbor::to_vec(payload)?),
+            None => None,
+        };
+        let mut builder = self
+            .session
+            .get(&key)
+            .target(QueryTarget::All)
+            .consolidation(ConsolidationMode::None)
+            .timeout(Duration::from_millis(DISCOVERY_QUERY_TIMEOUT_MS));
+        if let Some(payload) = encoded_payload {
+            builder = builder
+                .payload(payload)
+                .encoding(Encoding::APPLICATION_CBOR);
+        }
+        let replies = builder.await.map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let mut stream = replies.into_stream();
+        let mut decoded = None;
+        loop {
+            match tokio::time::timeout(
+                Duration::from_millis(DISCOVERY_QUERY_TIMEOUT_MS),
+                stream.next(),
+            )
+            .await
+            {
+                Ok(Some(reply)) => {
+                    let sample = reply
+                        .into_result()
+                        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                    let value =
+                        serde_cbor::from_slice::<T>(sample.payload().to_bytes().as_ref())?;
+                    if decoded.is_some() {
+                        anyhow::bail!(
+                            "protocol error: multiple replies for direct Stylos query key {key}"
+                        );
+                    }
+                    decoded = Some(value);
+                }
+                Ok(None) | Err(_) => break,
+            }
+        }
+        decoded.ok_or_else(|| anyhow::anyhow!(
+            "timeout/offline: no responder for Stylos query key {key}"
+        ))
+    }
 }
 
 impl StylosToolBridge {
-    async fn query_discovery<T>(&self, key: &str, payload: Option<Vec<u8>>) -> anyhow::Result<Vec<T>>
+    async fn query_discovery<T>(
+        &self,
+        key: &str,
+        payload: Option<Vec<u8>>,
+        exclude_self: bool,
+    ) -> anyhow::Result<Vec<T>>
     where
-        T: for<'de> Deserialize<'de>,
+        T: for<'de> Deserialize<'de> + DiscoveryInstanceOwned,
     {
         let mut builder = self
             .session
@@ -239,21 +316,29 @@ impl StylosToolBridge {
             .consolidation(ConsolidationMode::None)
             .timeout(Duration::from_millis(DISCOVERY_QUERY_TIMEOUT_MS));
         if let Some(payload) = payload {
-            builder = builder.payload(payload).encoding(Encoding::APPLICATION_CBOR);
+            builder = builder
+                .payload(payload)
+                .encoding(Encoding::APPLICATION_CBOR);
         }
         let replies = builder.await.map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let mut out = Vec::new();
         let mut stream = replies.into_stream();
         loop {
-            match tokio::time::timeout(Duration::from_millis(DISCOVERY_QUERY_TIMEOUT_MS), stream.next()).await {
+            match tokio::time::timeout(
+                Duration::from_millis(DISCOVERY_QUERY_TIMEOUT_MS),
+                stream.next(),
+            )
+            .await
+            {
                 Ok(Some(reply)) => {
-                    let decoded = match reply.into_result() {
-                        Ok(sample) => serde_cbor::from_slice::<T>(sample.payload().to_bytes().as_ref())?,
-                        Err(err) => {
-                            let reason = err.to_string();
-                            return Err(anyhow::anyhow!(reason));
-                        }
+                    let sample = match reply.into_result() {
+                        Ok(sample) => sample,
+                        Err(err) => return Err(anyhow::anyhow!(err.to_string())),
                     };
+                    let decoded = serde_cbor::from_slice::<T>(sample.payload().to_bytes().as_ref())?;
+                    if exclude_self && decoded.instance() == self.instance {
+                        continue;
+                    }
                     out.push(decoded);
                 }
                 Ok(None) | Err(_) => break,
@@ -263,13 +348,40 @@ impl StylosToolBridge {
     }
 }
 
-fn json_error(reason: &str) -> serde_json::Value {
-    serde_json::json!({"error": reason})
+
+trait DiscoveryInstanceOwned {
+    fn instance(&self) -> &str;
+}
+
+impl DiscoveryInstanceOwned for serde_json::Value {
+    fn instance(&self) -> &str {
+        self.get("instance").and_then(|v| v.as_str()).unwrap_or("")
+    }
+}
+
+fn required_string(args: &serde_json::Value, field: &str) -> anyhow::Result<String> {
+    args.get(field)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("missing {field}"))
+}
+
+fn optional_string(args: &serde_json::Value, field: &str) -> Option<String> {
+    args.get(field)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn optional_bool(args: &serde_json::Value, field: &str) -> Option<bool> {
+    args.get(field).and_then(|v| v.as_bool())
 }
 
 pub struct StylosHandle {
     state: StylosRuntimeState,
-    session_id: Option<String>,
     session: Option<Arc<zenoh::Session>>,
     status_task: Option<JoinHandle<()>>,
     queryable_task: Option<JoinHandle<()>>,
@@ -285,7 +397,6 @@ impl StylosHandle {
         let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
         Self {
             state: StylosRuntimeState::Off,
-            session_id: None,
             session: None,
             status_task: None,
             queryable_task: None,
@@ -318,10 +429,6 @@ impl StylosHandle {
 
     pub async fn set_snapshot_provider(&self, provider: StylosSnapshotProvider) {
         *self.snapshot_provider.write().await = Some(provider);
-    }
-
-    pub fn session_id_string(&self) -> String {
-        self.session_id.clone().unwrap_or_default()
     }
 
     pub async fn shutdown(self) {
@@ -459,8 +566,19 @@ struct StatusReply {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct ToolStatusReply {
+    found: bool,
+    instance: String,
+    session_id: String,
+    startup_project_dir: String,
+    agents: Vec<serde_json::Value>,
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct GitQueryRequest {
     remote: Option<String>,
+    exclude_self: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -576,9 +694,18 @@ impl TaskRegistry {
         self.inner.read().await.get(task_id).cloned()
     }
 
-    pub async fn set_completed(&self, task_id: &str, result: Option<String>, reason: Option<String>) {
+    pub async fn set_completed(
+        &self,
+        task_id: &str,
+        result: Option<String>,
+        reason: Option<String>,
+    ) {
         if let Some(entry) = self.inner.write().await.get_mut(task_id) {
-            entry.state = if reason.is_some() { "failed".to_string() } else { "completed".to_string() };
+            entry.state = if reason.is_some() {
+                "failed".to_string()
+            } else {
+                "completed".to_string()
+            };
             entry.result = result;
             entry.reason = reason;
             entry.updated_at = Instant::now();
@@ -597,7 +724,10 @@ impl TaskRegistry {
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         loop {
             if let Some(entry) = self.get(task_id).await {
-                if matches!(entry.state.as_str(), "completed" | "failed" | "rejected" | "expired") {
+                if matches!(
+                    entry.state.as_str(),
+                    "completed" | "failed" | "rejected" | "expired"
+                ) {
                     return Some(entry);
                 }
             } else {
@@ -644,7 +774,7 @@ async fn start_inner(
     let git_status = inspect_git_project(project_dir);
     let process_id = std::process::id();
     let identity_instance = hostname.clone();
-    let key_instance = format!("{hostname}/{process_id}");
+    let key_instance = format!("{hostname}:{process_id}");
     let realm = settings.realm();
     let mode = settings.mode();
 
@@ -757,11 +887,20 @@ async fn start_inner(
     let q_alive_key = format!("stylos/{}/themion/query/agents/alive", realm);
     let q_free_key = format!("stylos/{}/themion/query/agents/free", realm);
     let q_git_key = format!("stylos/{}/themion/query/agents/git", realm);
-    let q_status_key = format!("stylos/{}/themion/{}/query/status", realm, key_instance);
-    let q_talk_key = format!("stylos/{}/themion/{}/query/talk", realm, key_instance);
-    let q_task_request_key = format!("stylos/{}/themion/{}/query/tasks/request", realm, key_instance);
-    let q_task_status_key = format!("stylos/{}/themion/{}/query/tasks/status", realm, key_instance);
-    let q_task_result_key = format!("stylos/{}/themion/{}/query/tasks/result", realm, key_instance);
+    let q_status_key = format!("stylos/{}/themion/instances/{}/query/status", realm, key_instance);
+    let q_talk_key = format!("stylos/{}/themion/instances/{}/query/talk", realm, key_instance);
+    let q_task_request_key = format!(
+        "stylos/{}/themion/instances/{}/query/tasks/request",
+        realm, key_instance
+    );
+    let q_task_status_key = format!(
+        "stylos/{}/themion/instances/{}/query/tasks/status",
+        realm, key_instance
+    );
+    let q_task_result_key = format!(
+        "stylos/{}/themion/instances/{}/query/tasks/result",
+        realm, key_instance
+    );
     let info = ThemionInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         instance: key_instance.clone(),
@@ -927,7 +1066,6 @@ async fn start_inner(
             realm,
             instance: key_instance,
         },
-        session_id: Some(session.id.to_string()),
         session: Some(session_handle),
         status_task: Some(status_task),
         queryable_task: Some(queryable_task),
@@ -973,7 +1111,9 @@ async fn build_git_reply(
     let mut agents = build_queryable_agents(snapshot.agents);
     let requested = req.and_then(|r| r.remote);
     let requested_key = requested.as_deref().and_then(normalize_git_remote);
-    agents.retain(|agent| git_agent_matches_request(agent, requested.as_deref(), requested_key.as_deref()));
+    agents.retain(|agent| {
+        git_agent_matches_request(agent, requested.as_deref(), requested_key.as_deref())
+    });
     Some(DiscoveryReply {
         instance: instance.to_string(),
         session_id: session_id.to_string(),
@@ -998,35 +1138,26 @@ async fn build_status_reply(
         };
     };
     let mut agents = build_queryable_agents(snapshot.agents);
-    let mut found = true;
     if let Some(req) = req {
-        if req.agent_id.is_some() && req.role.is_some() {
-            return StatusReply {
-                found: false,
-                instance: instance.to_string(),
-                session_id: session_id.to_string(),
-                startup_project_dir: snapshot.startup_project_dir,
-                agents: Vec::new(),
-                error: Some("invalid_request".to_string()),
-            };
-        }
         if let Some(agent_id) = req.agent_id {
             agents.retain(|agent| agent.agent_id == agent_id);
-            if agents.is_empty() {
-                found = false;
-            }
         }
         if let Some(role) = req.role {
             agents.retain(|agent| agent.roles.iter().any(|r| r == &role));
         }
     }
+    let found = !agents.is_empty();
     StatusReply {
         found,
         instance: instance.to_string(),
         session_id: session_id.to_string(),
         startup_project_dir: snapshot.startup_project_dir,
         agents,
-        error: if found { None } else { Some("not_found".to_string()) },
+        error: if found {
+            None
+        } else {
+            Some("not_found".to_string())
+        },
     }
 }
 
@@ -1053,7 +1184,10 @@ async fn handle_talk_query(
             reason: Some("snapshot_unavailable".to_string()),
         };
     };
-    let agent = snapshot.agents.into_iter().find(|a| a.agent_id == req.agent_id);
+    let agent = snapshot
+        .agents
+        .into_iter()
+        .find(|a| a.agent_id == req.agent_id);
     let Some(agent) = agent else {
         return TalkReply {
             accepted: false,
@@ -1083,7 +1217,11 @@ async fn handle_talk_query(
         accepted: result.is_ok(),
         agent_id: agent.agent_id,
         request_id: req.request_id,
-        correlation_id: if result.is_ok() { Some(correlation_id) } else { None },
+        correlation_id: if result.is_ok() {
+            Some(correlation_id)
+        } else {
+            None
+        },
         reason: result.err(),
     }
 }
@@ -1124,7 +1262,11 @@ async fn handle_task_request_query(
         candidates.retain(|agent| &agent.agent_id == preferred);
     }
     if let Some(required_roles) = req.required_roles.as_ref() {
-        candidates.retain(|agent| required_roles.iter().all(|role| agent.roles.iter().any(|r| r == role)));
+        candidates.retain(|agent| {
+            required_roles
+                .iter()
+                .all(|role| agent.roles.iter().any(|r| r == role))
+        });
     }
     if req.require_git_repo.unwrap_or(false) {
         candidates.retain(|agent| agent.project_dir_is_git_repo);
@@ -1242,7 +1384,10 @@ async fn handle_task_result_query(
     match entry {
         Some(entry) => {
             let timed_out = wait_timeout_ms > 0
-                && !matches!(entry.state.as_str(), "completed" | "failed" | "rejected" | "expired");
+                && !matches!(
+                    entry.state.as_str(),
+                    "completed" | "failed" | "rejected" | "expired"
+                );
             TaskLookupReply {
                 found: true,
                 task_id: entry.task_id,
@@ -1272,7 +1417,9 @@ async fn current_snapshot(
     Some(provider().await)
 }
 
-fn build_queryable_agents(agents: Vec<StylosAgentStatusSnapshot>) -> Vec<StylosQueryableAgentSnapshot> {
+fn build_queryable_agents(
+    agents: Vec<StylosAgentStatusSnapshot>,
+) -> Vec<StylosQueryableAgentSnapshot> {
     agents
         .into_iter()
         .map(|agent| {
@@ -1370,9 +1517,16 @@ fn parse_cbor_payload<T: for<'de> Deserialize<'de>>(query: &zenoh::query::Query)
     serde_cbor::from_slice(bytes.as_ref()).ok()
 }
 
-async fn reply_cbor<T: Serialize>(query: zenoh::query::Query, key: String, payload: &T) -> Result<(), zenoh::Error> {
+async fn reply_cbor<T: Serialize>(
+    query: zenoh::query::Query,
+    key: String,
+    payload: &T,
+) -> Result<(), zenoh::Error> {
     let bytes = serde_cbor::to_vec(payload).unwrap_or_default();
-    query.reply(key, bytes).encoding(Encoding::APPLICATION_CBOR).await
+    query
+        .reply(key, bytes)
+        .encoding(Encoding::APPLICATION_CBOR)
+        .await
 }
 
 fn inspect_git_project(project_dir: &Path) -> GitProjectStatus {
@@ -1468,6 +1622,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn required_string_rejects_blank_values() {
+        let args = serde_json::json!({"field": "   "});
+        assert!(required_string(&args, "field").is_err());
+    }
+
+    #[test]
+    fn optional_string_ignores_blank_values() {
+        let args = serde_json::json!({"field": "   "});
+        assert_eq!(optional_string(&args, "field"), None);
+    }
+
+    #[test]
     fn normalizes_supported_git_remote_forms() {
         assert_eq!(
             normalize_git_remote("git@github.com:example/themion.git").as_deref(),
@@ -1498,6 +1664,15 @@ mod tests {
             normalize_git_remote("github.com/example/themion").as_deref(),
             Some("github.com/example/themion")
         );
+    }
+
+    #[test]
+    fn discovery_instance_owned_reads_instance_from_payload() {
+        let value = serde_json::json!({"instance": "vm-02:123"});
+        assert_eq!(value.instance(), "vm-02:123");
+
+        let missing = serde_json::json!({"agents": []});
+        assert_eq!(missing.instance(), "");
     }
 
     fn test_git_agent(remotes: &[&str], is_repo: bool) -> StylosQueryableAgentSnapshot {
@@ -1554,8 +1729,16 @@ mod tests {
     #[test]
     fn git_query_falls_back_to_exact_raw_match_when_query_cannot_normalize() {
         let agent = test_git_agent(&["file:///tmp/themion"], true);
-        assert!(git_agent_matches_request(&agent, Some("file:///tmp/themion"), None));
-        assert!(!git_agent_matches_request(&agent, Some("file:///tmp/other"), None));
+        assert!(git_agent_matches_request(
+            &agent,
+            Some("file:///tmp/themion"),
+            None
+        ));
+        assert!(!git_agent_matches_request(
+            &agent,
+            Some("file:///tmp/other"),
+            None
+        ));
     }
 
     #[test]
@@ -1581,13 +1764,12 @@ mod tests {
 
 pub fn tool_bridge(handle: &StylosHandle) -> Option<StylosToolBridge> {
     match handle.state() {
-        StylosRuntimeState::Active { realm, instance, .. } => Some(StylosToolBridge {
-            instance: instance.clone(),
+        StylosRuntimeState::Active {
+            realm, instance, ..
+        } => Some(StylosToolBridge {
             realm: realm.clone(),
+            instance: instance.clone(),
             session: handle.session.as_ref()?.clone(),
-            snapshot_provider: handle.snapshot_provider.clone(),
-            query_context: handle.query_context(),
-            session_id: handle.session_id_string(),
         }),
         _ => None,
     }

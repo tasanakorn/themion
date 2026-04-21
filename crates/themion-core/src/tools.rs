@@ -204,13 +204,28 @@ pub fn tool_definitions() -> Value {
 #[cfg(feature = "stylos")]
 fn stylos_tool_definitions() -> Vec<Value> {
     vec![
-        stylos_tool("stylos_query_agents_alive", "Ask which Themion instances and agents are currently alive.", json!({"type":"object","properties":{},"required":[]})),
-        stylos_tool("stylos_query_agents_free", "Ask which agents are currently free for new work.", json!({"type":"object","properties":{},"required":[]})),
+        stylos_tool("stylos_query_agents_alive", "Ask which Themion instances and agents are currently alive.", json!({
+            "type":"object",
+            "properties":{
+                "exclude_self":{"type":"boolean","description":"Whether to exclude the current Themion instance from discovery results. Defaults to true."}
+            },
+            "required":[]
+        })),
+        stylos_tool("stylos_query_agents_free", "Ask which agents are currently free for new work.", json!({
+            "type":"object",
+            "properties":{
+                "exclude_self":{"type":"boolean","description":"Whether to exclude the current Themion instance from discovery results. Defaults to true."}
+            },
+            "required":[]
+        })),
         stylos_tool("stylos_query_agents_git", "Ask which agents are attached to git repositories, optionally matching a specific repo identity.", json!({
-            "type":"object","properties":{"remote":{"type":"string","description":"Optional git remote to match across normalized repo forms."}},"required":[]
+            "type":"object","properties":{
+                "remote":{"type":"string","description":"Optional git remote to match across normalized repo forms."},
+                "exclude_self":{"type":"boolean","description":"Whether to exclude the current Themion instance from discovery results. Defaults to true."}
+            },"required":[]
         })),
         stylos_tool("stylos_query_nodes", "Ask which Themion nodes are visible on the Stylos network.", json!({"type":"object","properties":{},"required":[]})),
-        stylos_tool("stylos_query_status", "Ask one instance for its current process and agent status.", json!({
+        stylos_tool("stylos_query_status", "Ask one instance for its current process and agent status. Optional agent_id and role filters may be provided independently or together.", json!({
             "type":"object","properties":{"instance":{"type":"string"},"agent_id":{"type":"string"},"role":{"type":"string"}},"required":["instance"]
         })),
         stylos_tool("stylos_request_talk", "Submit a user-style message to one target agent.", json!({
