@@ -87,7 +87,7 @@ Each call to `run_loop(user_input)`:
 4. Stream tokens to TUI via `AgentEvent::AssistantChunk`; accumulate full response.
 5. Push `role="assistant"` response to history; persist to `agent_messages`.
 6. If response has no `tool_calls` → break.
-7. For each tool call: emit `ToolStart` (detail truncated to 60 chars), execute via `call_tool`, push `role="tool"` result; persist each.
+7. For each tool call: emit `ToolStart` (detail center-trimmed to about 60 chars with `󱑼` when needed), execute via `call_tool`, push `role="tool"` result; persist each.
 8. Repeat from step 3 until the assistant returns with no more tool calls or another existing runtime stop condition ends the turn.
 9. Finalize the DB turn row with token stats; emit `TurnDone`.
 
@@ -125,7 +125,7 @@ Codex uses the OpenAI Responses API rather than Chat Completions. Its stream con
 
 ## Tools (tools.rs)
 
-All tools receive a `&ToolCtx` carrying the DB handle and session identity. Filesystem tools ignore it; history tools and workflow tools use it. Tool call display labels are truncated to 60 chars to keep TUI lines readable.
+All tools receive a `&ToolCtx` carrying the DB handle and session identity. Filesystem tools ignore it; history tools and workflow tools use it. Tool call display labels are center-trimmed to about 60 chars with `󱑼` when needed so the TUI can preserve both the beginning and end of long values.
 
 `time_sleep` is a built-in bounded wait helper for short pauses. It accepts `ms`, rejects values above 30,000, and lets the agent express lightweight waiting without shelling out to `sleep`.
 

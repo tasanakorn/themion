@@ -125,6 +125,8 @@ When the local agent invokes `stylos_request_talk` and the request is accepted, 
 
 This sender-side log is distinct from generic tool-call text and is intended to make outbound peer messaging visible in the chat transcript.
 
+Tool-call chat labels remain compact, but long tool detail values are now center-trimmed to about 60 characters with `󱑼` so the display can preserve both the beginning and the end of paths, commands, and other long identifiers.
+
 ## Lightweight wait tool
 
 `themion-core` now exposes a built-in `time_sleep` tool for short bounded waits.

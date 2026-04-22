@@ -47,6 +47,7 @@
 | PRD-035 | [Add `blocked` Board Column with Cooldown-Aware Revisit Semantics](prd/prd-035-blocked-board-column-and-cooldown.md) | Implemented | v0.21.0 | `themion-core`, `themion-cli`, docs |
 | PRD-036 | [Prompt Guidance for Self-Note Creation Beyond Simple Q&A](prd/prd-036-prompt-guidance-for-self-note-creation-beyond-simple-qa.md) | Proposed | v0.22.0 | `themion-core`, docs |
 | PRD-037 | [Remove the Hard-Coded 10-Round Harness Loop Limit and Rely on State-Based Termination](prd/prd-037-replace-hard-coded-harness-loop-limit.md) | Implemented | v0.23.0 | `themion-core`, docs |
+| PRD-038 | [Center Trim Tool Call Chat Labels](prd/prd-038-center-trim-tool-call-chat-labels.md) | Implemented | v0.23.1 | `themion-core`, `themion-cli`, docs |
 
 ## Roadmap note
 

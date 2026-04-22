@@ -120,6 +120,27 @@ Typical feature checks for `themion-cli`:
 - If the PRD does not specify a target version, still decide whether the change is release-worthy and bump the repository version when appropriate.
 - Do not stop at pre-bump validation only: when a task includes a version bump, also run the relevant post-bump validation so version-sensitive issues are checked fairly in both directions.
 
+### Instruction precedence and follow-through
+
+- Treat repository instructions, accepted PRDs, and explicit user requirements as authoritative defaults, not optional suggestions.
+- Do not ask the user to reconfirm an action that the repository guide or the active PRD already requires, unless the user previously gave conflicting instructions.
+- If a PRD or repo guide already resolves a decision such as the target version, required docs updates, or required validation, perform that work and report it instead of asking for permission again.
+- Ask a clarifying question only when there is real ambiguity that blocks correct execution, not when the repository guidance already answers the question.
+- Before declaring a PRD implementation done, explicitly check that all PRD-required follow-through work is also done, including version bumps, docs/status updates, lockfile checks, and post-bump validation where applicable.
+- If the user asks why a required follow-through step was missed, treat that as a process failure to correct immediately, not as a new optional request.
+
+### Required PRD completion checklist
+
+When implementing an existing PRD, do not consider the task complete until you have checked all of the following:
+
+- behavior described by the PRD is implemented or any gap is clearly reported
+- `docs/README.md` and the PRD status/implementation notes reflect what actually landed
+- version bump expectation was checked against the PRD and repository guidance
+- `Cargo.lock` was checked after any manifest or version change
+- relevant pre-bump and post-bump validation were run when version-sensitive work is involved
+- touched crates still build cleanly in the relevant feature configurations
+- newly introduced warnings in the touched scope were fixed or clearly called out if blocked
+
 ## Git discipline
 
 - Stage and commit only files relevant to the requested change.

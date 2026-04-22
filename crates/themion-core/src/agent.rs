@@ -63,13 +63,27 @@ impl TurnCancellation {
     }
 }
 
-fn truncate(s: &str, max: usize) -> String {
+const TOOL_DETAIL_MAX_CHARS: usize = 60;
+const TOOL_DETAIL_CENTER_TRIM_MARKER: &str = "󱑼";
+
+fn center_trim(s: &str, max: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
     if chars.len() <= max {
-        s.to_string()
-    } else {
-        chars[..max].iter().collect::<String>() + "…"
+        return s.to_string();
     }
+
+    let marker_chars: Vec<char> = TOOL_DETAIL_CENTER_TRIM_MARKER.chars().collect();
+    if max <= marker_chars.len() {
+        return marker_chars.into_iter().take(max).collect();
+    }
+
+    let remaining = max - marker_chars.len();
+    let prefix_len = remaining / 2;
+    let suffix_len = remaining - prefix_len;
+
+    let prefix: String = chars[..prefix_len].iter().collect();
+    let suffix: String = chars[chars.len() - suffix_len..].iter().collect();
+    format!("{}{}{}", prefix, TOOL_DETAIL_CENTER_TRIM_MARKER, suffix)
 }
 
 fn self_session_id_fallback() -> String {
@@ -78,7 +92,7 @@ fn self_session_id_fallback() -> String {
 
 fn tool_call_detail(name: &str, args_json: &str) -> String {
     let args: serde_json::Value = serde_json::from_str(args_json).unwrap_or_default();
-    let t = |key: &str| truncate(args[key].as_str().unwrap_or("?"), 60);
+    let t = |key: &str| center_trim(args[key].as_str().unwrap_or("?"), TOOL_DETAIL_MAX_CHARS);
     match name {
         "shell_run_command" | "bash" => format!("shell: {}", t("command")),
         "fs_read_file" | "read_file" => format!("read: {}", t("path")),
@@ -86,12 +100,12 @@ fn tool_call_detail(name: &str, args_json: &str) -> String {
         "fs_list_directory" | "list_directory" => format!("ls: {}", t("path")),
         "history_recall" | "recall_history" => format!(
             "history_recall: session={}",
-            truncate(
+            center_trim(
                 &args["session_id"]
                     .as_str()
                     .map(str::to_owned)
                     .unwrap_or_else(|| self_session_id_fallback()),
-                60
+                TOOL_DETAIL_MAX_CHARS,
             )
         ),
         "history_search" | "search_history" => format!("history_search: {}", t("query")),
@@ -102,12 +116,12 @@ fn tool_call_detail(name: &str, args_json: &str) -> String {
         "stylos_request_talk" => format!(
             "stylos_request_talk instance={} to_agent_id={}",
             t("instance"),
-            truncate(
-                &args["to_agent_id"]
+            center_trim(
+                args["to_agent_id"]
                     .as_str()
                     .or_else(|| args["agent_id"].as_str())
                     .unwrap_or("main"),
-                60,
+                TOOL_DETAIL_MAX_CHARS,
             )
         ),
         "board_create_note" => {
@@ -118,8 +132,8 @@ fn tool_call_detail(name: &str, args_json: &str) -> String {
             };
             format!(
                 "board_create_note to_instance={} to_agent_id={}",
-                truncate(resolved_to_instance, 60),
-                truncate(args["to_agent_id"].as_str().unwrap_or("main"), 60,)
+                center_trim(resolved_to_instance, TOOL_DETAIL_MAX_CHARS),
+                center_trim(args["to_agent_id"].as_str().unwrap_or("main"), TOOL_DETAIL_MAX_CHARS,)
             )
         }
         _ => name.to_string(),
@@ -889,6 +903,7 @@ impl Agent {
                 tool_call_id: None,
             });
 
+#[cfg(feature = "stylos")]
             msgs_with_system.push(Message {
                 role: "system".to_string(),
                 content: Some({
@@ -898,6 +913,16 @@ impl Agent {
                         "Board guidance: simple direct Q&A without tools usually should not create a self-note. If the task needs tools, edits, validation, or durable follow-up tracking, consider creating a durable board note for yourself to help keep track of the work. Your exact self-note target in this session is to_instance={self_instance} to_agent_id={self_agent_id}. For self-notes, you may also call board_create_note with the exact magic keyword SELF for both to_instance and to_agent_id, and the runtime will replace SELF with those exact values. Do not invent placeholders or guesses other than the exact SELF keyword. Multi-agent collaboration guidance: prefer durable board notes over stylos_request_talk when delegating asynchronous or non-urgent work to another agent. Treat stylos_request_talk as an interrupting realtime path for urgent coordination or brief clarification. When you receive a done-mention note, treat it as an informational completion notification rather than a fresh work request."
                     )
                 }),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+
+#[cfg(not(feature = "stylos"))]
+            msgs_with_system.push(Message {
+                role: "system".to_string(),
+                content: Some(
+                    "Board guidance: simple direct Q&A without tools usually should not create a self-note. If the task needs tools, edits, validation, or durable follow-up tracking, consider creating a durable board note for yourself to help keep track of the work. For self-notes in this session, use your local board context rather than inventing remote identifiers. Multi-agent collaboration guidance: prefer durable board notes over stylos_request_talk when delegating asynchronous or non-urgent work to another agent. Treat stylos_request_talk as an interrupting realtime path for urgent coordination or brief clarification. When you receive a done-mention note, treat it as an informational completion notification rather than a fresh work request.".to_string(),
+                ),
                 tool_calls: None,
                 tool_call_id: None,
             });
@@ -1414,5 +1439,39 @@ impl Agent {
         }
         self.emit(AgentEvent::TurnDone(stats.clone()));
         Ok((final_response, stats))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{center_trim, tool_call_detail, TOOL_DETAIL_CENTER_TRIM_MARKER};
+
+    #[test]
+    fn center_trim_keeps_short_strings_unchanged() {
+        assert_eq!(center_trim("short", 10), "short");
+    }
+
+    #[test]
+    fn center_trim_inserts_marker_and_keeps_ends() {
+        let trimmed = center_trim("abcdefghijklmnopqrstuvwxyz", 10);
+        assert_eq!(trimmed, format!("abcd{}vwxyz", TOOL_DETAIL_CENTER_TRIM_MARKER));
+    }
+
+    #[test]
+    fn center_trim_preserves_unicode_boundaries() {
+        let trimmed = center_trim("こんにちは世界さようなら", 8);
+        assert!(trimmed.contains(TOOL_DETAIL_CENTER_TRIM_MARKER));
+        assert_eq!(trimmed.chars().count(), 8);
+    }
+
+    #[test]
+    fn tool_call_detail_center_trims_long_paths() {
+        let detail = tool_call_detail(
+            "fs_read_file",
+            r#"{"path":"/very/long/path/to/a/deeply/nested/file/with-important-name.rs"}"#,
+        );
+        assert!(detail.starts_with("read: /very/long/path/to/a/deeply"));
+        assert!(detail.contains(TOOL_DETAIL_CENTER_TRIM_MARKER));
+        assert!(detail.ends_with("file/with-important-name.rs"));
     }
 }

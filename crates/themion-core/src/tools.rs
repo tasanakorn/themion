@@ -109,7 +109,7 @@ fn resolve_board_target(
 }
 
 pub fn tool_definitions() -> Value {
-    let mut defs = vec![
+    let base_defs = vec![
         json!({
             "type": "function",
             "function": {
@@ -373,7 +373,14 @@ pub fn tool_definitions() -> Value {
     ];
 
     #[cfg(feature = "stylos")]
-    defs.extend(stylos_tool_definitions());
+    let defs = {
+        let mut defs = base_defs;
+        defs.extend(stylos_tool_definitions());
+        defs
+    };
+
+    #[cfg(not(feature = "stylos"))]
+    let defs = base_defs;
 
     Value::Array(defs)
 }

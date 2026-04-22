@@ -676,7 +676,7 @@ impl<'a> App<'a> {
         }
     }
 
-    fn handle_agent_event(&mut self, ev: AgentEvent, app_tx: &mpsc::UnboundedSender<AppEvent>) {
+    fn handle_agent_event(&mut self, ev: AgentEvent, #[cfg(feature = "stylos")] app_tx: &mpsc::UnboundedSender<AppEvent>) {
         match ev {
             AgentEvent::LlmStart => {
                 #[cfg(feature = "stylos")]
@@ -2424,7 +2424,10 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     app.submit_text(request.prompt, &app_tx);
                 }
             }
+#[cfg(feature = "stylos")]
             Some(AppEvent::Agent(ev)) => app.handle_agent_event(ev, &app_tx),
+#[cfg(not(feature = "stylos"))]
+            Some(AppEvent::Agent(ev)) => app.handle_agent_event(ev),
             Some(AppEvent::AgentReady(agent, sid)) => {
                 let agent = *agent;
                 app.status_model_info = agent.model_info().cloned();
