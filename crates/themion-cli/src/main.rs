@@ -159,6 +159,11 @@ async fn main() -> anyhow::Result<()> {
             project_dir,
             db,
         );
+        #[cfg(feature = "stylos")]
+        {
+            agent.set_local_agent_id(Some("main".to_string()));
+            agent.set_local_instance_id(Some(stylos::derive_local_instance_id()));
+        }
         agent.refresh_model_info().await;
         let (result, stats) = agent.run_loop(&prompt).await?;
         println!("{result}");

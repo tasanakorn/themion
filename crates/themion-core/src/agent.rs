@@ -110,11 +110,18 @@ fn tool_call_detail(name: &str, args_json: &str) -> String {
                 60,
             )
         ),
-        "board_create_note" => format!(
-            "board_create_note to_instance={} to_agent_id={}",
-            t("to_instance"),
-            truncate(args["to_agent_id"].as_str().unwrap_or("main"), 60,)
-        ),
+        "board_create_note" => {
+            let raw_to_instance = args["to_instance"].as_str().unwrap_or("?").trim();
+            let resolved_to_instance = match raw_to_instance {
+                "SELF" => "self",
+                _ => raw_to_instance,
+            };
+            format!(
+                "board_create_note to_instance={} to_agent_id={}",
+                truncate(resolved_to_instance, 60),
+                truncate(args["to_agent_id"].as_str().unwrap_or("main"), 60,)
+            )
+        }
         _ => name.to_string(),
     }
 }
@@ -135,6 +142,8 @@ pub struct Agent {
     workflow_state: WorkflowState,
     #[cfg(feature = "stylos")]
     local_agent_id: Option<String>,
+    #[cfg(feature = "stylos")]
+    local_instance_id: Option<String>,
     #[cfg(feature = "stylos")]
     stylos_tool_invoker: Option<crate::tools::StylosToolInvoker>,
 }
@@ -161,6 +170,8 @@ impl Agent {
             workflow_state: WorkflowState::default(),
             #[cfg(feature = "stylos")]
             local_agent_id: None,
+            #[cfg(feature = "stylos")]
+            local_instance_id: None,
             #[cfg(feature = "stylos")]
             stylos_tool_invoker: None,
         }
@@ -215,6 +226,8 @@ impl Agent {
             #[cfg(feature = "stylos")]
             local_agent_id: None,
             #[cfg(feature = "stylos")]
+            local_instance_id: None,
+            #[cfg(feature = "stylos")]
             stylos_tool_invoker: None,
         }
     }
@@ -231,6 +244,11 @@ impl Agent {
     #[cfg(feature = "stylos")]
     pub fn set_local_agent_id(&mut self, agent_id: Option<String>) {
         self.local_agent_id = agent_id;
+    }
+
+    #[cfg(feature = "stylos")]
+    pub fn set_local_instance_id(&mut self, instance_id: Option<String>) {
+        self.local_instance_id = instance_id;
     }
 
     pub fn clear_context(&mut self) {
@@ -873,7 +891,13 @@ impl Agent {
 
             msgs_with_system.push(Message {
                 role: "system".to_string(),
-                content: Some("Multi-agent collaboration guidance: prefer durable board notes over stylos_request_talk when delegating asynchronous or non-urgent work to another agent. Treat stylos_request_talk as an interrupting realtime path for urgent coordination or brief clarification. When you receive a done-mention note, treat it as an informational completion notification rather than a fresh work request.".to_string()),
+                content: Some({
+                    let self_instance = self.local_instance_id.as_deref().unwrap_or("unknown");
+                    let self_agent_id = self.local_agent_id.as_deref().unwrap_or("main");
+                    format!(
+                        "Board guidance: simple direct Q&A without tools usually should not create a self-note. If the task needs tools, edits, validation, or durable follow-up tracking, consider creating a durable board note for yourself to help keep track of the work. Your exact self-note target in this session is to_instance={self_instance} to_agent_id={self_agent_id}. For self-notes, you may also call board_create_note with the exact magic keyword SELF for both to_instance and to_agent_id, and the runtime will replace SELF with those exact values. Do not invent placeholders or guesses other than the exact SELF keyword. Multi-agent collaboration guidance: prefer durable board notes over stylos_request_talk when delegating asynchronous or non-urgent work to another agent. Treat stylos_request_talk as an interrupting realtime path for urgent coordination or brief clarification. When you receive a done-mention note, treat it as an informational completion notification rather than a fresh work request."
+                    )
+                }),
                 tool_calls: None,
                 tool_call_id: None,
             });
@@ -1182,6 +1206,8 @@ impl Agent {
                     turn_seq: Some(turn_seq),
                     #[cfg(feature = "stylos")]
                     local_agent_id: self.local_agent_id.clone(),
+                    #[cfg(feature = "stylos")]
+                    local_instance_id: self.local_instance_id.clone(),
                     #[cfg(feature = "stylos")]
                     stylos_tool_invoker: self.stylos_tool_invoker.clone(),
                     #[cfg(feature = "stylos")]

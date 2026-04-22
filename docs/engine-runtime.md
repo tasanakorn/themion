@@ -172,6 +172,7 @@ Current behavior:
 - the TUI checks for pending local notes on tick when no local turn is active
 - idle injection prefers pending `in_progress` notes; `todo` is considered only when no pending `in_progress` note exists for that agent
 - injected notes use a note-specific prompt wrapper, include core note metadata (`note_id`, `note_slug`, sender/target identities, current column, then body), and are marked injected to avoid duplicate delivery
+- prompt-visible board guidance says simple direct Q&A without tools usually should not create a self-note, while tool-using or follow-up-tracked work should consider one
 - prompt-visible collaboration guidance prefers durable notes over `talk` for delegated asynchronous work, treating `talk` as a more interrupting realtime path
 - injected note prompts distinguish delegated work-request notes from informational done mentions so agents can treat completion notifications as result handoff rather than fresh delegated work
 - when a delegated cross-agent note reaches `done`, the CLI-side completion path can emit one requester-directed done mention through the existing note-create flow, including original-note reference metadata and result text when available

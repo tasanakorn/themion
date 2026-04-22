@@ -873,11 +873,12 @@ async fn start_inner(
     project_dir: &PathBuf,
     notes_db: Arc<themion_core::db::DbHandle>,
 ) -> Result<StylosHandle, String> {
-    let hostname = derive_hostname().unwrap_or_else(|| "themion".to_string());
+    let key_instance = derive_local_instance_id();
+    let identity_instance = key_instance
+        .split_once(':')
+        .map(|(hostname, _)| hostname.to_string())
+        .unwrap_or_else(|| "themion".to_string());
     let git_status = inspect_git_project(project_dir);
-    let process_id = std::process::id();
-    let identity_instance = hostname.clone();
-    let key_instance = format!("{hostname}:{process_id}");
     let realm = settings.realm();
     let mode = settings.mode();
 
@@ -1468,6 +1469,7 @@ async fn handle_note_query(
         to_instance: query_context.local_instance().to_string(),
         to_agent_id: agent.agent_id.clone(),
         body: req.body.clone(),
+        meta_json: None,
     });
     match created {
         Ok(note) => {
@@ -1876,6 +1878,12 @@ fn collect_git_remote_urls(project_dir: &Path) -> Vec<String> {
     }
 
     urls.into_iter().collect()
+}
+
+pub fn derive_local_instance_id() -> String {
+    let hostname = derive_hostname().unwrap_or_else(|| "themion".to_string());
+    let process_id = std::process::id();
+    format!("{hostname}:{process_id}")
 }
 
 fn derive_hostname() -> Option<String> {

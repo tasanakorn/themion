@@ -50,6 +50,7 @@ type StylosToolFuture = Pin<Box<dyn Future<Output = Result<String>> + Send>>;
 pub type StylosToolInvoker = Arc<dyn Fn(String, Value) -> StylosToolFuture + Send + Sync>;
 
 const MAX_SLEEP_MS: u64 = 30_000;
+const SELF_TARGET_KEYWORD: &str = "SELF";
 
 pub struct ToolCtx {
     pub db: Arc<DbHandle>,
@@ -60,9 +61,51 @@ pub struct ToolCtx {
     #[cfg(feature = "stylos")]
     pub local_agent_id: Option<String>,
     #[cfg(feature = "stylos")]
+    pub local_instance_id: Option<String>,
+    #[cfg(feature = "stylos")]
     pub stylos_tool_invoker: Option<StylosToolInvoker>,
     #[cfg(feature = "stylos")]
     pub stylos_enabled: bool,
+}
+
+fn resolve_board_target(
+    requested_to_instance: &str,
+    requested_to_agent_id: &str,
+    #[cfg(feature = "stylos")] local_instance_id: Option<&str>,
+    #[cfg(feature = "stylos")] local_agent_id: Option<&str>,
+) -> Result<(String, String)> {
+    if requested_to_instance != SELF_TARGET_KEYWORD && requested_to_agent_id != SELF_TARGET_KEYWORD {
+        return Ok((
+            requested_to_instance.to_string(),
+            requested_to_agent_id.to_string(),
+        ));
+    }
+
+    #[cfg(feature = "stylos")]
+    {
+        let to_instance = if requested_to_instance == SELF_TARGET_KEYWORD {
+            local_instance_id
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("SELF requires known local instance id"))?
+                .to_string()
+        } else {
+            requested_to_instance.to_string()
+        };
+        let to_agent_id = if requested_to_agent_id == SELF_TARGET_KEYWORD {
+            local_agent_id
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("SELF requires known local agent id"))?
+                .to_string()
+        } else {
+            requested_to_agent_id.to_string()
+        };
+        return Ok((to_instance, to_agent_id));
+    }
+
+    #[cfg(not(feature = "stylos"))]
+    {
+        anyhow::bail!("SELF target keyword is unavailable without stylos support");
+    }
 }
 
 pub fn tool_definitions() -> Value {
@@ -233,12 +276,12 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "board_create_note",
-                "description": "Create a durable board note targeted to an instance and agent. When Stylos is enabled, creation uses the Stylos receiver-intake flow rather than direct local DB insertion.",
+                "description": "Create a durable board note targeted to an instance and agent. Use the exact magic keyword SELF for to_instance and to_agent_id when creating a note for yourself; the runtime will replace SELF with the current local instance and local agent id. When Stylos is enabled, creation uses the Stylos receiver-intake flow rather than direct local DB insertion.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "to_instance": { "type": "string" },
-                        "to_agent_id": { "type": "string" },
+                        "to_instance": { "type": "string", "description": "Target instance id, or SELF to target the current local instance." },
+                        "to_agent_id": { "type": "string", "description": "Target agent id, or SELF to target the current local agent id." },
                         "body": { "type": "string" },
                         "note_kind": { "type": "string", "enum": ["work_request", "done_mention"], "description": "Optional note semantics. Defaults to work_request." },
                         "origin_note_id": { "type": "string", "description": "Optional original note reference, used for done mentions." },
@@ -496,15 +539,24 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             }
         }
         "board_create_note" => {
-            let to_instance = args["to_instance"]
+            let requested_to_instance = args["to_instance"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing to_instance"))?;
-            let to_agent_id = args["to_agent_id"]
+            let requested_to_agent_id = args["to_agent_id"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing to_agent_id"))?;
             let body = args["body"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing body"))?;
+
+            let (to_instance, to_agent_id) = resolve_board_target(
+                requested_to_instance,
+                requested_to_agent_id,
+                #[cfg(feature = "stylos")]
+                ctx.local_instance_id.as_deref(),
+                #[cfg(feature = "stylos")]
+                ctx.local_agent_id.as_deref(),
+            )?;
 
             #[cfg(feature = "stylos")]
             {
@@ -550,9 +602,10 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 origin_note_id: args["origin_note_id"].as_str().map(str::to_string),
                 from_instance: args["from_instance"].as_str().map(str::to_string),
                 from_agent_id: args["from_agent_id"].as_str().map(str::to_string),
-                to_instance: to_instance.to_string(),
-                to_agent_id: to_agent_id.to_string(),
+                to_instance,
+                to_agent_id,
                 body: body.to_string(),
+                meta_json: None,
             })?;
             Ok(stylos_note_to_json(&note).to_string())
         }
@@ -561,7 +614,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 .as_str()
                 .map(|v| parse_note_column(v).ok_or_else(|| anyhow::anyhow!("invalid column")))
                 .transpose()?;
-            let notes = ctx.db.list_stylos_notes(
+            let notes = ctx.db.list_board_notes(
                 args["to_instance"].as_str(),
                 args["to_agent_id"].as_str(),
                 column,

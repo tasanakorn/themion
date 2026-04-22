@@ -106,7 +106,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_workflow_transitions_session_time
 CREATE INDEX IF NOT EXISTS idx_agent_workflow_transitions_turn
     ON agent_workflow_transitions(turn_id);
 
-CREATE TABLE IF NOT EXISTS stylos_notes (
+CREATE TABLE IF NOT EXISTS board_notes (
     note_id TEXT PRIMARY KEY,
     note_kind TEXT NOT NULL DEFAULT 'work_request',
     origin_note_id TEXT,
@@ -120,16 +120,17 @@ CREATE TABLE IF NOT EXISTS stylos_notes (
     result_text TEXT,
     injection_state TEXT NOT NULL,
     blocked_until_ms INTEGER,
+    meta_json TEXT,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     injected_at_ms INTEGER
 );
-CREATE INDEX IF NOT EXISTS idx_stylos_notes_target_column_created
-    ON stylos_notes(to_instance, to_agent_id, column_name, created_at_ms);
-CREATE INDEX IF NOT EXISTS idx_stylos_notes_target_injection
-    ON stylos_notes(to_instance, to_agent_id, injection_state, created_at_ms);
-CREATE INDEX IF NOT EXISTS idx_stylos_notes_target_blocked_until
-    ON stylos_notes(to_instance, to_agent_id, column_name, blocked_until_ms, created_at_ms);
+CREATE INDEX IF NOT EXISTS idx_board_notes_target_column_created
+    ON board_notes(to_instance, to_agent_id, column_name, created_at_ms);
+CREATE INDEX IF NOT EXISTS idx_board_notes_target_injection
+    ON board_notes(to_instance, to_agent_id, injection_state, created_at_ms);
+CREATE INDEX IF NOT EXISTS idx_board_notes_target_blocked_until
+    ON board_notes(to_instance, to_agent_id, column_name, blocked_until_ms, created_at_ms);
 ";
 
 const SCHEMA_FTS5: &str = "
@@ -193,9 +194,9 @@ fn generate_note_slug(note_id: &str, body: &str) -> String {
 
 fn note_slug_exists(conn: &Connection, slug: &str, exclude_note_id: Option<&str>) -> Result<bool> {
     let sql = if exclude_note_id.is_some() {
-        "SELECT 1 FROM stylos_notes WHERE note_slug = ?1 AND note_id != ?2 LIMIT 1"
+        "SELECT 1 FROM board_notes WHERE note_slug = ?1 AND note_id != ?2 LIMIT 1"
     } else {
-        "SELECT 1 FROM stylos_notes WHERE note_slug = ?1 LIMIT 1"
+        "SELECT 1 FROM board_notes WHERE note_slug = ?1 LIMIT 1"
     };
     let exists = if let Some(note_id) = exclude_note_id {
         conn.query_row(sql, rusqlite::params![slug, note_id], |_| Ok(()))
@@ -228,12 +229,12 @@ fn make_unique_note_slug(
     anyhow::bail!("failed to allocate unique note_slug")
 }
 
-fn migrate_stylos_notes_identifiers(conn: &Connection) -> Result<()> {
-    ensure_column(conn, "stylos_notes", "note_slug", "TEXT")?;
+fn migrate_board_notes_identifiers(conn: &Connection) -> Result<()> {
+    ensure_column(conn, "board_notes", "note_slug", "TEXT")?;
 
     let mut duplicate_stmt = conn.prepare(
         "SELECT note_slug, GROUP_CONCAT(note_id, ', '), COUNT(*)
-         FROM stylos_notes
+         FROM board_notes
          WHERE note_slug IS NOT NULL AND TRIM(note_slug) != ''
          GROUP BY note_slug
          HAVING COUNT(*) > 1",
@@ -259,7 +260,7 @@ fn migrate_stylos_notes_identifiers(conn: &Connection) -> Result<()> {
     }
 
     let mut stmt = conn
-        .prepare("SELECT note_id, note_slug, body FROM stylos_notes ORDER BY created_at_ms ASC")?;
+        .prepare("SELECT note_id, note_slug, body FROM board_notes ORDER BY created_at_ms ASC")?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -297,12 +298,12 @@ fn migrate_stylos_notes_identifiers(conn: &Connection) -> Result<()> {
 
     for (old_note_id, new_note_id, slug) in updates {
         conn.execute(
-            "UPDATE stylos_notes SET note_id = ?2, note_slug = ?3 WHERE note_id = ?1",
+            "UPDATE board_notes SET note_id = ?2, note_slug = ?3 WHERE note_id = ?1",
             rusqlite::params![old_note_id, new_note_id, slug],
         )?;
     }
     conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_stylos_notes_note_slug ON stylos_notes(note_slug)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_board_notes_note_slug ON board_notes(note_slug)",
         [],
     )?;
     Ok(())
@@ -383,16 +384,17 @@ fn init_schema(conn: &Connection, fts5: bool) -> Result<()> {
         "phase_entered_via",
         "TEXT",
     )?;
-    migrate_stylos_notes_identifiers(conn)?;
+    migrate_board_notes_identifiers(conn)?;
     ensure_column(
         conn,
-        "stylos_notes",
+        "board_notes",
         "note_kind",
         "TEXT NOT NULL DEFAULT 'work_request'",
     )?;
-    ensure_column(conn, "stylos_notes", "origin_note_id", "TEXT")?;
-    ensure_column(conn, "stylos_notes", "completion_notified_at_ms", "INTEGER")?;
-    ensure_column(conn, "stylos_notes", "blocked_until_ms", "INTEGER")?;
+    ensure_column(conn, "board_notes", "origin_note_id", "TEXT")?;
+    ensure_column(conn, "board_notes", "completion_notified_at_ms", "INTEGER")?;
+    ensure_column(conn, "board_notes", "blocked_until_ms", "INTEGER")?;
+    ensure_column(conn, "board_notes", "meta_json", "TEXT")?;
     if fts5 {
         conn.execute_batch(SCHEMA_FTS5)?;
     }
@@ -835,16 +837,17 @@ impl DbHandle {
             injection_state: NoteInjectionState::Pending,
             blocked_until_ms: (args.column == NoteColumn::Blocked)
                 .then(|| now_ms + BLOCKED_RETRY_COOLDOWN_MS),
+            meta_json: args.meta_json,
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
             injected_at_ms: None,
         };
         conn.execute(
-            "INSERT INTO stylos_notes (
+            "INSERT INTO board_notes (
                 note_id, note_slug, note_kind, origin_note_id, completion_notified_at_ms,
                 from_instance, from_agent_id, to_instance, to_agent_id, body,
-                column_name, result_text, injection_state, created_at_ms, updated_at_ms, injected_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                column_name, result_text, injection_state, blocked_until_ms, meta_json, created_at_ms, updated_at_ms, injected_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             rusqlite::params![
                 note.note_id,
                 note.note_slug,
@@ -860,6 +863,7 @@ impl DbHandle {
                 note.result_text,
                 note.injection_state.as_str(),
                 note.blocked_until_ms,
+                note.meta_json,
                 note.created_at_ms,
                 note.updated_at_ms,
                 note.injected_at_ms,
@@ -874,8 +878,8 @@ impl DbHandle {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT note_id, note_slug, note_kind, origin_note_id, completion_notified_at_ms, from_instance, from_agent_id, to_instance, to_agent_id, body,
-                    column_name, result_text, injection_state, blocked_until_ms, created_at_ms, updated_at_ms, injected_at_ms
-             FROM stylos_notes WHERE note_id = ?1",
+                    column_name, result_text, injection_state, blocked_until_ms, meta_json, created_at_ms, updated_at_ms, injected_at_ms
+             FROM board_notes WHERE note_id = ?1",
             rusqlite::params![note_id],
             map_note_row,
         )
@@ -883,7 +887,7 @@ impl DbHandle {
         .map_err(Into::into)
     }
 
-    pub fn list_stylos_notes(
+    pub fn list_board_notes(
         &self,
         to_instance: Option<&str>,
         to_agent_id: Option<&str>,
@@ -892,8 +896,8 @@ impl DbHandle {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT note_id, note_slug, note_kind, origin_note_id, completion_notified_at_ms, from_instance, from_agent_id, to_instance, to_agent_id, body,
-                    column_name, result_text, injection_state, blocked_until_ms, created_at_ms, updated_at_ms, injected_at_ms
-             FROM stylos_notes
+                    column_name, result_text, injection_state, blocked_until_ms, meta_json, created_at_ms, updated_at_ms, injected_at_ms
+             FROM board_notes
              WHERE (?1 IS NULL OR to_instance = ?1)
                AND (?2 IS NULL OR to_agent_id = ?2)
                AND (?3 IS NULL OR column_name = ?3)
@@ -918,7 +922,7 @@ impl DbHandle {
         let now_ms = now_unix_ms();
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE stylos_notes
+            "UPDATE board_notes
              SET column_name = ?2,
                  blocked_until_ms = CASE WHEN ?2 = 'blocked' THEN ?3 ELSE NULL END,
                  injection_state = CASE WHEN ?2 = 'done' THEN injection_state ELSE 'pending' END,
@@ -943,7 +947,7 @@ impl DbHandle {
         let now_ms = now_unix_ms();
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE stylos_notes SET result_text = ?2, updated_at_ms = ?3 WHERE note_id = ?1",
+            "UPDATE board_notes SET result_text = ?2, updated_at_ms = ?3 WHERE note_id = ?1",
             rusqlite::params![note_id, result_text, now_ms],
         )?;
         drop(conn);
@@ -959,8 +963,8 @@ impl DbHandle {
         let in_progress = conn
             .query_row(
                 "SELECT note_id, note_slug, note_kind, origin_note_id, completion_notified_at_ms, from_instance, from_agent_id, to_instance, to_agent_id, body,
-                        column_name, result_text, injection_state, created_at_ms, updated_at_ms, injected_at_ms
-                 FROM stylos_notes
+                        column_name, result_text, injection_state, blocked_until_ms, meta_json, created_at_ms, updated_at_ms, injected_at_ms
+                 FROM board_notes
                  WHERE to_instance = ?1 AND to_agent_id = ?2 AND injection_state = 'pending'
                    AND column_name = 'in_progress'
                  ORDER BY created_at_ms ASC
@@ -974,8 +978,8 @@ impl DbHandle {
         }
         conn.query_row(
             "SELECT note_id, note_slug, note_kind, origin_note_id, completion_notified_at_ms, from_instance, from_agent_id, to_instance, to_agent_id, body,
-                    column_name, result_text, injection_state, blocked_until_ms, created_at_ms, updated_at_ms, injected_at_ms
-             FROM stylos_notes
+                    column_name, result_text, injection_state, blocked_until_ms, meta_json, created_at_ms, updated_at_ms, injected_at_ms
+             FROM board_notes
              WHERE to_instance = ?1 AND to_agent_id = ?2 AND injection_state = 'pending'
                AND column_name = 'todo'
              ORDER BY created_at_ms ASC
@@ -994,7 +998,7 @@ impl DbHandle {
         let now_ms = now_unix_ms();
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE stylos_notes
+            "UPDATE board_notes
              SET completion_notified_at_ms = COALESCE(completion_notified_at_ms, ?2), updated_at_ms = ?2
              WHERE note_id = ?1",
             rusqlite::params![note_id, now_ms],
@@ -1007,7 +1011,7 @@ impl DbHandle {
         let now_ms = now_unix_ms();
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE stylos_notes
+            "UPDATE board_notes
              SET injection_state = 'injected',
                  injected_at_ms = ?2,
                  blocked_until_ms = CASE WHEN column_name = 'blocked' THEN ?3 ELSE blocked_until_ms END,
@@ -1112,9 +1116,10 @@ fn map_note_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StylosNote> {
             )
         })?,
         blocked_until_ms: row.get(13)?,
-        created_at_ms: row.get(14)?,
-        updated_at_ms: row.get(15)?,
-        injected_at_ms: row.get(16)?,
+        meta_json: row.get(14)?,
+        created_at_ms: row.get(15)?,
+        updated_at_ms: row.get(16)?,
+        injected_at_ms: row.get(17)?,
     })
 }
 
@@ -1220,6 +1225,7 @@ pub struct StylosNote {
     pub result_text: Option<String>,
     pub injection_state: NoteInjectionState,
     pub blocked_until_ms: Option<i64>,
+    pub meta_json: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub injected_at_ms: Option<i64>,
@@ -1236,6 +1242,7 @@ pub struct CreateNoteArgs {
     pub to_instance: String,
     pub to_agent_id: String,
     pub body: String,
+    pub meta_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

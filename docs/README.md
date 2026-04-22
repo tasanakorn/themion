@@ -45,6 +45,7 @@
 | PRD-033 | [Note Injection Should Present Note Identity and Metadata in the Initial Prompt](prd/prd-033-note-injection-metadata-first-prompting.md) | Implemented | v0.19.0 | `themion-core`, `themion-cli`, docs |
 | PRD-034 | [Note-First Multi-Agent Collaboration and Done Mentions](prd/prd-034-note-first-multi-agent-collaboration-and-done-mentions.md) | Implemented | v0.20.0 | `themion-core`, `themion-cli`, docs |
 | PRD-035 | [Add `blocked` Board Column with Cooldown-Aware Revisit Semantics](prd/prd-035-blocked-board-column-and-cooldown.md) | Implemented | v0.21.0 | `themion-core`, `themion-cli`, docs |
+| PRD-036 | [Self-Note Guidance for Durable Board Use](prd/prd-036-prompt-guidance-for-self-note-creation-beyond-simple-qa.md) | Proposed | v0.22.0 | `themion-core`, docs |
 
 ## Roadmap note
 

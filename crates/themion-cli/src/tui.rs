@@ -308,6 +308,11 @@ impl<'a> App<'a> {
     ) -> Self {
         #[cfg(feature = "stylos")]
         let stylos_tool_bridge = stylos.as_ref().and_then(tool_bridge);
+        #[cfg(feature = "stylos")]
+        let local_stylos_instance = stylos.as_ref().and_then(|handle| match handle.state() {
+            StylosRuntimeState::Active { instance, .. } => Some(instance.clone()),
+            _ => Some(crate::stylos::derive_local_instance_id()),
+        });
         let agent = build_agent(
             &session,
             session_id,
@@ -315,6 +320,8 @@ impl<'a> App<'a> {
             db.clone(),
             #[cfg(feature = "stylos")]
             stylos_tool_bridge.clone(),
+            #[cfg(feature = "stylos")]
+            local_stylos_instance.as_deref(),
             #[cfg(feature = "stylos")]
             "main",
         )
@@ -356,11 +363,6 @@ impl<'a> App<'a> {
             Entry::Blank,
         ];
 
-        #[cfg(feature = "stylos")]
-        let local_stylos_instance = stylos.as_ref().and_then(|handle| match handle.state() {
-            StylosRuntimeState::Active { instance, .. } => Some(instance.clone()),
-            _ => None,
-        });
         #[cfg(feature = "stylos")]
         if let Some(handle) = stylos.as_ref() {
             match handle.state() {
@@ -980,6 +982,8 @@ impl<'a> App<'a> {
                             #[cfg(feature = "stylos")]
                             self.stylos_tool_bridge.clone(),
                             #[cfg(feature = "stylos")]
+                            self.local_stylos_instance.as_deref(),
+                            #[cfg(feature = "stylos")]
                             "main",
                         ) {
                             Ok(new_agent) => {
@@ -1426,6 +1430,7 @@ Result:
                     to_instance: to_instance.clone(),
                     to_agent_id: to_agent_id.clone(),
                     body,
+                    meta_json: None,
                 })
                 .map(|done_note| {
                     serde_json::json!({
@@ -1591,6 +1596,7 @@ fn build_agent(
     project_dir: PathBuf,
     db: Arc<DbHandle>,
     #[cfg(feature = "stylos")] stylos_tool_bridge: Option<StylosToolBridge>,
+    #[cfg(feature = "stylos")] local_instance_id: Option<&str>,
     #[cfg(feature = "stylos")] local_agent_id: &str,
 ) -> anyhow::Result<Agent> {
     use themion_core::ChatBackend;
@@ -1643,6 +1649,8 @@ fn build_agent(
     );
     #[cfg(feature = "stylos")]
     agent.set_local_agent_id(Some(local_agent_id.to_string()));
+    #[cfg(feature = "stylos")]
+    agent.set_local_instance_id(local_instance_id.map(str::to_string));
     #[cfg(feature = "stylos")]
     agent.set_stylos_tool_invoker(stylos_tool_invoker(stylos_tool_bridge));
     Ok(agent)
@@ -2470,6 +2478,8 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     app.db.clone(),
                     #[cfg(feature = "stylos")]
                     app.stylos_tool_bridge.clone(),
+                    #[cfg(feature = "stylos")]
+                    app.local_stylos_instance.as_deref(),
                     #[cfg(feature = "stylos")]
                     "main",
                 ) {
