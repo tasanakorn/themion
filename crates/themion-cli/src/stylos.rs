@@ -1921,7 +1921,7 @@ pub fn build_note_prompt(
 ) -> String {
     let note_purpose = match note_kind {
         NoteKind::WorkRequest => "This is a durable delegated work note. Prefer progressing or completing the requested work through the board workflow. Use realtime Stylos talk only if an interrupting clarification is genuinely needed.",
-        NoteKind::DoneMention => "This is an informational completion mention for prior delegated work. Treat it as a durable done notification, not as a fresh request to repeat the same task. Do not create an automatic done echo in response.",
+        NoteKind::DoneMention => "This is an informational completion mention for prior delegated work. Treat it as a durable done notification, not as a fresh request to repeat the same task. Do not create an automatic done echo in response. Do not send an acknowledgment, summary-only reply, or any other no-op follow-up unless the note clearly requires a concrete next action or correction.",
     };
     format!(
         "{NOTE_PREFIX} note_id={note_id} note_slug={note_slug} note_kind={} origin_note_id={} from={} from_agent_id={} to={target} to_agent_id={local_agent_id} column={}\n\n{}\n\nNote body:\n{}",
