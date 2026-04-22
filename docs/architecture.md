@@ -263,13 +263,13 @@ Current behavior:
 
 - note records live in the main `system.db` SQLite database
 - each note stores canonical UUID `note_id`, globally unique human-friendly `note_slug`, optional sender identity, exact target instance `<hostname>:<pid>`, target `agent_id`, body, board column, result text, and millisecond timestamps
-- phase-1 board columns are exactly `todo`, `in_progress`, and `done`
-- newly created notes start in `todo`
+- board columns are `todo`, `in_progress`, `blocked`, and `done`
+- newly created notes start in `todo` by default, or may start in `blocked` for waiting-first follow-up work
 - notes are model-visible through dedicated `board_*` note tools rather than transcript scraping
 - when the `stylos` feature is enabled, `board_create_note` always submits through the Stylos `notes/request` path, even when the destination instance is the current local instance
 - in Stylos-enabled builds, the receiver-side `notes/request` handler is the canonical create path that validates the target agent, creates the note row in local SQLite, and returns the created `note_id`
 - `board_list_notes`, `board_read_note`, `board_move_note`, and `board_update_note_result` remain local board operations against the receiving instance's SQLite state after creation
-- idle-time delivery prefers the oldest pending `in_progress` note for an agent; a `todo` note is injected only when that agent has no pending `in_progress` note
+- idle-time delivery prefers the oldest eligible `in_progress` note for an agent, then `todo`, then cooldown-eligible `blocked` notes
 - once injected, the note is marked so it is not injected repeatedly by default
 - idle-time injected note prompts identify themselves as durable notes and include core metadata such as `note_id`, `note_slug`, source/target identities, current column, and the note body so the model usually does not need an immediate `board_read_note` call for orientation
 - collaboration guidance now treats durable notes as the preferred path for delegated asynchronous agent-to-agent work, while `talk` remains the interrupting realtime path for urgent or interactive coordination

@@ -162,7 +162,9 @@ Current behavior:
 - `notes/request` validates the target agent from the current exported snapshot
 - when the `stylos` feature is enabled, `board_create_note` always reaches note creation through `notes/request`, including self-targeted delivery to the current local instance
 - accepted notes are persisted in SQLite immediately rather than rejected when the agent is busy
-- persisted notes start in column `todo` with millisecond timestamps
+- persisted notes start in column `todo` by default, or may start in `blocked` for waiting-first follow-up work
+- blocked notes store durable `blocked_until_ms` cooldown metadata and are only eligible for automatic idle-time reinjection after cooldown expires
+- idle injection priority is `in_progress`, then `todo`, then cooldown-eligible `blocked`
 - `themion-core` exposes `board_*` note tools for create/list/read/move/update-result operations using canonical durable UUID `note_id` values and returns companion `note_slug` metadata for human-readable inspection
 - sender `from` and `from_agent_id` are forwarded from the calling runtime context into Stylos note delivery so receiver-side logs and stored note metadata reflect the actual calling agent
 - successful receiver-side note insertion emits `created stylos note in db note_id=<uuid> ...` before the note is queued for later injection

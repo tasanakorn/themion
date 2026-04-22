@@ -213,6 +213,7 @@ impl StylosToolBridge {
                 let req = NoteRequest {
                     to_agent_id: required_string(&args, "to_agent_id")?,
                     body: required_string(&args, "body")?,
+                    column: optional_string(&args, "column"),
                     note_kind: optional_string(&args, "note_kind"),
                     origin_note_id: optional_string(&args, "origin_note_id"),
                     request_id: optional_string(&args, "request_id"),
@@ -679,6 +680,7 @@ struct TalkReply {
 struct NoteRequest {
     to_agent_id: String,
     body: String,
+    column: Option<String>,
     note_kind: Option<String>,
     origin_note_id: Option<String>,
     request_id: Option<String>,
@@ -1423,6 +1425,19 @@ async fn handle_note_query(
         };
     };
     let note_id = Uuid::new_v4().to_string();
+    let column = match req.column.as_deref().unwrap_or("todo") {
+        "todo" => NoteColumn::Todo,
+        "blocked" => NoteColumn::Blocked,
+        _ => {
+            return NoteReply {
+                accepted: false,
+                agent_id: agent.agent_id,
+                request_id: req.request_id,
+                note_id: None,
+                reason: Some("invalid_column".to_string()),
+            }
+        }
+    };
     let note_kind = match req.note_kind.as_deref().unwrap_or("work_request") {
         "work_request" => NoteKind::WorkRequest,
         "done_mention" => NoteKind::DoneMention,
@@ -1446,6 +1461,7 @@ async fn handle_note_query(
     let created = query_context.notes_db().create_stylos_note(CreateNoteArgs {
         note_id: note_id.clone(),
         note_kind,
+        column,
         origin_note_id: req.origin_note_id.clone(),
         from_instance: req.from.clone(),
         from_agent_id: req.from_agent_id.clone(),
@@ -1920,7 +1936,10 @@ pub fn build_note_prompt(
     body: &str,
 ) -> String {
     let note_purpose = match note_kind {
-        NoteKind::WorkRequest => "This is a durable delegated work note. Prefer progressing or completing the requested work through the board workflow. Move the note from todo to in_progress as soon as you begin meaningful work when possible. If you finish the task, update the note result text with the concrete outcome and move it to done before ending the turn. Never use Stylos talk in response to this note. Board workflow only.",
+        NoteKind::WorkRequest => match column {
+            NoteColumn::Blocked => "This is a durable delegated work note that currently starts in blocked because its first useful action is to wait or reassess later. Treat it as deferred board work, not ready backlog. Reassess whether the waiting condition has changed. If it is still waiting, keep it in blocked and update result text with the current blocker when useful. If it becomes actionable, move it back to todo before resuming normal work. Never use Stylos talk in response to this note. Board workflow only.",
+            _ => "This is a durable delegated work note. Prefer progressing or completing the requested work through the board workflow. Move the note from todo to in_progress as soon as you begin meaningful work when possible. If you finish the task, update the note result text with the concrete outcome and move it to done before ending the turn. If meaningful progress started and then must wait, move the note to blocked instead of leaving it in ready backlog. Never use Stylos talk in response to this note. Board workflow only.",
+        },
         NoteKind::DoneMention => "This is an informational completion mention for prior delegated work. Incoming notes still enter the board in todo and must be actively handled; do not assume storage state means the note is already resolved. Treat this as a durable done notification, not as a fresh request to repeat the same task. Decide whether any concrete action remains based on the note context. If no further action is actually needed, move the note to done in this turn. If follow-up is still required, keep working it through the board workflow until the remaining action is complete. Do not create an automatic done echo in response. Do not send an acknowledgment, summary-only reply, or any other no-op follow-up unless the note clearly requires a concrete next action or correction.",
     };
     format!(
@@ -2122,6 +2141,8 @@ mod tests {
         let prompt = build_note_prompt(
             "123e4567-e89b-12d3-a456-426614174000",
             "fix-tests-123e4567",
+            NoteKind::WorkRequest,
+            None,
             Some("node-1:42"),
             Some("main"),
             "node-2:77",
@@ -2136,6 +2157,7 @@ mod tests {
         assert!(prompt.contains("from_agent_id=main"));
         assert!(prompt.contains("to=node-2:77"));
         assert!(prompt.contains("to_agent_id=worker"));
+        assert!(prompt.contains("note_kind=work_request"));
         assert!(prompt.contains("column=todo"));
         assert!(prompt.contains(
             "Note body:

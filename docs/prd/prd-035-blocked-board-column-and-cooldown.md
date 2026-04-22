@@ -1,6 +1,6 @@
 # PRD-035: Add `blocked` Board Column with Cooldown-Aware Revisit Semantics
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Version:** v0.21.0
 - **Scope:** `themion-core`, `themion-cli`, docs
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
@@ -271,13 +271,13 @@ Normative behavior:
 
 | File | Change |
 | ---- | ------ |
-| `crates/themion-core/src/db.rs` | Extend durable note column support to include `blocked` and persist any cooldown-related blocked retry metadata needed for deterministic eligibility checks. |
-| `crates/themion-core/src/tools.rs` | Update `board_list_notes`, `board_move_note`, and note-creation schema as needed so `blocked` is a valid board column where appropriate. |
+| `crates/themion-core/src/db.rs` | Extend durable note column support to include `blocked` and persist cooldown-related blocked retry metadata via durable `blocked_until_ms` eligibility state. |
+| `crates/themion-core/src/tools.rs` | Update `board_create_note`, `board_list_notes`, and `board_move_note` schemas and serialization so `blocked` is a valid board column where appropriate. |
 | `crates/themion-cli/src/tui.rs` | Update idle-time note selection so it prefers eligible `in_progress`, then eligible `todo`, then cooldown-eligible `blocked` notes for the target agent. |
 | `crates/themion-cli/src/stylos.rs` | Update injected note guidance so blocked notes are framed as deferred work to reassess rather than fresh ready work, including direct-create blocked follow-up notes. |
 | `docs/architecture.md` | Document the four-column board model, canonical transitions, blocked-note priority rules, and cooldown-aware blocked retry behavior. |
 | `docs/engine-runtime.md` | Document runtime selection order, direct-create blocked follow-up semantics, and blocked-note cooldown gating for idle-time injection. |
-| `docs/README.md` | Add this PRD to the PRD table. |
+| `docs/README.md` | Update this PRD entry to implemented status. |
 
 ## Edge Cases
 
@@ -320,13 +320,23 @@ Because this is a user-visible additive board feature, the implementation should
 - mark a cross-agent delegated note `blocked` and later `done` → verify: no done mention is created while blocked, and normal done-mention behavior still occurs only on completion.
 - run `cargo check -p themion-core -p themion-cli` and `cargo check -p themion-cli --features stylos` after implementation → verify: default and Stylos-enabled builds compile cleanly with the new board column support.
 
+## Implementation notes
+
+The implemented slice landed with these concrete behaviors:
+
+- `blocked` is a durable board column alongside `todo`, `in_progress`, and `done`
+- blocked-note retry eligibility is persisted with durable millisecond `blocked_until_ms` metadata
+- `board_create_note` can create notes directly into `blocked` for waiting-first follow-up workflows
+- idle-time note selection now prefers `in_progress`, then `todo`, then cooldown-eligible `blocked`
+- note prompt guidance distinguishes blocked work from ready work so reassessment behavior is clear
+
 ## Implementation checklist
 
-- [ ] extend the durable note column model to include `blocked`
-- [ ] update board tool schemas and validation so `blocked` is a valid column
-- [ ] support direct-create blocked follow-up notes for wait-first workflows
-- [ ] add durable blocked retry metadata and cooldown eligibility logic
-- [ ] update idle-time note selection to prefer `in_progress`, then `todo`, then cooldown-eligible `blocked`
-- [ ] update injected note guidance so blocked notes are presented as deferred work under reassessment
-- [ ] document the four-column board model, canonical transitions, and blocked cooldown semantics in architecture/runtime docs
-- [ ] update `docs/README.md` with the new PRD entry
+- [x] extend the durable note column model to include `blocked`
+- [x] update board tool schemas and validation so `blocked` is a valid column
+- [x] support direct-create blocked follow-up notes for wait-first workflows
+- [x] add durable blocked retry metadata and cooldown eligibility logic
+- [x] update idle-time note selection to prefer `in_progress`, then `todo`, then cooldown-eligible `blocked`
+- [x] update injected note guidance so blocked notes are presented as deferred work under reassessment
+- [x] document the four-column board model, canonical transitions, and blocked cooldown semantics in architecture/runtime docs
+- [x] update `docs/README.md` with the new PRD entry

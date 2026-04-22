@@ -1345,7 +1345,10 @@ impl<'a> App<'a> {
     }
 
     #[cfg(feature = "stylos")]
-    fn maybe_emit_done_mention_for_completed_note(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) {
+    fn maybe_emit_done_mention_for_completed_note(
+        &mut self,
+        app_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
         let Some(remote) = self.active_remote_request.as_ref().cloned() else {
             return;
         };
@@ -1416,6 +1419,7 @@ Result:
                 .create_stylos_note(themion_core::db::CreateNoteArgs {
                     note_id: uuid::Uuid::new_v4().to_string(),
                     note_kind: themion_core::db::NoteKind::DoneMention,
+                    column: themion_core::db::NoteColumn::Todo,
                     origin_note_id: Some(note.note_id.clone()),
                     from_instance: Some(note.to_instance.clone()),
                     from_agent_id: Some(note.to_agent_id.clone()),
@@ -1423,11 +1427,14 @@ Result:
                     to_agent_id: to_agent_id.clone(),
                     body,
                 })
-                .map(|done_note| serde_json::json!({
-                    "accepted": true,
-                    "note_id": done_note.note_id,
-                    "agent_id": done_note.to_agent_id,
-                }).to_string())
+                .map(|done_note| {
+                    serde_json::json!({
+                        "accepted": true,
+                        "note_id": done_note.note_id,
+                        "agent_id": done_note.to_agent_id,
+                    })
+                    .to_string()
+                })
                 .map_err(anyhow::Error::from)
         };
 
@@ -1435,7 +1442,12 @@ Result:
             Ok(reply) => {
                 let created_note_id = serde_json::from_str::<serde_json::Value>(&reply)
                     .ok()
-                    .and_then(|value| value.get("note_id").and_then(|v| v.as_str()).map(str::to_string))
+                    .and_then(|value| {
+                        value
+                            .get("note_id")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    })
                     .unwrap_or_else(|| "unknown".to_string());
                 let _ = self.db.mark_stylos_note_completion_notified(&note.note_id);
                 self.push(Entry::RemoteEvent(format!(

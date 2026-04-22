@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+const BLOCKED_RETRY_COOLDOWN_MS: i64 = 5 * 60 * 1000;
+
 fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -117,6 +119,7 @@ CREATE TABLE IF NOT EXISTS stylos_notes (
     column_name TEXT NOT NULL,
     result_text TEXT,
     injection_state TEXT NOT NULL,
+    blocked_until_ms INTEGER,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     injected_at_ms INTEGER
@@ -125,6 +128,8 @@ CREATE INDEX IF NOT EXISTS idx_stylos_notes_target_column_created
     ON stylos_notes(to_instance, to_agent_id, column_name, created_at_ms);
 CREATE INDEX IF NOT EXISTS idx_stylos_notes_target_injection
     ON stylos_notes(to_instance, to_agent_id, injection_state, created_at_ms);
+CREATE INDEX IF NOT EXISTS idx_stylos_notes_target_blocked_until
+    ON stylos_notes(to_instance, to_agent_id, column_name, blocked_until_ms, created_at_ms);
 ";
 
 const SCHEMA_FTS5: &str = "
@@ -387,6 +392,7 @@ fn init_schema(conn: &Connection, fts5: bool) -> Result<()> {
     )?;
     ensure_column(conn, "stylos_notes", "origin_note_id", "TEXT")?;
     ensure_column(conn, "stylos_notes", "completion_notified_at_ms", "INTEGER")?;
+    ensure_column(conn, "stylos_notes", "blocked_until_ms", "INTEGER")?;
     if fts5 {
         conn.execute_batch(SCHEMA_FTS5)?;
     }
@@ -824,9 +830,11 @@ impl DbHandle {
             to_instance: args.to_instance,
             to_agent_id: args.to_agent_id,
             body: args.body,
-            column: NoteColumn::Todo,
+            column: args.column,
             result_text: None,
             injection_state: NoteInjectionState::Pending,
+            blocked_until_ms: (args.column == NoteColumn::Blocked)
+                .then(|| now_ms + BLOCKED_RETRY_COOLDOWN_MS),
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
             injected_at_ms: None,
@@ -851,6 +859,7 @@ impl DbHandle {
                 note.column.as_str(),
                 note.result_text,
                 note.injection_state.as_str(),
+                note.blocked_until_ms,
                 note.created_at_ms,
                 note.updated_at_ms,
                 note.injected_at_ms,
@@ -865,7 +874,7 @@ impl DbHandle {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT note_id, note_slug, note_kind, origin_note_id, completion_notified_at_ms, from_instance, from_agent_id, to_instance, to_agent_id, body,
-                    column_name, result_text, injection_state, created_at_ms, updated_at_ms, injected_at_ms
+                    column_name, result_text, injection_state, blocked_until_ms, created_at_ms, updated_at_ms, injected_at_ms
              FROM stylos_notes WHERE note_id = ?1",
             rusqlite::params![note_id],
             map_note_row,
@@ -883,7 +892,7 @@ impl DbHandle {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT note_id, note_slug, note_kind, origin_note_id, completion_notified_at_ms, from_instance, from_agent_id, to_instance, to_agent_id, body,
-                    column_name, result_text, injection_state, created_at_ms, updated_at_ms, injected_at_ms
+                    column_name, result_text, injection_state, blocked_until_ms, created_at_ms, updated_at_ms, injected_at_ms
              FROM stylos_notes
              WHERE (?1 IS NULL OR to_instance = ?1)
                AND (?2 IS NULL OR to_agent_id = ?2)
@@ -909,8 +918,18 @@ impl DbHandle {
         let now_ms = now_unix_ms();
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE stylos_notes SET column_name = ?2, updated_at_ms = ?3 WHERE note_id = ?1",
-            rusqlite::params![note_id, column.as_str(), now_ms],
+            "UPDATE stylos_notes
+             SET column_name = ?2,
+                 blocked_until_ms = CASE WHEN ?2 = 'blocked' THEN ?3 ELSE NULL END,
+                 injection_state = CASE WHEN ?2 = 'done' THEN injection_state ELSE 'pending' END,
+                 updated_at_ms = ?4
+             WHERE note_id = ?1",
+            rusqlite::params![
+                note_id,
+                column.as_str(),
+                now_ms + BLOCKED_RETRY_COOLDOWN_MS,
+                now_ms
+            ],
         )?;
         drop(conn);
         self.get_stylos_note(note_id)
@@ -955,7 +974,7 @@ impl DbHandle {
         }
         conn.query_row(
             "SELECT note_id, note_slug, note_kind, origin_note_id, completion_notified_at_ms, from_instance, from_agent_id, to_instance, to_agent_id, body,
-                    column_name, result_text, injection_state, created_at_ms, updated_at_ms, injected_at_ms
+                    column_name, result_text, injection_state, blocked_until_ms, created_at_ms, updated_at_ms, injected_at_ms
              FROM stylos_notes
              WHERE to_instance = ?1 AND to_agent_id = ?2 AND injection_state = 'pending'
                AND column_name = 'todo'
@@ -989,9 +1008,12 @@ impl DbHandle {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE stylos_notes
-             SET injection_state = 'injected', injected_at_ms = ?2, updated_at_ms = ?2
+             SET injection_state = 'injected',
+                 injected_at_ms = ?2,
+                 blocked_until_ms = CASE WHEN column_name = 'blocked' THEN ?3 ELSE blocked_until_ms END,
+                 updated_at_ms = ?2
              WHERE note_id = ?1",
-            rusqlite::params![note_id, now_ms],
+            rusqlite::params![note_id, now_ms, now_ms + BLOCKED_RETRY_COOLDOWN_MS],
         )?;
         drop(conn);
         self.get_stylos_note(note_id)
@@ -1089,9 +1111,10 @@ fn map_note_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StylosNote> {
                 rusqlite::types::Type::Text,
             )
         })?,
-        created_at_ms: row.get(13)?,
-        updated_at_ms: row.get(14)?,
-        injected_at_ms: row.get(15)?,
+        blocked_until_ms: row.get(13)?,
+        created_at_ms: row.get(14)?,
+        updated_at_ms: row.get(15)?,
+        injected_at_ms: row.get(16)?,
     })
 }
 
@@ -1133,6 +1156,7 @@ pub struct SearchHit {
 pub enum NoteColumn {
     Todo,
     InProgress,
+    Blocked,
     Done,
 }
 
@@ -1141,6 +1165,7 @@ impl NoteColumn {
         match self {
             Self::Todo => "todo",
             Self::InProgress => "in_progress",
+            Self::Blocked => "blocked",
             Self::Done => "done",
         }
     }
@@ -1149,6 +1174,7 @@ impl NoteColumn {
         match value {
             "todo" => Some(Self::Todo),
             "in_progress" => Some(Self::InProgress),
+            "blocked" => Some(Self::Blocked),
             "done" => Some(Self::Done),
             _ => None,
         }
@@ -1193,6 +1219,7 @@ pub struct StylosNote {
     pub column: NoteColumn,
     pub result_text: Option<String>,
     pub injection_state: NoteInjectionState,
+    pub blocked_until_ms: Option<i64>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub injected_at_ms: Option<i64>,
@@ -1202,6 +1229,7 @@ pub struct StylosNote {
 pub struct CreateNoteArgs {
     pub note_id: String,
     pub note_kind: NoteKind,
+    pub column: NoteColumn,
     pub origin_note_id: Option<String>,
     pub from_instance: Option<String>,
     pub from_agent_id: Option<String>,
