@@ -43,6 +43,7 @@
 | PRD-031 | [Rename Local Notes Tools from `stylos_` to `board_`](prd/prd-031-rename-local-note-tools-to-board-prefix.md) | Implemented | v0.17.0 | `themion-core`, `themion-cli`, docs |
 | PRD-032 | [Stylos Network-Delivered Note Creation When `stylos` Feature Is Enabled](prd/prd-032-stylos-network-delivered-note-creation.md) | Implemented | v0.18.0 | `themion-core`, `themion-cli`, docs |
 | PRD-033 | [Note Injection Should Present Note Identity and Metadata in the Initial Prompt](prd/prd-033-note-injection-metadata-first-prompting.md) | Implemented | v0.19.0 | `themion-core`, `themion-cli`, docs |
+| PRD-034 | [Note-First Multi-Agent Collaboration and Done Mentions](prd/prd-034-note-first-multi-agent-collaboration-and-done-mentions.md) | Implemented | v0.20.0 | `themion-core`, `themion-cli`, docs |
 
 ## Roadmap note
 

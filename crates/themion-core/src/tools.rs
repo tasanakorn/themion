@@ -1,4 +1,6 @@
-use crate::db::{CreateNoteArgs, DbHandle, NoteColumn, RecallArgs, RecallDirection, SearchArgs};
+use crate::db::{
+    CreateNoteArgs, DbHandle, NoteColumn, NoteKind, RecallArgs, RecallDirection, SearchArgs,
+};
 use crate::workflow::{
     allowed_transitions, can_retry_current_phase, can_retry_previous_phase, can_transition,
     normalize_workflow_name, phase_instructions, previous_phase, start_phase_for_workflow,
@@ -24,6 +26,9 @@ fn stylos_note_to_json(note: &crate::db::StylosNote) -> Value {
     json!({
         "note_id": note.note_id,
         "note_slug": note.note_slug,
+        "note_kind": note.note_kind.as_str(),
+        "origin_note_id": note.origin_note_id,
+        "completion_notified_at_ms": note.completion_notified_at_ms,
         "from_instance": note.from_instance,
         "from_agent_id": note.from_agent_id,
         "to_instance": note.to_instance,
@@ -234,6 +239,8 @@ pub fn tool_definitions() -> Value {
                         "to_instance": { "type": "string" },
                         "to_agent_id": { "type": "string" },
                         "body": { "type": "string" },
+                        "note_kind": { "type": "string", "enum": ["work_request", "done_mention"], "description": "Optional note semantics. Defaults to work_request." },
+                        "origin_note_id": { "type": "string", "description": "Optional original note reference, used for done mentions." },
                         "from_instance": { "type": "string" },
                         "from_agent_id": { "type": "string" },
                         "request_id": { "type": "string", "description": "Optional request identifier for Stylos-mediated creation." },
@@ -487,9 +494,15 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             }
         }
         "board_create_note" => {
-            let to_instance = args["to_instance"].as_str().ok_or_else(|| anyhow::anyhow!("missing to_instance"))?;
-            let to_agent_id = args["to_agent_id"].as_str().ok_or_else(|| anyhow::anyhow!("missing to_agent_id"))?;
-            let body = args["body"].as_str().ok_or_else(|| anyhow::anyhow!("missing body"))?;
+            let to_instance = args["to_instance"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing to_instance"))?;
+            let to_agent_id = args["to_agent_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing to_agent_id"))?;
+            let body = args["body"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing body"))?;
 
             #[cfg(feature = "stylos")]
             {
@@ -514,9 +527,19 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 }
             }
 
-            let note_id = args["note_id"].as_str().map(str::to_string).unwrap_or_else(|| Uuid::new_v4().to_string());
+            let note_id = args["note_id"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
+            let note_kind = match args["note_kind"].as_str().unwrap_or("work_request") {
+                "work_request" => NoteKind::WorkRequest,
+                "done_mention" => NoteKind::DoneMention,
+                other => anyhow::bail!("invalid note_kind: {other}"),
+            };
             let note = ctx.db.create_stylos_note(CreateNoteArgs {
                 note_id,
+                note_kind,
+                origin_note_id: args["origin_note_id"].as_str().map(str::to_string),
                 from_instance: args["from_instance"].as_str().map(str::to_string),
                 from_agent_id: args["from_agent_id"].as_str().map(str::to_string),
                 to_instance: to_instance.to_string(),
@@ -526,7 +549,10 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             Ok(stylos_note_to_json(&note).to_string())
         }
         "board_list_notes" => {
-            let column = args["column"].as_str().map(|v| parse_note_column(v).ok_or_else(|| anyhow::anyhow!("invalid column"))).transpose()?;
+            let column = args["column"]
+                .as_str()
+                .map(|v| parse_note_column(v).ok_or_else(|| anyhow::anyhow!("invalid column")))
+                .transpose()?;
             let notes = ctx.db.list_stylos_notes(
                 args["to_instance"].as_str(),
                 args["to_agent_id"].as_str(),
@@ -535,7 +561,9 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             Ok(Value::Array(notes.iter().map(stylos_note_to_json).collect()).to_string())
         }
         "board_read_note" => {
-            let note_id = args["note_id"].as_str().ok_or_else(|| anyhow::anyhow!("missing note_id"))?;
+            let note_id = args["note_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing note_id"))?;
             let note = ctx.db.get_stylos_note(note_id)?;
             Ok(match note {
                 Some(note) => stylos_note_to_json(&note).to_string(),
@@ -543,9 +571,15 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             })
         }
         "board_move_note" => {
-            let note_id = args["note_id"].as_str().ok_or_else(|| anyhow::anyhow!("missing note_id"))?;
-            let column = parse_note_column(args["column"].as_str().ok_or_else(|| anyhow::anyhow!("missing column"))?)
-                .ok_or_else(|| anyhow::anyhow!("invalid column"))?;
+            let note_id = args["note_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing note_id"))?;
+            let column = parse_note_column(
+                args["column"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("missing column"))?,
+            )
+            .ok_or_else(|| anyhow::anyhow!("invalid column"))?;
             let note = ctx.db.move_stylos_note(note_id, column)?;
             Ok(match note {
                 Some(note) => stylos_note_to_json(&note).to_string(),
@@ -553,9 +587,15 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             })
         }
         "board_update_note_result" => {
-            let note_id = args["note_id"].as_str().ok_or_else(|| anyhow::anyhow!("missing note_id"))?;
-            let result_text = args["result_text"].as_str().ok_or_else(|| anyhow::anyhow!("missing result_text"))?;
-            let note = ctx.db.update_stylos_note_result(note_id, Some(result_text))?;
+            let note_id = args["note_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing note_id"))?;
+            let result_text = args["result_text"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing result_text"))?;
+            let note = ctx
+                .db
+                .update_stylos_note_result(note_id, Some(result_text))?;
             Ok(match note {
                 Some(note) => stylos_note_to_json(&note).to_string(),
                 None => json!({"found": false, "note_id": note_id}).to_string(),

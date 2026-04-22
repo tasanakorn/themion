@@ -272,5 +272,9 @@ Current behavior:
 - idle-time delivery prefers the oldest pending `in_progress` note for an agent; a `todo` note is injected only when that agent has no pending `in_progress` note
 - once injected, the note is marked so it is not injected repeatedly by default
 - idle-time injected note prompts identify themselves as durable notes and include core metadata such as `note_id`, `note_slug`, source/target identities, current column, and the note body so the model usually does not need an immediate `board_read_note` call for orientation
+- collaboration guidance now treats durable notes as the preferred path for delegated asynchronous agent-to-agent work, while `talk` remains the interrupting realtime path for urgent or interactive coordination
+- notes now distinguish delegated work requests from informational done mentions so completion notifications do not look like fresh delegated work
+- when a delegated cross-agent note is moved to `done`, the completion path can create exactly one requester-directed done mention that includes original-note reference metadata and useful result content
+- auto-created done mentions do not recursively generate more done mentions when they are later marked `done`
 
 The receiver-side Stylos query surface now includes `stylos/<realm>/themion/instances/<instance>/query/notes/request` for durable note creation. This supersedes the old idle-only `talk` model for asynchronous work intake, while `talk` remains available as a lightweight realtime path.

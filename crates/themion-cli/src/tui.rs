@@ -764,6 +764,8 @@ impl<'a> App<'a> {
             }
             AgentEvent::TurnDone(stats) => {
                 #[cfg(feature = "stylos")]
+                self.maybe_emit_done_mention_for_completed_note();
+                #[cfg(feature = "stylos")]
                 if let (Some(remote), Some(handle)) =
                     (self.active_remote_request.take(), self.stylos.as_ref())
                 {
@@ -1285,7 +1287,6 @@ impl<'a> App<'a> {
         self.submit_text_to_agent(agent_index, text, app_tx);
     }
 
-
     #[cfg(feature = "stylos")]
     fn maybe_inject_pending_note(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) {
         if self.agent_busy {
@@ -1294,8 +1295,16 @@ impl<'a> App<'a> {
         let Some(instance) = self.local_stylos_instance.clone() else {
             return;
         };
-        let interactive_agent_id = self.agents.iter().find(|h| is_interactive_handle(h)).map(|h| h.agent_id.clone());
-        let main_agent_id = self.agents.iter().find(|h| h.roles.iter().any(|r| r == "main")).map(|h| h.agent_id.clone());
+        let interactive_agent_id = self
+            .agents
+            .iter()
+            .find(|h| is_interactive_handle(h))
+            .map(|h| h.agent_id.clone());
+        let main_agent_id = self
+            .agents
+            .iter()
+            .find(|h| h.roles.iter().any(|r| r == "main"))
+            .map(|h| h.agent_id.clone());
         let Some(agent_id) = interactive_agent_id.or(main_agent_id) else {
             return;
         };
@@ -1306,6 +1315,8 @@ impl<'a> App<'a> {
         let prompt = crate::stylos::build_note_prompt(
             &note.note_id,
             &note.note_slug,
+            note.note_kind,
+            note.origin_note_id.as_deref(),
             note.from_instance.as_deref(),
             note.from_agent_id.as_deref(),
             &note.to_instance,
@@ -1313,7 +1324,13 @@ impl<'a> App<'a> {
             note.column,
             &note.body,
         );
-        self.push(Entry::RemoteEvent(format!("Stylos note note_id={} to={} to_agent_id={} column={}", note.note_id, note.to_instance, note.to_agent_id, note.column.as_str())));
+        self.push(Entry::RemoteEvent(format!(
+            "Stylos note note_id={} to={} to_agent_id={} column={}",
+            note.note_id,
+            note.to_instance,
+            note.to_agent_id,
+            note.column.as_str()
+        )));
         self.active_remote_request = Some(StylosRemotePromptRequest {
             prompt: prompt.clone(),
             agent_id: Some(note.to_agent_id.clone()),
@@ -1327,12 +1344,85 @@ impl<'a> App<'a> {
         self.submit_text(prompt, app_tx);
     }
 
+    #[cfg(feature = "stylos")]
+    fn maybe_emit_done_mention_for_completed_note(&mut self) {
+        let Some(remote) = self.active_remote_request.as_ref() else {
+            return;
+        };
+        if !remote.prompt.starts_with("type=stylos_note ") {
+            return;
+        }
+        let header = remote.prompt.lines().next().unwrap_or_default();
+        let note_id = header
+            .split_whitespace()
+            .find_map(|part| part.strip_prefix("note_id="));
+        let Some(note_id) = note_id else {
+            return;
+        };
+        let Ok(Some(note)) = self.db.get_stylos_note(note_id) else {
+            return;
+        };
+        if note.column != themion_core::db::NoteColumn::Done {
+            return;
+        }
+        if note.note_kind != themion_core::db::NoteKind::WorkRequest {
+            return;
+        }
+        if note.completion_notified_at_ms.is_some() {
+            return;
+        }
+        let (Some(to_instance), Some(to_agent_id)) =
+            (note.from_instance.clone(), note.from_agent_id.clone())
+        else {
+            return;
+        };
+        let result_summary = note
+            .result_text
+            .clone()
+            .unwrap_or_else(|| "completed with no explicit stored result".to_string());
+        let body = format!(
+            "Done: delegated note completed.
+
+Original note: {} ({})
+Completed by: {} / {}
+Result:
+{}",
+            note.note_id, note.note_slug, note.to_instance, note.to_agent_id, result_summary,
+        );
+        let created = self
+            .db
+            .create_stylos_note(themion_core::db::CreateNoteArgs {
+                note_id: uuid::Uuid::new_v4().to_string(),
+                note_kind: themion_core::db::NoteKind::DoneMention,
+                origin_note_id: Some(note.note_id.clone()),
+                from_instance: Some(note.to_instance.clone()),
+                from_agent_id: Some(note.to_agent_id.clone()),
+                to_instance: to_instance.clone(),
+                to_agent_id: to_agent_id.clone(),
+                body,
+            });
+        match created {
+            Ok(done_note) => {
+                let _ = self.db.mark_stylos_note_completion_notified(&note.note_id);
+                self.push(Entry::RemoteEvent(format!(
+                    "Stylos done mention note_id={} origin_note_id={} to={} to_agent_id={}",
+                    done_note.note_id, note.note_id, to_instance, to_agent_id,
+                )));
+            }
+            Err(err) => {
+                self.push(Entry::Status(format!(
+                    "done mention create failed for note_id={}: {}",
+                    note.note_id, err
+                )));
+            }
+        }
+    }
+
     fn submit_input(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) {
         let text: String = self.input.lines().join("\n");
         self.submit_text(text, app_tx);
     }
 }
-
 
 #[cfg(feature = "stylos")]
 fn extract_stylos_talk_target_from_detail(detail: &str) -> Option<&str> {
@@ -1441,11 +1531,9 @@ fn stylos_tool_invoker(
                 .map(str::to_string);
             let fut: std::pin::Pin<
                 Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>,
-            > = Box::pin(async move {
-                bridge
-                    .invoke(local_agent_id.as_deref(), &name, args)
-                    .await
-            });
+            > = Box::pin(
+                async move { bridge.invoke(local_agent_id.as_deref(), &name, args).await },
+            );
             fut
         }) as themion_core::tools::StylosToolInvoker
     })
@@ -1976,7 +2064,8 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
     });
 
     #[cfg(feature = "stylos")]
-    let stylos_handle = Some(crate::stylos::start(&stylos_cfg, &session, &project_dir, db.clone()).await);
+    let stylos_handle =
+        Some(crate::stylos::start(&stylos_cfg, &session, &project_dir, db.clone()).await);
 
     let mut app = App::new(
         session,
@@ -2177,7 +2266,11 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     }
                 }
             }
-            Some(AppEvent::Tick) => { app.on_tick(); #[cfg(feature = "stylos")] app.maybe_inject_pending_note(&app_tx); },
+            Some(AppEvent::Tick) => {
+                app.on_tick();
+                #[cfg(feature = "stylos")]
+                app.maybe_inject_pending_note(&app_tx);
+            }
             #[cfg(feature = "stylos")]
             Some(AppEvent::StylosCmd(cmd)) => {
                 #[cfg(feature = "stylos")]
@@ -2208,7 +2301,10 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                             .prompt
                             .lines()
                             .next()
-                            .and_then(|line| line.split_whitespace().find(|part| part.starts_with("note_id=")))
+                            .and_then(|line| {
+                                line.split_whitespace()
+                                    .find(|part| part.starts_with("note_id="))
+                            })
                             .and_then(|part| part.strip_prefix("note_id="))
                             .unwrap_or("unknown");
                         app.push(Entry::RemoteEvent(format!(
@@ -2244,14 +2340,20 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                             .prompt
                             .lines()
                             .next()
-                            .and_then(|line| line.split_whitespace().find(|part| part.starts_with("note_id=")))
+                            .and_then(|line| {
+                                line.split_whitespace()
+                                    .find(|part| part.starts_with("note_id="))
+                            })
                             .and_then(|part| part.strip_prefix("note_id="))
                             .unwrap_or("unknown");
                         let column = request
                             .prompt
                             .lines()
                             .next()
-                            .and_then(|line| line.split_whitespace().find(|part| part.starts_with("column=")))
+                            .and_then(|line| {
+                                line.split_whitespace()
+                                    .find(|part| part.starts_with("column="))
+                            })
                             .and_then(|part| part.strip_prefix("column="))
                             .unwrap_or("unknown");
                         app.push(Entry::RemoteEvent(format!(
@@ -2475,7 +2577,7 @@ mod tests {
 
     #[test]
     fn validate_agent_roles_rejects_two_main() {
-        let agents = vec![handle("a", &["main"]), handle("b", &["main"] )];
+        let agents = vec![handle("a", &["main"]), handle("b", &["main"])];
         assert!(validate_agent_roles(&agents).is_err());
     }
 
@@ -2547,17 +2649,19 @@ mod tests {
         assert_eq!(agents[index].agent_id, "worker");
     }
 
-
     #[test]
     fn extract_stylos_talk_target_from_detail_reads_exact_instance() {
         let detail = "stylos_request_talk instance=node-2:77, to_agent_id=main, message=hello";
-        assert_eq!(extract_stylos_talk_target_from_detail(detail), Some("node-2:77,"));
+        assert_eq!(
+            extract_stylos_talk_target_from_detail(detail),
+            Some("node-2:77,")
+        );
     }
 
     #[test]
     fn sender_side_stylos_talk_log_format_is_exact() {
         let target = extract_stylos_talk_target_from_detail(
-            "stylos_request_talk instance=node-2:77 to_agent_id=main"
+            "stylos_request_talk instance=node-2:77 to_agent_id=main",
         )
         .unwrap();
         let text = format!("Stylos talk to={} from={}", target, "node-1:42");

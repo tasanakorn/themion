@@ -113,10 +113,7 @@ fn tool_call_detail(name: &str, args_json: &str) -> String {
         "board_create_note" => format!(
             "board_create_note to_instance={} to_agent_id={}",
             t("to_instance"),
-            truncate(
-                args["to_agent_id"].as_str().unwrap_or("main"),
-                60,
-            )
+            truncate(args["to_agent_id"].as_str().unwrap_or("main"), 60,)
         ),
         _ => name.to_string(),
     }
@@ -870,6 +867,13 @@ impl Agent {
             msgs_with_system.push(Message {
                 role: "system".to_string(),
                 content: Some(PREDEFINED_GUARDRAILS.to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+
+            msgs_with_system.push(Message {
+                role: "system".to_string(),
+                content: Some("Multi-agent collaboration guidance: prefer durable board notes over stylos_request_talk when delegating asynchronous or non-urgent work to another agent. Treat stylos_request_talk as an interrupting realtime path for urgent coordination or brief clarification. When you receive a done-mention note, treat it as an informational completion notification rather than a fresh work request.".to_string()),
                 tool_calls: None,
                 tool_call_id: None,
             });

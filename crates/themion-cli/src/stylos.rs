@@ -2,13 +2,13 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use themion_core::db::{CreateNoteArgs, NoteColumn};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use themion_core::db::{CreateNoteArgs, NoteColumn, NoteKind};
 
 use serde::{Deserialize, Serialize};
 use stylos::{
@@ -134,7 +134,12 @@ pub struct StylosToolBridge {
 }
 
 impl StylosToolBridge {
-    pub async fn invoke(&self, local_agent_id: Option<&str>, name: &str, args: serde_json::Value) -> anyhow::Result<String> {
+    pub async fn invoke(
+        &self,
+        local_agent_id: Option<&str>,
+        name: &str,
+        args: serde_json::Value,
+    ) -> anyhow::Result<String> {
         let reply = match name {
             "stylos_query_agents_alive" => {
                 let exclude_self = optional_bool(&args, "exclude_self").unwrap_or(true);
@@ -208,6 +213,8 @@ impl StylosToolBridge {
                 let req = NoteRequest {
                     to_agent_id: required_string(&args, "to_agent_id")?,
                     body: required_string(&args, "body")?,
+                    note_kind: optional_string(&args, "note_kind"),
+                    origin_note_id: optional_string(&args, "origin_note_id"),
                     request_id: optional_string(&args, "request_id"),
                     from: Some(self.instance.clone()),
                     from_agent_id: local_agent_id.map(str::to_string),
@@ -668,11 +675,12 @@ struct TalkReply {
     reason: Option<String>,
 }
 
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct NoteRequest {
     to_agent_id: String,
     body: String,
+    note_kind: Option<String>,
+    origin_note_id: Option<String>,
     request_id: Option<String>,
     from: Option<String>,
     from_agent_id: Option<String>,
@@ -1378,22 +1386,56 @@ async fn handle_talk_query(
     }
 }
 
-
 async fn handle_note_query(
     snapshot_provider: &Arc<RwLock<Option<StylosSnapshotProvider>>>,
     query_context: &StylosQueryContext,
     req: Option<NoteRequest>,
 ) -> NoteReply {
     let Some(req) = req else {
-        return NoteReply { accepted: false, agent_id: String::new(), request_id: None, note_id: None, reason: Some("invalid_request".to_string()) };
+        return NoteReply {
+            accepted: false,
+            agent_id: String::new(),
+            request_id: None,
+            note_id: None,
+            reason: Some("invalid_request".to_string()),
+        };
     };
     let Some(snapshot) = current_snapshot(snapshot_provider).await else {
-        return NoteReply { accepted: false, agent_id: req.to_agent_id, request_id: req.request_id, note_id: None, reason: Some("snapshot_unavailable".to_string()) };
+        return NoteReply {
+            accepted: false,
+            agent_id: req.to_agent_id,
+            request_id: req.request_id,
+            note_id: None,
+            reason: Some("snapshot_unavailable".to_string()),
+        };
     };
-    let Some(agent) = snapshot.agents.into_iter().find(|a| a.agent_id == req.to_agent_id) else {
-        return NoteReply { accepted: false, agent_id: req.to_agent_id, request_id: req.request_id, note_id: None, reason: Some("not_found".to_string()) };
+    let Some(agent) = snapshot
+        .agents
+        .into_iter()
+        .find(|a| a.agent_id == req.to_agent_id)
+    else {
+        return NoteReply {
+            accepted: false,
+            agent_id: req.to_agent_id,
+            request_id: req.request_id,
+            note_id: None,
+            reason: Some("not_found".to_string()),
+        };
     };
     let note_id = Uuid::new_v4().to_string();
+    let note_kind = match req.note_kind.as_deref().unwrap_or("work_request") {
+        "work_request" => NoteKind::WorkRequest,
+        "done_mention" => NoteKind::DoneMention,
+        _ => {
+            return NoteReply {
+                accepted: false,
+                agent_id: agent.agent_id,
+                request_id: req.request_id,
+                note_id: None,
+                reason: Some("invalid_note_kind".to_string()),
+            }
+        }
+    };
     let _ = query_context.submit_event(format!(
         "received note create request via stylos from={} from_agent_id={} to={} to_agent_id={}",
         req.from.as_deref().unwrap_or("unknown sender"),
@@ -1403,6 +1445,8 @@ async fn handle_note_query(
     ));
     let created = query_context.notes_db().create_stylos_note(CreateNoteArgs {
         note_id: note_id.clone(),
+        note_kind,
+        origin_note_id: req.origin_note_id.clone(),
         from_instance: req.from.clone(),
         from_agent_id: req.from_agent_id.clone(),
         to_instance: query_context.local_instance().to_string(),
@@ -1423,6 +1467,8 @@ async fn handle_note_query(
             let prompt = build_note_prompt(
                 &note.note_id,
                 &note.note_slug,
+                note.note_kind,
+                note.origin_note_id.as_deref(),
                 note.from_instance.as_deref(),
                 note.from_agent_id.as_deref(),
                 &note.to_instance,
@@ -1440,9 +1486,21 @@ async fn handle_note_query(
                 to: Some(note.to_instance.clone()),
                 to_agent_id: Some(note.to_agent_id.clone()),
             });
-            NoteReply { accepted: true, agent_id: agent.agent_id, request_id: req.request_id, note_id: Some(note_id), reason: None }
+            NoteReply {
+                accepted: true,
+                agent_id: agent.agent_id,
+                request_id: req.request_id,
+                note_id: Some(note_id),
+                reason: None,
+            }
+        }
+        Err(err) => NoteReply {
+            accepted: false,
+            agent_id: agent.agent_id,
+            request_id: req.request_id,
+            note_id: None,
+            reason: Some(err.to_string()),
         },
-        Err(err) => NoteReply { accepted: false, agent_id: agent.agent_id, request_id: req.request_id, note_id: None, reason: Some(err.to_string()) },
     }
 }
 
@@ -1849,12 +1907,30 @@ fn render_instance_identifier(instance: Option<&str>) -> String {
         .to_string()
 }
 
-pub fn build_note_prompt(note_id: &str, note_slug: &str, sender: Option<&str>, sender_agent_id: Option<&str>, target: &str, local_agent_id: &str, column: NoteColumn, body: &str) -> String {
+pub fn build_note_prompt(
+    note_id: &str,
+    note_slug: &str,
+    note_kind: NoteKind,
+    origin_note_id: Option<&str>,
+    sender: Option<&str>,
+    sender_agent_id: Option<&str>,
+    target: &str,
+    local_agent_id: &str,
+    column: NoteColumn,
+    body: &str,
+) -> String {
+    let note_purpose = match note_kind {
+        NoteKind::WorkRequest => "This is a durable delegated work note. Prefer progressing or completing the requested work through the board workflow. Use realtime Stylos talk only if an interrupting clarification is genuinely needed.",
+        NoteKind::DoneMention => "This is an informational completion mention for prior delegated work. Treat it as a durable done notification, not as a fresh request to repeat the same task. Do not create an automatic done echo in response.",
+    };
     format!(
-        "{NOTE_PREFIX} note_id={note_id} note_slug={note_slug} from={} from_agent_id={} to={target} to_agent_id={local_agent_id} column={}\n\nNote body:\n{}",
+        "{NOTE_PREFIX} note_id={note_id} note_slug={note_slug} note_kind={} origin_note_id={} from={} from_agent_id={} to={target} to_agent_id={local_agent_id} column={}\n\n{}\n\nNote body:\n{}",
+        note_kind.as_str(),
+        origin_note_id.unwrap_or("-"),
         sender.unwrap_or("unknown"),
         sender_agent_id.unwrap_or("unknown"),
         column.as_str(),
+        note_purpose,
         body
     )
 }
@@ -2061,8 +2137,10 @@ mod tests {
         assert!(prompt.contains("to=node-2:77"));
         assert!(prompt.contains("to_agent_id=worker"));
         assert!(prompt.contains("column=todo"));
-        assert!(prompt.contains("Note body:
-please fix the tests"));
+        assert!(prompt.contains(
+            "Note body:
+please fix the tests"
+        ));
     }
 }
 
