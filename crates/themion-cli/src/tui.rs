@@ -1389,24 +1389,51 @@ Result:
 {}",
             note.note_id, note.note_slug, note.to_instance, note.to_agent_id, result_summary,
         );
-        let created = self
-            .db
-            .create_stylos_note(themion_core::db::CreateNoteArgs {
-                note_id: uuid::Uuid::new_v4().to_string(),
-                note_kind: themion_core::db::NoteKind::DoneMention,
-                origin_note_id: Some(note.note_id.clone()),
-                from_instance: Some(note.to_instance.clone()),
-                from_agent_id: Some(note.to_agent_id.clone()),
-                to_instance: to_instance.clone(),
-                to_agent_id: to_agent_id.clone(),
-                body,
-            });
-        match created {
-            Ok(done_note) => {
+
+        let create_reply = if let Some(bridge) = self.stylos_tool_bridge.as_ref() {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(bridge.invoke(
+                    Some(&note.to_agent_id),
+                    "board_create_note",
+                    serde_json::json!({
+                        "to_instance": to_instance,
+                        "to_agent_id": to_agent_id,
+                        "body": body,
+                        "note_kind": "done_mention",
+                        "origin_note_id": note.note_id,
+                    }),
+                ))
+            })
+        } else {
+            self.db
+                .create_stylos_note(themion_core::db::CreateNoteArgs {
+                    note_id: uuid::Uuid::new_v4().to_string(),
+                    note_kind: themion_core::db::NoteKind::DoneMention,
+                    origin_note_id: Some(note.note_id.clone()),
+                    from_instance: Some(note.to_instance.clone()),
+                    from_agent_id: Some(note.to_agent_id.clone()),
+                    to_instance: to_instance.clone(),
+                    to_agent_id: to_agent_id.clone(),
+                    body,
+                })
+                .map(|done_note| serde_json::json!({
+                    "accepted": true,
+                    "note_id": done_note.note_id,
+                    "agent_id": done_note.to_agent_id,
+                }).to_string())
+                .map_err(anyhow::Error::from)
+        };
+
+        match create_reply {
+            Ok(reply) => {
+                let created_note_id = serde_json::from_str::<serde_json::Value>(&reply)
+                    .ok()
+                    .and_then(|value| value.get("note_id").and_then(|v| v.as_str()).map(str::to_string))
+                    .unwrap_or_else(|| "unknown".to_string());
                 let _ = self.db.mark_stylos_note_completion_notified(&note.note_id);
                 self.push(Entry::RemoteEvent(format!(
                     "Stylos done mention note_id={} origin_note_id={} to={} to_agent_id={}",
-                    done_note.note_id, note.note_id, to_instance, to_agent_id,
+                    created_note_id, note.note_id, to_instance, to_agent_id,
                 )));
             }
             Err(err) => {
