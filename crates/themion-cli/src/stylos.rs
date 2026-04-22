@@ -1920,7 +1920,7 @@ pub fn build_note_prompt(
     body: &str,
 ) -> String {
     let note_purpose = match note_kind {
-        NoteKind::WorkRequest => "This is a durable delegated work note. Prefer progressing or completing the requested work through the board workflow. Use realtime Stylos talk only if an interrupting clarification is genuinely needed.",
+        NoteKind::WorkRequest => "This is a durable delegated work note. Prefer progressing or completing the requested work through the board workflow. This note is already persisted in the board DB; treat updating that note state as the first priority. Move the note from todo to in_progress as soon as you begin meaningful work when possible. If you finish the task, update the note result text with the concrete outcome and move it to done before ending the turn. Use realtime Stylos talk only if an interrupting clarification is genuinely needed.",
         NoteKind::DoneMention => "This is an informational completion mention for prior delegated work. Treat it as a durable done notification, not as a fresh request to repeat the same task. Do not create an automatic done echo in response. Do not send an acknowledgment, summary-only reply, or any other no-op follow-up unless the note clearly requires a concrete next action or correction.",
     };
     format!(
