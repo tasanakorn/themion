@@ -115,7 +115,10 @@ Typical feature checks for `themion-cli`:
 - Do not modify an implemented PRD unless the user explicitly instructs it.
 - The only routine exception is updating status/implementation notes in the PRD and `docs/README.md` so they reflect what has actually landed.
 - When implementing a feature from an existing PRD, update the relevant PRD and `docs/README.md` status/notes so the docs reflect what has actually landed.
-- When implementing a feature from a PRD that specifies a target software version, check whether the repository version should be updated as part of that implementation and update it when appropriate.
+- When starting implementation of an existing PRD, automatically consider a repository version bump as part of the work rather than assuming no bump is needed.
+- If the PRD specifies a target software version, bump the repository version to match it unless the user explicitly asks not to.
+- If the PRD does not specify a target version, still decide whether the change is release-worthy and bump the repository version when appropriate.
+- Do not stop at pre-bump validation only: when a task includes a version bump, also run the relevant post-bump validation so version-sensitive issues are checked fairly in both directions.
 
 ## Git discipline
 
@@ -136,6 +139,8 @@ Typical feature checks for `themion-cli`:
 - Feature-flag regressions are easy to miss; when touching gated code, verify the crate still builds with the feature enabled and disabled as relevant.
 - When editing code, avoid leaving newly introduced warnings behind; either fix them in the touched area or call them out clearly if blocked.
 - When bumping crate versions, do not stop at editing `Cargo.toml`; explicitly check `git status` for `Cargo.lock` and include it in the same commit when it changed.
+- When implementing a PRD, automatically consider whether the work should include a version bump, and if the PRD already names a target version, treat bumping to that version as the default expectation.
+- When a task includes a version bump, validate after the bump too; do not assume pre-bump checks are sufficient for version-sensitive behavior.
 
 ## When updating docs
 
