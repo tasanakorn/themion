@@ -2,14 +2,33 @@
 
 ## Goal
 
-Identify what system-prompt architecture Themion should adopt by comparing Themion's current prompt layering with patterns observed in the `openai/codex` and `badlogic/pi-mono` repositories, then recommend a balanced direction that preserves advantages while avoiding the major downsides of each approach.
+Identify what prompt architecture Themion should adopt by comparing Themion's current layering with patterns observed in `openai/codex` and `badlogic/pi-mono`, then recommend a direction that keeps Themion's current strengths while improving precedence clarity, prompt safety, debuggability, and extensibility.
 
 ## Scope and constraints
 
 - This document is research only; it does not change implementation.
-- The comparison focuses on prompt architecture, instruction layering, repo-local guidance, tool-use guidance, and task-mode behavior.
+- The comparison focuses on prompt architecture, instruction layering, repo-local guidance, tool-use guidance, workflow/task-mode behavior, and multi-agent implications.
 - The user requested balanced treatment of advantages and disadvantages from each repo.
 - This work is limited to documentation changes under `docs/` in this repository.
+
+## Executive summary
+
+Themion already has the right high-level instinct: it does **not** merge everything into one giant system prompt. It already separates the configured base prompt, built-in guardrails, built-in Codex CLI research guidance, repository-local `AGENTS.md`, and workflow/runtime context.
+
+The strongest conclusion from fresh Codex and pi-mono comparison is not that Themion needs a radically different model. It is that Themion should make its existing model more explicit and more principled.
+
+The main recommendations are:
+
+- keep the base system prompt small and durable
+- treat prompt inputs as a structured stack, not just concatenated text
+- document authority and precedence explicitly
+- treat repo files, tool output, logs, and web content as untrusted data unless promoted by a higher-priority layer
+- keep workflow/task overlays separate from the immutable core
+- make multi-agent prompting an explicitly separate prompt domain
+- prefer a few narrowly-scoped high-value overlays over a proliferation of prompt variants
+- improve provenance and observability so the system can explain where an instruction came from
+
+In short: Themion should move **closer to Codex in explicit hierarchy and operational boundaries**, while staying **closer to pi-mono in core-prompt restraint and composability**.
 
 ## Sources reviewed
 
@@ -28,7 +47,10 @@ Identify what system-prompt architecture Themion should adopt by comparing Themi
 
 - `openai/codex` root `AGENTS.md`
 - `openai/codex/docs/agents_md.md`
-- peer-agent findings from direct repo review of Codex prompt architecture
+- `openai/codex/codex-rs/protocol/src/prompts/base_instructions/default.md`
+- `openai/codex/codex-rs/core/src/agents_md.rs`
+- `openai/codex/codex-rs/core/hierarchical_agents_message.md`
+- peer-agent findings from direct repo review of Codex prompt architecture and recent external prompt/agent guidance
 
 ### pi-mono repo
 
@@ -37,13 +59,17 @@ Identify what system-prompt architecture Themion should adopt by comparing Themi
 - `badlogic/pi-mono/.pi/prompts/pr.md`
 - `badlogic/pi-mono/.pi/prompts/cl.md`
 - `badlogic/pi-mono/packages/coding-agent/README.md`
-- peer-agent request for repo-specific findings
+- `badlogic/pi-mono/packages/coding-agent/src/core/system-prompt.ts`
+- `badlogic/pi-mono/packages/coding-agent/docs/extensions.md`
+- `badlogic/pi-mono/packages/coding-agent/examples/extensions/prompt-customizer.ts`
+- `badlogic/pi-mono/packages/coding-agent/examples/extensions/subagent/README.md`
+- peer-agent repo-specific findings on prompt architecture and extension-time prompt mutation
 
 ## Themion current state
 
 Themion already uses a layered prompt model rather than a single merged prompt blob.
 
-Observed order in `crates/themion-core/src/agent.rs`:
+Observed order in `crates/themion-core/src/agent.rs` and the current docs:
 
 1. base system prompt from config
 2. predefined coding guardrails
@@ -58,19 +84,81 @@ This is a strong starting point. The repo already documents and implements two i
 - stable built-in policy should remain separate from repo-local instructions
 - dynamic runtime context should be injected separately instead of being folded into the main system prompt
 
-Themion's open question is therefore not whether to layer prompt inputs, but how much structure, specialization, and operational detail each layer should contain.
+Themion's open question is therefore not whether to layer prompt inputs, but how much structure, specialization, safety framing, and provenance each layer should carry.
+
+## What has become newly important in 2024-2025
+
+Older prompt-engineering advice often treated success as a matter of writing a better single prompt. The newer pattern across current coding-agent systems and recent safety guidance is different.
+
+### 1. Instruction hierarchy is a first-class design concern
+
+Modern agent behavior is increasingly framed as a chain of authority, not a flat bag of instructions. The durable pattern is:
+
+1. platform/system policy
+2. developer/operator instructions
+3. repo/project-local instructions
+4. user task instructions
+5. untrusted retrieved data, files, tool output, logs, and web content
+
+Themion already approximates this structurally, but the hierarchy should be documented more explicitly.
+
+### 2. Prompt injection is a containment problem, not just a wording problem
+
+Recent guidance across vendors and security sources converges on the same lesson: the correct defense is not merely "write a stronger prompt." Practical resilience comes from authority separation, least privilege, approval gates, explicit treatment of untrusted content, and observability.
+
+This matters for Themion because coding agents routinely inspect:
+
+- repository files
+- `README`s and docs
+- issue text and PR descriptions
+- terminal output and logs
+- web-research results
+- peer-agent or delegated results
+
+Those artifacts may contain instructions, but they should generally be treated as data unless adopted by a higher-priority layer.
+
+### 3. Capability-sensitive prompting is more robust than static capability claims
+
+pi-mono now assembles prompt guidance from the actually enabled tools and structured prompt inputs. This is stronger than a static prompt that describes tools or workflows that may not exist in the current run.
+
+Themion already injects some runtime-specific guidance, but this principle could be applied more explicitly.
+
+### 4. Verification contracts matter more than generic "be careful" advice
+
+High-performing coding-agent systems now emphasize concrete validation loops: narrow tests first, then broader checks; explicit reporting of blockers; and clear expectations around what counts as sufficient verification.
+
+Themion already includes this spirit in built-in guardrails and repo-local instructions, but it should preserve this as an explicit architectural layer rather than allow it to diffuse into scattered wording.
+
+### 5. Memory and context management are reliability concerns, not just convenience features
+
+Long-lived prompt stacks, repeated overlays, and persistent instructions can erode adherence. Compact stable policy plus scoped transient overlays is increasingly more reliable than putting every rule into one permanent message.
+
+### 6. Provenance and observability are now part of prompt architecture
+
+If a system cannot explain where an instruction came from, conflicts become difficult to debug. pi-mono's recent structured resource/source work and Codex's explicit `AGENTS.md` handling both point toward the same architectural lesson: instruction sources should be inspectable and attributable.
 
 ## Findings from Codex
 
 ### What Codex appears to optimize for
 
-Codex appears to optimize for predictable coding-agent behavior across many repositories and many tasks. Its prompt design emphasizes explicit structure, clear precedence, and concrete operational guidance.
+Codex appears to optimize for predictable coding-agent behavior across many repositories and many tasks. Its prompt design emphasizes explicit structure, clear precedence, concrete operational guidance, and model-visible handling of scoped repo instructions.
+
+### Repo-grounded evidence
+
+Codex's current base prompt artifacts explicitly describe an `AGENTS.md` authority model in `codex-rs/protocol/src/prompts/base_instructions/default.md` and related prompt copies. They specify:
+
+- `AGENTS.md` files may appear anywhere in a repo tree
+- each file governs the directory subtree rooted at its location
+- deeper files override higher-level ones when they conflict
+- direct system, developer, and user instructions outrank `AGENTS.md`
+
+Codex also has explicit supporting machinery around this model in `codex-rs/core/src/agents_md.rs` and `codex-rs/core/hierarchical_agents_message.md`, which shows that prompt architecture is treated as runtime policy, not just documentation prose.
 
 ### Architectural strengths worth learning from
 
 #### 1. Strong instruction layering
 
-A major Codex strength is that prompt inputs are layered rather than merged into one monolithic prompt. Durable base behavior, runtime overlays, user input, repo-local guidance, and tool/runtime context are treated as distinct inputs.
+A major Codex strength is that prompt inputs are layered rather than merged into one monolithic prompt. Durable base behavior, runtime overlays, repo-local guidance, and user/context data are treated as distinct inputs.
 
 Why this matters for Themion:
 
@@ -80,7 +168,7 @@ Why this matters for Themion:
 
 #### 2. Explicit precedence and scope
 
-Codex reportedly makes precedence clearer, especially around repo-local guidance such as `AGENTS.md` and nested instruction scope. That is valuable because prompt conflicts become resolvable instead of accidental.
+Codex is strong on making precedence visible, especially around repo-local guidance such as `AGENTS.md` and nested instruction scope.
 
 Why this matters for Themion:
 
@@ -89,31 +177,30 @@ Why this matters for Themion:
 
 #### 3. Concrete operational tool guidance
 
-Codex gives highly actionable tool guidance rather than generic encouragement to use tools. That reduces ambiguity around search, editing, validation, and fallback behavior.
+Codex gives highly actionable tool guidance rather than generic encouragement to use tools. It specifies behaviors around search, editing, plans, validation, and final reporting.
 
 Why this matters for Themion:
 
-- Themion already nudges tool grounding, but some behaviors are still spread across system prompt text, developer instructions, and repo docs
-- high-value operational guidance can improve consistency without needing a huge system prompt
+- Themion already nudges tool grounding, but some behaviors are still split across system prompt text, repo docs, and developer instructions
+- high-value operational guidance can improve consistency without requiring a giant base prompt
 
-#### 4. Task-specific guidance branches
+#### 4. Task-specific behavior framing
 
-Codex appears to vary guidance by task mode such as review, implementation, validation, or other specific work patterns. This is a strong idea because not every task should inherit the same response contract.
+Codex uses specialized task logic and workflow-specific instructions in ways that suggest not every task should inherit the exact same response contract.
 
 Why this matters for Themion:
 
 - Themion already has workflows and phase instructions
-- a task-mode layer could complement workflows for common intents like code review, research, implementation, or peer-to-peer coordination
+- a task-mode layer could complement workflows for common intents like code review, research, implementation, or peer coordination
 
-#### 5. Prompt composition from fragments/templates
+#### 5. Strong distinction between instructions and evidence
 
-Codex's architecture suggests prompt fragments and templated assembly rather than repeated copy-pasted whole prompts.
+Codex's guardian/review-related prompting explicitly treats transcripts, tool outputs, and related artifacts as untrusted evidence rather than instructions to obey.
 
 Why this matters for Themion:
 
-- it lowers drift risk
-- it makes built-in instruction layers easier to revise independently
-- it fits Themion's existing layered approach well
+- this is a strong modern pattern for prompt-injection resistance
+- Themion can borrow the underlying principle even outside a dedicated guardian subsystem
 
 ### Codex disadvantages and risks
 
@@ -138,15 +225,15 @@ Risk for Themion:
 
 #### 3. Drift between variants
 
-When similar prompt variants exist in multiple places, duplication can create subtle divergence.
+Codex contains similar prompt guidance in multiple prompt artifacts and generated/bundled representations. That helps compatibility, but it also creates drift risk.
 
 Risk for Themion:
 
-- if the same guidance is encoded in system prompt text, built-in guardrails, workflow instructions, docs, and AGENTS.md, behavior may drift in hard-to-debug ways
+- if the same guidance is encoded in system prompt text, built-in guardrails, workflow instructions, docs, and `AGENTS.md`, behavior may drift in hard-to-debug ways
 
 #### 4. Blurring policy vs UX preference
 
-Codex seems to include both execution policy and product-style output rules. That can be useful, but it makes the system harder to reason about.
+Codex includes both execution policy and product-style output rules. That can be useful, but it makes the system harder to reason about.
 
 Risk for Themion:
 
@@ -158,43 +245,84 @@ Risk for Themion:
 
 pi-mono appears to optimize for extensibility and user customization rather than one centrally maximized built-in prompt. It presents the coding agent as a minimal harness that users adapt with prompt templates, skills, extensions, themes, and repo-local rules.
 
+### Repo-grounded evidence
+
+Fresh pi-mono review shows that its current prompt system is intentionally assembled from structured inputs in `packages/coding-agent/src/core/system-prompt.ts`, including:
+
+- base instructions
+- tool-sensitive guidance derived from available tools
+- appended guidelines
+- discovered context files
+- skills
+- execution facts such as date and cwd
+
+A particularly relevant recent change is that `before_agent_start` now exposes `systemPromptOptions` (`BuildSystemPromptOptions`) so extensions can inspect structured prompt ingredients rather than rediscover them from text. This is documented in `packages/coding-agent/CHANGELOG.md`, `packages/coding-agent/docs/extensions.md`, and the `prompt-customizer.ts` example.
+
+pi also explicitly documents:
+
+- automatic loading of `AGENTS.md` and `CLAUDE.md`
+- `--no-context-files`
+- `.pi/SYSTEM.md` for replacement semantics
+- `APPEND_SYSTEM.md` for append semantics
+- prompt templates and extensions as distinct mechanisms
+- subagent examples that run in isolated contexts with separate prompt domains
+
 ### Architectural strengths worth learning from
 
 #### 1. Minimal core philosophy
 
-pi's README explicitly frames the agent as a minimal harness that users adapt to their workflow. That keeps the built-in product philosophy clear and avoids prematurely hardcoding every behavior into the core prompt.
+pi's README explicitly frames the agent as a minimal harness that users adapt to their workflow.
 
 Why this matters for Themion:
 
 - Themion should resist turning the base system prompt into an ever-growing policy document
 - compact durable defaults are easier to preserve across repositories and providers
 
-#### 2. Prompt specialization through separate artifacts
+#### 2. Structured prompt composition rather than raw concatenation
 
-pi-mono uses discrete prompt files such as `.pi/prompts/is.md` and `.pi/prompts/pr.md` for issue analysis and PR review. This is a practical pattern: task-specific instructions live outside the universal base prompt.
+pi's newer architecture makes prompt construction inspectable as structured inputs, not just a final string.
+
+Why this matters for Themion:
+
+- it enables safer customization
+- it makes provenance clearer
+- it creates a better foundation for extensions or future task overlays than ad hoc string splicing
+
+#### 3. Prompt specialization through separate artifacts
+
+pi-mono uses discrete prompt files such as `.pi/prompts/is.md` and `.pi/prompts/pr.md` for issue analysis and PR review.
 
 Why this matters for Themion:
 
 - this maps well to optional task-mode prompt fragments
 - it supports specialization without polluting all turns with every rule
 
-#### 3. Repo-local operating rules are explicit
+#### 4. Repo-local operating rules are explicit and scoped
 
-The root `AGENTS.md` in pi-mono is very operational: command restrictions, test policy, git discipline, changelog rules, and parallel-agent safety. This shows the value of keeping local repo operating rules outside the generic product prompt.
+The root `AGENTS.md` in pi-mono is very operational: command restrictions, test policy, git discipline, changelog rules, and multi-agent guidance.
 
 Why this matters for Themion:
 
 - Themion already supports this model and should keep leaning into it
 - repo-local rules are best handled as scoped contextual instructions, not universal behavior
 
-#### 4. Customization over monolithic defaults
+#### 5. Replacement, append, and discovered-context semantics are distinct
 
-pi's package design pushes advanced behavior into prompt templates, skills, and extensions. This can keep the core assistant more adaptable.
+pi distinguishes between replacing the base system prompt, appending to it, and discovering project/user context files.
 
 Why this matters for Themion:
 
-- not every advanced behavior has to live in the system prompt
-- some behaviors belong in workflow/task selection or dedicated tools rather than in the base assistant identity
+- these are different kinds of authority and should not be conflated
+- this separation improves debuggability and makes precedence easier to reason about
+
+#### 6. Multi-agent behavior is treated as a separate prompt domain
+
+pi's subagent example isolates context windows and delegated system prompts per agent/process rather than treating collaboration as a few extra paragraphs in one shared prompt.
+
+Why this matters for Themion:
+
+- multi-agent prompting should not be modeled as one overloaded monologue
+- delegated-agent prompts are authority surfaces and deserve explicit trust boundaries
 
 ### pi-mono disadvantages and risks
 
@@ -204,12 +332,12 @@ A highly customizable architecture can reduce consistency between sessions, repo
 
 Risk for Themion:
 
-- if too much behavior is pushed outward, default quality may depend too heavily on repo-local instructions
+- if too much behavior is pushed outward, default quality may depend too heavily on repo-local instructions or extensions
 - Themion benefits from stronger built-in defaults than a highly customizable framework may require
 
 #### 2. Operational knowledge can become fragmented
 
-When behavior lives across prompt templates, repo rules, commands, and extensions, it can be harder to know what instruction source is driving a given behavior.
+When behavior lives across prompt templates, repo rules, skills, and extensions, it can be harder to know what instruction source is driving a given behavior.
 
 Risk for Themion:
 
@@ -217,45 +345,71 @@ Risk for Themion:
 
 #### 3. Minimalism can under-specify important defaults
 
-A minimal harness philosophy is appealing, but some critical coding-agent behaviors need a product-level default rather than optional add-ons.
+A minimal harness philosophy is appealing, but some critical coding-agent behaviors still need a product-level default rather than optional add-ons.
 
 Risk for Themion:
 
-- truthfulness, narrow validation, targeted edits, repo-instruction precedence, and external research behavior should remain built-in defaults
+- truthfulness, narrow validation, targeted edits, repo-instruction precedence, untrusted-content handling, and external research behavior should remain built-in defaults
 
-## Comparative summary
+#### 4. Powerful customization surfaces widen the policy surface area
 
-### Codex-style strengths
+Programmable prompt mutation is powerful, but it also means that prompt behavior can be changed in more places.
 
-- clear layered architecture
+Risk for Themion:
+
+- if Themion ever adds similar extensibility, it should pair it with provenance and debugging support rather than only exposing a text-mutation hook
+
+## Comparative synthesis
+
+### Where Codex is stronger
+
+Codex is stronger when the goal is consistent behavior under mixed instruction sources.
+
+It is especially good at:
+
 - explicit precedence
-- strong operational tool guidance
-- good support for task-specific behavior
-- fragment/template-based assembly
+- scoped repo-instruction semantics
+- strong operational guidance
+- clearly separating durable policy from runtime evidence in safety-critical contexts
 
-### Codex-style weaknesses
+### Where pi-mono is stronger
 
-- prompt length and maintenance burden
-- risk of rigidity
-- duplication/drift across variants
-- policy and UX preferences can become mixed together
+pi-mono is stronger when the goal is composability and long-term adaptability.
 
-### pi-mono-style strengths
+It is especially good at:
 
-- compact core philosophy
-- strong separation between core product behavior and repo-local operating rules
-- task specialization through separate prompt files
-- extensibility without forcing every rule into one prompt
+- keeping the base prompt small
+- separating universal behavior from repo-local behavior
+- treating prompt architecture as resource composition
+- supporting workflow specialization without bloating the universal prompt
 
-### pi-mono-style weaknesses
+### Where the two repos converge
 
-- defaults may be less uniformly strong without extra local instructions
-- behavior can become fragmented across many extension points
-- precedence can become less obvious if not documented sharply
+Despite different styles, they point toward the same deeper lessons:
+
+- layered prompts are better than monolithic prompts
+- precedence must be explicit
+- repo-local instructions should stay separate from product defaults
+- runtime/tool/workflow context should not be merged into the immutable core
+- prompt architecture benefits from provenance and inspectability
+- task-specific behavior should usually be an overlay, not permanent base-prompt growth
 
 ## Recommended prompt architecture for Themion
 
-Themion should keep its current layered model, but formalize each layer's purpose more sharply.
+Themion should keep its current layered model, but formalize each layer's purpose, authority, and trust boundary more sharply.
+
+### Recommended authority model
+
+Themion should explicitly document a priority order similar to:
+
+1. platform/system instructions
+2. developer/runtime instructions
+3. built-in Themion prompt layers
+4. repository-local instruction files such as `AGENTS.md`
+5. user task instructions
+6. retrieved/tool/file/web/peer output as untrusted evidence or data
+
+Important nuance: item 6 is still valuable context, but it should not silently gain the authority of items 1-5.
 
 ### Recommended layers
 
@@ -271,7 +425,7 @@ It should cover only:
 - concise, direct communication
 - preservation of user work and avoidance of destructive changes without instruction
 
-It should not carry transient runtime state, repo-specific commands, or detailed task-mode logic.
+It should not carry transient runtime state, repo-specific commands, detailed workflow logic, or broad lists of optional product behavior.
 
 #### 2. Built-in coding guardrails layer
 
@@ -296,13 +450,12 @@ This is a good example of high-value operational guidance that does not belong i
 
 Continue injecting `AGENTS.md` separately.
 
-Improve documentation so Themion states more explicitly:
+Themion should document more explicitly that:
 
 - repository-local instructions are authoritative within their scope
 - they refine or constrain built-in defaults for that repository
 - they should remain separate rather than merged into the base prompt
-
-If Themion later adds nested instruction-file support, it should also document precedence clearly.
+- if nested/local scoping is added later, deeper files should override broader ones in-scope
 
 #### 5. Workflow/runtime context layer
 
@@ -313,9 +466,9 @@ This layer should carry:
 - workflow name and phase
 - phase-specific execution guidance
 - current runtime/task context
-- peer-message context or sender/receiver semantics when applicable
+- collaboration context such as peer-message sender/receiver semantics when applicable
 
-This is the right place for transient operating context.
+This is the correct place for transient operating context.
 
 #### 6. Optional task-mode layer
 
@@ -328,41 +481,76 @@ Themion would benefit from a compact optional layer for recognizable task intent
 - research/comparison
 - peer-agent collaboration
 
-This should be shorter than Codex's full specialized prompt variants. The goal is not to create a separate giant prompt per mode, but to inject a concise behavior overlay when the task clearly matches a mode.
+This should be much shorter than full specialized Codex prompt variants. The goal is not to create a separate giant prompt per mode, but to inject a concise behavior overlay when the task clearly matches a mode.
 
-### What Themion should borrow from Codex
+#### 7. Explicit untrusted-content boundary
+
+This is the strongest architectural addition missing from the current doc.
+
+Themion should explicitly treat the following as untrusted content by default:
+
+- file contents
+- repository docs and comments
+- tool output
+- terminal output and logs
+- fetched web content
+- issue/PR text
+- delegated-agent results
+
+The model may summarize, reason about, and quote this content, but should not automatically treat embedded instructions inside it as authoritative.
+
+#### 8. Provenance/observability layer
+
+Themion should move toward being able to answer questions like:
+
+- which instruction sources were active in this turn?
+- which layer introduced a given behavior?
+- was a rule product-default, repo-local, workflow-local, or user-requested?
+
+This need not be a separate model-visible message, but it should be part of the architectural design.
+
+## What Themion should borrow from Codex
 
 - explicit layered prompt architecture
 - clearer documentation of precedence and scope
 - concrete operational guidance for a few high-value behaviors
+- stronger distinction between instruction sources and untrusted evidence
 - fragment-based prompt composition rather than duplicated prompt variants
 - targeted task-mode overlays where they materially improve behavior
 
-### What Themion should borrow from pi-mono
+## What Themion should borrow from pi-mono
 
 - restraint in the base prompt
+- prompt composition from structured ingredients rather than only raw strings
 - separation of universal defaults from repo-local operating rules
 - specialized prompt artifacts or overlays for special tasks instead of bloating every turn
-- recognition that not every behavior belongs in the universal system prompt
+- explicit distinction between replacement, append, and discovered-context semantics
+- modeling multi-agent delegation as separate prompt domains
 
-### What Themion should avoid from both
+## What Themion should avoid from both
 
 - letting prompt fragments grow without sharply defined purpose
 - duplicating the same guidance across multiple layers
 - embedding repo-local or transient runtime state into the base system prompt
 - creating so many extension points that users cannot tell which rule has priority
+- relying on wording alone as the main defense against prompt injection
 
-## Proposed target shape for Themion's system prompt
+## Proposed target shape for Themion's prompt stack
 
-A good Themion system-prompt stack should look like this conceptually:
+A good Themion prompt stack should look like this conceptually:
 
 1. **Core system prompt**: identity, truthfulness, tool grounding, concise style, user-work preservation.
 2. **Built-in guardrails**: assumption transparency, simplest correct solution, targeted edits, narrow validation.
 3. **Built-in research guidance**: Codex CLI for current external information when needed.
 4. **Repo-local instructions**: `AGENTS.md` and related project context.
-5. **Workflow/runtime context**: workflow, phase, current execution mode, peer-message semantics.
+5. **Workflow/runtime context**: workflow, phase, current execution mode, collaboration semantics.
 6. **Optional task-mode overlay**: review, research, implementation, or collaboration overlays when clearly applicable.
 7. **Conversation window and recall hints**.
+
+Surrounding that stack, the runtime should maintain two non-textual architectural commitments:
+
+- **authority/precedence rules** for resolving conflicts
+- **untrusted-content boundaries** for files, tools, logs, web content, and delegated output
 
 This is closer to Codex in architecture, but closer to pi-mono in restraint.
 
@@ -374,15 +562,26 @@ If Themion evolves its prompt system further, the safest direction is:
 - keep built-in product defaults separate from repo-local rules
 - add only a small number of high-value specialized overlays
 - document precedence more explicitly than today
+- define untrusted-content handling explicitly rather than leaving it implicit
 - prefer reusable prompt fragments over new monolithic prompt variants
+- preserve provenance so prompt behavior stays explainable as the system grows
 
-In short: Themion should adopt Codex's discipline about layers and precedence, while adopting pi-mono's discipline about keeping the core prompt small.
+In short: Themion should adopt Codex's discipline about layers, authority, and safety boundaries, while adopting pi-mono's discipline about keeping the core prompt small and composable.
+
+## Risks and uncertainties in this research
+
+- This document compares architecture and documented behavior, not benchmarked outcome quality.
+- Some Codex and pi-mono findings come from prompt artifacts, docs, tests, and examples rather than one single canonical architecture spec.
+- Some of the newer lessons cited here are durable cross-vendor themes, but the exact mechanisms used by any one product may change quickly.
+- Themion's current docs describe its own layer order clearly, but some future recommendations here, such as stronger untrusted-content wording or first-class task-mode overlays, are still design recommendations rather than implemented behavior.
 
 ## Suggested follow-up docs work
 
 If the project wants to turn this research into implementation or a PRD later, likely follow-ups would be:
 
 - document prompt-layer precedence more explicitly in `docs/engine-runtime.md`
+- document untrusted-content boundaries for repo files, tool output, logs, web research, and delegated-agent results
 - define whether Themion wants a first-class task-mode overlay concept in addition to workflows
 - document how peer-message instructions relate to workflow instructions and repo-local instructions
+- define whether instruction-source provenance should become visible in diagnostics or status output
 - ensure any future prompt fragment has a narrow purpose and a single canonical source
