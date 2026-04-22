@@ -674,7 +674,7 @@ impl<'a> App<'a> {
         }
     }
 
-    fn handle_agent_event(&mut self, ev: AgentEvent) {
+    fn handle_agent_event(&mut self, ev: AgentEvent, app_tx: &mpsc::UnboundedSender<AppEvent>) {
         match ev {
             AgentEvent::LlmStart => {
                 #[cfg(feature = "stylos")]
@@ -764,7 +764,7 @@ impl<'a> App<'a> {
             }
             AgentEvent::TurnDone(stats) => {
                 #[cfg(feature = "stylos")]
-                self.maybe_emit_done_mention_for_completed_note();
+                self.maybe_emit_done_mention_for_completed_note(app_tx);
                 #[cfg(feature = "stylos")]
                 if let (Some(remote), Some(handle)) =
                     (self.active_remote_request.take(), self.stylos.as_ref())
@@ -1345,8 +1345,8 @@ impl<'a> App<'a> {
     }
 
     #[cfg(feature = "stylos")]
-    fn maybe_emit_done_mention_for_completed_note(&mut self) {
-        let Some(remote) = self.active_remote_request.as_ref() else {
+    fn maybe_emit_done_mention_for_completed_note(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) {
+        let Some(remote) = self.active_remote_request.as_ref().cloned() else {
             return;
         };
         if !remote.prompt.starts_with("type=stylos_note ") {
@@ -1363,6 +1363,13 @@ impl<'a> App<'a> {
             return;
         };
         if note.column != themion_core::db::NoteColumn::Done {
+            let prompt = format!(
+                "This turn ended but note {} is still in {}. You still have a pending board task. Continue handling this note now. Decide from the note context whether any real action remains. If no further action is needed, move the note to done in this turn. Otherwise keep progressing it through the board workflow and do not end the turn while it is still pending.",
+                note.note_id,
+                note.column.as_str(),
+            );
+            self.active_remote_request = Some(remote);
+            self.submit_text(prompt, app_tx);
             return;
         }
         if note.note_kind != themion_core::db::NoteKind::WorkRequest {
@@ -2397,7 +2404,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     app.submit_text(request.prompt, &app_tx);
                 }
             }
-            Some(AppEvent::Agent(ev)) => app.handle_agent_event(ev),
+            Some(AppEvent::Agent(ev)) => app.handle_agent_event(ev, &app_tx),
             Some(AppEvent::AgentReady(agent, sid)) => {
                 let agent = *agent;
                 app.status_model_info = agent.model_info().cloned();
