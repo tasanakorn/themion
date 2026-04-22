@@ -868,7 +868,7 @@ impl Agent {
             "session_state"
         };
 
-        for _ in 0..10 {
+        loop {
             if cancellation.as_ref().is_some_and(|c| c.is_interrupted()) {
                 self.interrupt_turn(turn_id, turn_seq).await?;
                 turn_end_reason = "interrupted".to_string();

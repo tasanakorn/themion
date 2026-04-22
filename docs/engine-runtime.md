@@ -37,7 +37,7 @@ A single user turn follows this shape:
 6. If the model requests tools, the harness executes them and appends tool results to the conversation.
 7. The harness calls the model again with the updated conversation.
 8. Workflow tools may also inspect or mutate the current workflow state between model calls.
-9. This repeats until the model returns a normal assistant response with no more tool calls, or the loop limit is reached.
+9. This repeats until the model returns a normal assistant response with no more tool calls, or another existing runtime stop condition ends the turn.
 10. The turn is finalized in SQLite with message, workflow, and token metadata.
 
 ## Agent identity boundary

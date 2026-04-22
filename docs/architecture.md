@@ -88,7 +88,7 @@ Each call to `run_loop(user_input)`:
 5. Push `role="assistant"` response to history; persist to `agent_messages`.
 6. If response has no `tool_calls` → break.
 7. For each tool call: emit `ToolStart` (detail truncated to 60 chars), execute via `call_tool`, push `role="tool"` result; persist each.
-8. Repeat from step 3, up to 10 iterations.
+8. Repeat from step 3 until the assistant returns with no more tool calls or another existing runtime stop condition ends the turn.
 9. Finalize the DB turn row with token stats; emit `TurnDone`.
 
 ## Context Windowing
@@ -135,6 +135,16 @@ Durable note operations are exposed as `board_*` tools. These board tools manipu
 
 Database path: `$XDG_DATA_HOME/themion/system.db` (default `~/.local/share/themion/system.db`). Created on first run; WAL mode enabled on every open for safe multi-process access.
 
+History and note persistence currently use these main tables:
+
+- `agent_sessions` — one row per harness session, including project directory, interactive flag, and persisted workflow state
+- `agent_turns` — one row per user turn with token counts, LLM round counts, tool-call counts, and workflow phase-at-start/end metadata
+- `agent_messages` — one row per persisted message; assistant tool-call payloads are stored in `tool_calls_json`, and tool result rows link back through `tool_call_id`
+- `agent_workflow_transitions` — workflow/phase transition audit trail
+- `board_notes` — durable note board rows keyed by canonical UUID `note_id` with unique human-friendly `note_slug`
+
+Machine-consumed note timestamps use explicit milliseconds fields such as `created_at_ms`, `updated_at_ms`, `injected_at_ms`, `completion_notified_at_ms`, and `blocked_until_ms`.
+
 ## Stylos status
 
 When the `stylos` feature is enabled, Themion still opens one Stylos session per process. Status now publishes shared process metadata plus an `agents` array. The top-level `startup_project_dir` records where the Themion process started and is informational provenance; consumers must not assume it matches every agent `project_dir`.
@@ -158,6 +168,7 @@ Per-instance queryables target one Themion process:
 - `stylos/<realm>/themion/instances/<instance>/query/tasks/request`
 - `stylos/<realm>/themion/instances/<instance>/query/tasks/status`
 - `stylos/<realm>/themion/instances/<instance>/query/tasks/result`
+- `stylos/<realm>/themion/instances/<instance>/query/notes/request`
 
 The direct instance identifier is transport-safe `<hostname>:<pid>`, not a slash-delimited path.
 
@@ -269,6 +280,7 @@ Current behavior:
 - when the `stylos` feature is enabled, `board_create_note` always submits through the Stylos `notes/request` path, even when the destination instance is the current local instance
 - in Stylos-enabled builds, the receiver-side `notes/request` handler is the canonical create path that validates the target agent, creates the note row in local SQLite, and returns the created `note_id`
 - `board_list_notes`, `board_read_note`, `board_move_note`, and `board_update_note_result` remain local board operations against the receiving instance's SQLite state after creation
+- blocked notes store cooldown eligibility in `blocked_until_ms` milliseconds; moving a note into `blocked` or marking a blocked note injected refreshes that cooldown
 - idle-time delivery prefers the oldest eligible `in_progress` note for an agent, then `todo`, then cooldown-eligible `blocked` notes
 - once injected, the note is marked so it is not injected repeatedly by default
 - idle-time injected note prompts identify themselves as durable notes and include core metadata such as `note_id`, `note_slug`, source/target identities, current column, and the note body so the model usually does not need an immediate `board_read_note` call for orientation
