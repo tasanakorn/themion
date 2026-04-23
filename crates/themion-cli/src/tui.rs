@@ -37,6 +37,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_stream::StreamExt;
 use tui_textarea::CursorMove;
 use tui_textarea::TextArea;
+use unicode_width::UnicodeWidthChar;
 
 use crate::paste_burst::{CharDecision, FlushResult, PasteBurst};
 use uuid::Uuid;
@@ -2157,6 +2158,61 @@ fn make_input<'a>() -> TextArea<'a> {
     ta
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InputLayoutMetrics {
+    visual_lines: u16,
+    cursor_row: u16,
+    cursor_col: u16,
+}
+
+fn char_display_width(ch: char) -> u16 {
+    UnicodeWidthChar::width(ch).unwrap_or(0).max(1) as u16
+}
+
+fn input_layout_metrics(text: &str, cursor_byte: usize, width: u16) -> InputLayoutMetrics {
+    let width = width.max(1);
+    let cursor_byte = clamp_to_char_boundary(text, cursor_byte);
+    let mut visual_lines = 1u16;
+    let mut cursor_row = 0u16;
+    let mut cursor_col = 0u16;
+    let mut row = 0u16;
+    let mut col = 0u16;
+
+    for (byte_idx, ch) in text.char_indices() {
+        if byte_idx == cursor_byte {
+            cursor_row = row;
+            cursor_col = col;
+        }
+
+        if ch == '\n' {
+            row = row.saturating_add(1);
+            visual_lines = visual_lines.max(row.saturating_add(1));
+            col = 0;
+            continue;
+        }
+
+        let ch_width = char_display_width(ch);
+        if col.saturating_add(ch_width) > width {
+            row = row.saturating_add(1);
+            visual_lines = visual_lines.max(row.saturating_add(1));
+            col = 0;
+        }
+        col = col.saturating_add(ch_width);
+        visual_lines = visual_lines.max(row.saturating_add(1));
+    }
+
+    if cursor_byte == text.len() {
+        cursor_row = row;
+        cursor_col = col;
+    }
+
+    InputLayoutMetrics {
+        visual_lines: visual_lines.max(1),
+        cursor_row,
+        cursor_col,
+    }
+}
+
 fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Line<'a>> {
     let mut lines: Vec<Line> = Vec::new();
 
@@ -2293,23 +2349,10 @@ fn draw(f: &mut Frame, app: &App) {
 
     let input_inner = input_block.inner(area);
     let input_inner_width = input_inner.width.max(1);
+    let (_, cursor_byte) = input_text_and_cursor_byte(&app.input);
+    let input_layout = input_layout_metrics(&input_text, cursor_byte, input_inner_width);
 
-    let input_visual_lines = if input_text.is_empty() {
-        1
-    } else {
-        input_text
-            .split('\n')
-            .map(|line: &str| {
-                let len = line.chars().count() as u16;
-                let wrapped =
-                    (len.saturating_add(input_inner_width).saturating_sub(1)) / input_inner_width;
-                wrapped.max(1)
-            })
-            .sum::<u16>()
-            .max(1)
-    };
-
-    let input_height = (input_visual_lines + 2).clamp(3, 8);
+    let input_height = (input_layout.visual_lines + 2).clamp(3, 8);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2345,9 +2388,8 @@ fn draw(f: &mut Frame, app: &App) {
     f.render_widget(input_para, chunks[1]);
 
     if app.review_mode == ReviewMode::Closed {
-        let (cursor_row, cursor_col) = app.input.cursor();
-        let cursor_x = chunks[1].x + 2 + cursor_col as u16;
-        let cursor_y = chunks[1].y + 1 + cursor_row as u16;
+        let cursor_x = chunks[1].x + 2 + input_layout.cursor_col;
+        let cursor_y = chunks[1].y + 1 + input_layout.cursor_row;
         if cursor_y < chunks[1].bottom() && cursor_x < chunks[1].right() {
             f.set_cursor_position((cursor_x, cursor_y));
         }
@@ -2694,6 +2736,8 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                             app.close_transcript_review();
                         } else if app.paste_burst.newline_should_insert_instead_of_submit(now) {
                             app.input.insert_newline();
+                            app.mark_dirty_input();
+                            app.request_draw(&frame_requester);
                             app.paste_burst.extend_window(now);
                         } else {
                             let tx = app_tx.clone();
@@ -2706,6 +2750,8 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                             handle_paste(&mut app, pasted);
                         }
                         app.input.insert_newline();
+                        app.mark_dirty_input();
+                        app.request_draw(&frame_requester);
                     }
                     (KeyCode::PageUp, _) => {
                         let page = area_page_height(&terminal, &app);
@@ -3069,6 +3115,53 @@ fn unix_epoch_now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod input_layout_tests {
+    use super::*;
+
+    #[test]
+    fn input_layout_metrics_moves_cursor_after_explicit_newline() {
+        let text = "hello\nworld";
+        let metrics = input_layout_metrics(text, "hello\n".len(), 20);
+        assert_eq!(
+            metrics,
+            InputLayoutMetrics {
+                visual_lines: 2,
+                cursor_row: 1,
+                cursor_col: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn input_layout_metrics_wraps_long_lines_for_cursor_tracking() {
+        let text = "abcdef";
+        let metrics = input_layout_metrics(text, text.len(), 4);
+        assert_eq!(
+            metrics,
+            InputLayoutMetrics {
+                visual_lines: 2,
+                cursor_row: 1,
+                cursor_col: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn input_layout_metrics_handles_wide_chars_across_wraps() {
+        let text = "ab界c";
+        let metrics = input_layout_metrics(text, text.len(), 4);
+        assert_eq!(
+            metrics,
+            InputLayoutMetrics {
+                visual_lines: 2,
+                cursor_row: 1,
+                cursor_col: 1,
+            }
+        );
+    }
 }
 
 #[cfg(all(test, feature = "stylos"))]

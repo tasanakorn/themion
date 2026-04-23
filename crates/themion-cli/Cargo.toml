@@ -1,6 +1,6 @@
 [package]
 name = "themion-cli"
-version = "0.26.0"
+version = "0.26.1"
 edition = "2021"
 
 [[bin]]
@@ -30,6 +30,7 @@ dirs = "5"
 ratatui.workspace = true
 crossterm.workspace = true
 tui-textarea.workspace = true
+unicode-width = "0.2"
 tokio.workspace = true
 tokio-stream.workspace = true
 themion-core = { path = "../themion-core", features = ["stylos"] }

@@ -2991,7 +2991,7 @@ dependencies = [
 
 [[package]]
 name = "themion-cli"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -3011,6 +3011,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "tui-textarea",
+ "unicode-width 0.2.0",
  "urlencoding",
  "uuid",
  "zenoh",
@@ -3018,7 +3019,7 @@ dependencies = [
 
 [[package]]
 name = "themion-core"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "anyhow",
  "async-trait",
