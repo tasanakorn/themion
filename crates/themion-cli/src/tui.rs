@@ -21,6 +21,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
     Frame, Terminal,
 };
+use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -217,6 +218,88 @@ enum AgentActivity {
     Finishing,
 }
 
+
+#[derive(Clone, Copy)]
+struct ActivityCountersSnapshot {
+    draw_count: u64,
+    tick_count: u64,
+    input_key_count: u64,
+    input_mouse_count: u64,
+    input_paste_count: u64,
+    agent_event_count: u64,
+    incoming_prompt_count: u64,
+    shell_complete_count: u64,
+    agent_turn_started_count: u64,
+    agent_turn_completed_count: u64,
+    draw_total_us: u64,
+    draw_max_us: u64,
+    command_count: u64,
+}
+
+#[derive(Default)]
+struct ActivityCounters {
+    draw_count: u64,
+    tick_count: u64,
+    input_key_count: u64,
+    input_mouse_count: u64,
+    input_paste_count: u64,
+    agent_event_count: u64,
+    incoming_prompt_count: u64,
+    shell_complete_count: u64,
+    agent_turn_started_count: u64,
+    agent_turn_completed_count: u64,
+    draw_total_us: u64,
+    draw_max_us: u64,
+    command_count: u64,
+}
+
+impl ActivityCounters {
+    fn snapshot(&self) -> ActivityCountersSnapshot {
+        ActivityCountersSnapshot {
+            draw_count: self.draw_count,
+            tick_count: self.tick_count,
+            input_key_count: self.input_key_count,
+            input_mouse_count: self.input_mouse_count,
+            input_paste_count: self.input_paste_count,
+            agent_event_count: self.agent_event_count,
+            incoming_prompt_count: self.incoming_prompt_count,
+            shell_complete_count: self.shell_complete_count,
+            agent_turn_started_count: self.agent_turn_started_count,
+            agent_turn_completed_count: self.agent_turn_completed_count,
+            draw_total_us: self.draw_total_us,
+            draw_max_us: self.draw_max_us,
+            command_count: self.command_count,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RuntimeMetricsSnapshot {
+    at_ms: u64,
+    uptime_ms: u64,
+    counters: ActivityCountersSnapshot,
+}
+
+#[derive(Clone)]
+struct TimedRuntimeSnapshot {
+    snapshot: RuntimeMetricsSnapshot,
+    wall_elapsed_ms: u64,
+}
+
+#[cfg(feature = "stylos")]
+#[derive(Clone, Copy)]
+pub(crate) struct StylosActivitySnapshot {
+    pub(crate) status_publish_count: u64,
+    pub(crate) status_publish_total_us: u64,
+    pub(crate) status_publish_max_us: u64,
+    pub(crate) query_request_count: u64,
+    pub(crate) query_request_total_us: u64,
+    pub(crate) query_request_max_us: u64,
+    pub(crate) cmd_event_count: u64,
+    pub(crate) prompt_event_count: u64,
+    pub(crate) event_message_count: u64,
+}
+
 impl AgentActivity {
     fn label(&self, stream_chunks: u64, stream_chars: u64) -> String {
         match self {
@@ -288,6 +371,10 @@ pub struct App<'a> {
     stream_chars: u64,
     status_rate_limits: Option<ApiCallRateLimitReport>,
     status_model_info: Option<ModelInfo>,
+    process_started_at: Instant,
+    process_started_at_ms: u64,
+    recent_runtime_snapshots: VecDeque<RuntimeMetricsSnapshot>,
+    activity_counters: ActivityCounters,
     workflow_state: WorkflowState,
     active_turn_cancellation: Option<TurnCancellation>,
     #[cfg(feature = "stylos")]
@@ -426,6 +513,10 @@ impl<'a> App<'a> {
             stream_chars: 0,
             status_rate_limits: None,
             status_model_info: initial_model_info,
+            process_started_at: Instant::now(),
+            process_started_at_ms: unix_epoch_now_ms(),
+            recent_runtime_snapshots: VecDeque::new(),
+            activity_counters: ActivityCounters::default(),
             workflow_state: WorkflowState::default(),
             active_turn_cancellation: None,
             #[cfg(feature = "stylos")]
@@ -553,6 +644,8 @@ impl<'a> App<'a> {
     }
 
     fn on_tick(&mut self) {
+        self.activity_counters.tick_count += 1;
+        self.record_runtime_snapshot();
         self.anim_frame = self.anim_frame.wrapping_add(1);
         if self.agent_busy && self.pending.is_some() {
             self.pending = Some(self.pending_str());
@@ -808,6 +901,7 @@ impl<'a> App<'a> {
                     stats: stats_text,
                 });
                 self.push(Entry::Blank);
+                self.activity_counters.agent_turn_completed_count += 1;
                 self.agent_busy = false;
                 self.active_turn_cancellation = None;
                 self.last_ctx_tokens = stats.tokens_in;
@@ -868,12 +962,116 @@ impl<'a> App<'a> {
         }
     }
 
+    fn current_runtime_snapshot(&self) -> RuntimeMetricsSnapshot {
+        RuntimeMetricsSnapshot {
+            at_ms: unix_epoch_now_ms(),
+            uptime_ms: self.process_started_at.elapsed().as_millis() as u64,
+            counters: self.activity_counters.snapshot(),
+        }
+    }
+
+    fn record_runtime_snapshot(&mut self) {
+        let snapshot = self.current_runtime_snapshot();
+        self.recent_runtime_snapshots.push_back(snapshot);
+        while self.recent_runtime_snapshots.len() > 16 {
+            self.recent_runtime_snapshots.pop_front();
+        }
+    }
+
+    fn recent_runtime_delta(&self) -> Option<TimedRuntimeSnapshot> {
+        let latest = *self.recent_runtime_snapshots.back()?;
+        let earliest = *self.recent_runtime_snapshots.front()?;
+        if latest.at_ms <= earliest.at_ms {
+            return None;
+        }
+        Some(TimedRuntimeSnapshot {
+            snapshot: latest,
+            wall_elapsed_ms: latest.at_ms.saturating_sub(earliest.at_ms),
+        })
+    }
+
+    fn debug_runtime_lines(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let now_ms = unix_epoch_now_ms();
+        let uptime_ms = self.process_started_at.elapsed().as_millis() as u64;
+        out.push("debug runtime snapshot: themion process/thread/task activity".to_string());
+        out.push(format!(
+            "process pid={} uptime={} started_at_ms={}",
+            std::process::id(),
+            format_duration_ms(uptime_ms),
+            self.process_started_at_ms,
+        ));
+        out.push(format!(
+            "app busy={} activity={} session={} project={}",
+            self.agent_busy,
+            self.activity_status_value(),
+            self.agents
+                .first()
+                .map(|h| h.session_id.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            self.project_dir.display()
+        ));
+        out.push(format!(
+            "workflow flow={} phase={} status={}",
+            self.workflow_state.workflow_name,
+            self.workflow_state.phase_name,
+            format!("{:?}", self.workflow_state.status)
+        ));
+        #[cfg(feature = "stylos")]
+        {
+            let stylos_state = match self.stylos.as_ref().map(|h| h.state()) {
+                Some(StylosRuntimeState::Off) => "off".to_string(),
+                Some(StylosRuntimeState::Active { mode, realm, instance }) => format!(
+                    "active mode={} realm={} instance={}",
+                    mode, realm, instance
+                ),
+                Some(StylosRuntimeState::Error(err)) => format!("error {}", err),
+                None => "off".to_string(),
+            };
+            out.push(format!("stylos {}", stylos_state));
+        }
+        #[cfg(not(feature = "stylos"))]
+        out.push("stylos feature disabled".to_string());
+
+        out.push("threads:".to_string());
+        out.extend(sample_thread_cpu_lines().into_iter().map(|line| format!("  {}", line)));
+
+        if let Some(recent) = self.recent_runtime_delta() {
+            out.push(format!(
+                "recent window={} ending_at_ms={} uptime={}",
+                format_duration_ms(recent.wall_elapsed_ms),
+                recent.snapshot.at_ms,
+                format_duration_ms(recent.snapshot.uptime_ms),
+            ));
+            out.extend(format_runtime_activity_lines(&recent.snapshot.counters, recent.wall_elapsed_ms));
+        } else {
+            out.push("recent window=unavailable (need more than one sample)".to_string());
+            out.extend(format_runtime_activity_lines(&self.activity_counters.snapshot(), uptime_ms.max(1)));
+        }
+
+        if let Some(changed_at) = self.agent_activity_changed_at.or(self.idle_status_changed_at) {
+            out.push(format!(
+                "activity_status_changed {} ago",
+                format_duration_ms(now_ms.saturating_sub(changed_at))
+            ));
+        }
+        #[cfg(feature = "stylos")]
+        if let Some(handle) = self.stylos.as_ref() {
+            if let Some(snapshot) = handle.activity_snapshot() {
+                out.push("stylos activity:".to_string());
+                out.extend(format_stylos_activity_lines(snapshot));
+            }
+        }
+        out
+    }
+
     fn handle_command(
         &mut self,
         input: &str,
         app_tx: &mpsc::UnboundedSender<AppEvent>,
     ) -> Vec<String> {
         let mut out = Vec::new();
+        self.activity_counters.command_count += 1;
 
         if input == "/login codex" {
             if self.agent_busy {
@@ -900,6 +1098,10 @@ impl<'a> App<'a> {
                 }
             });
             return out;
+        }
+
+        if input == "/debug runtime" {
+            return self.debug_runtime_lines();
         }
 
         if input == "/clear" {
@@ -1062,6 +1264,7 @@ impl<'a> App<'a> {
                 }
                 _ => {
                     out.push("commands:".to_string());
+                    out.push("  /debug runtime                   show Themion process/thread/task activity".to_string());
                     out.push(
                         "  /config                          show current settings".to_string(),
                     );
@@ -1081,7 +1284,7 @@ impl<'a> App<'a> {
             return out;
         }
 
-        out.push(format!("unknown command '{}'.  try /config", input));
+        out.push(format!("unknown command '{}'.  try /config or /debug runtime", input));
         out
     }
 
@@ -1200,6 +1403,7 @@ impl<'a> App<'a> {
         app_tx: &mpsc::UnboundedSender<AppEvent>,
     ) {
         self.agent_busy = true;
+        self.activity_counters.agent_turn_started_count += 1;
         self.reset_stream_counters();
         self.set_agent_activity(AgentActivity::PreparingRequest);
 
@@ -2165,17 +2369,27 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
     }
 
     while app.running {
+        let draw_started = Instant::now();
         terminal.draw(|f| draw(f, &app))?;
+        let draw_us = draw_started.elapsed().as_micros() as u64;
+        app.activity_counters.draw_count += 1;
+        app.activity_counters.draw_total_us += draw_us;
+        app.activity_counters.draw_max_us = app.activity_counters.draw_max_us.max(draw_us);
         match app_rx.recv().await {
-            Some(AppEvent::Mouse(m)) => match m.kind {
+            Some(AppEvent::Mouse(m)) => {
+                app.activity_counters.input_mouse_count += 1;
+                match m.kind {
                 MouseEventKind::ScrollUp => app.scroll_up(),
                 MouseEventKind::ScrollDown => app.scroll_down(),
                 _ => {}
+                }
             },
             Some(AppEvent::Paste(text)) => {
+                app.activity_counters.input_paste_count += 1;
                 handle_paste(&mut app, text);
             }
             Some(AppEvent::Key(key)) => {
+                app.activity_counters.input_key_count += 1;
                 if key.kind != event::KeyEventKind::Press {
                     continue;
                 }
@@ -2345,6 +2559,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
             }
             #[cfg(feature = "stylos")]
             Some(AppEvent::IncomingPrompt(request)) => {
+                app.activity_counters.incoming_prompt_count += 1;
                 let target = request
                     .agent_id
                     .clone()
@@ -2429,9 +2644,15 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 }
             }
             #[cfg(feature = "stylos")]
-            Some(AppEvent::Agent(ev)) => app.handle_agent_event(ev, &app_tx),
+            Some(AppEvent::Agent(ev)) => {
+                app.activity_counters.agent_event_count += 1;
+                app.handle_agent_event(ev, &app_tx)
+            },
             #[cfg(not(feature = "stylos"))]
-            Some(AppEvent::Agent(ev)) => app.handle_agent_event(ev),
+            Some(AppEvent::Agent(ev)) => {
+                app.activity_counters.agent_event_count += 1;
+                app.handle_agent_event(ev)
+            },
             Some(AppEvent::AgentReady(agent, sid)) => {
                 let agent = *agent;
                 app.status_model_info = agent.model_info().cloned();
@@ -2526,6 +2747,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 app.agent_busy = false;
             }
             Some(AppEvent::ShellComplete { output, exit_code }) => {
+                app.activity_counters.shell_complete_count += 1;
                 app.clear_agent_activity();
                 app.push(Entry::Assistant(output));
                 if let Some(code) = exit_code {
@@ -2731,4 +2953,131 @@ mod tests {
         assert_eq!(text, "Stylos talk to=node-2:77 from=node-1:42");
         assert!(!text.contains('/'));
     }
+}
+
+
+fn format_duration_ms(ms: u64) -> String {
+    if ms >= 60_000 {
+        format!("{:.1}m", ms as f64 / 60_000.0)
+    } else if ms >= 1_000 {
+        format!("{:.2}s", ms as f64 / 1_000.0)
+    } else {
+        format!("{}ms", ms)
+    }
+}
+
+fn per_second(count: u64, window_ms: u64) -> f64 {
+    if window_ms == 0 {
+        0.0
+    } else {
+        count as f64 / (window_ms as f64 / 1_000.0)
+    }
+}
+
+fn avg_us(total_us: u64, count: u64) -> u64 {
+    if count == 0 { 0 } else { total_us / count }
+}
+
+fn format_runtime_activity_lines(counters: &ActivityCountersSnapshot, window_ms: u64) -> Vec<String> {
+    vec![
+        format!(
+            "activity counts: draws={} ticks={} keys={} mouse={} paste={} commands={}",
+            counters.draw_count,
+            counters.tick_count,
+            counters.input_key_count,
+            counters.input_mouse_count,
+            counters.input_paste_count,
+            counters.command_count,
+        ),
+        format!(
+            "activity rates: draw={:.2}/s tick={:.2}/s input={:.2}/s agent_events={:.2}/s incoming_prompts={:.2}/s",
+            per_second(counters.draw_count, window_ms),
+            per_second(counters.tick_count, window_ms),
+            per_second(counters.input_key_count + counters.input_mouse_count + counters.input_paste_count, window_ms),
+            per_second(counters.agent_event_count, window_ms),
+            per_second(counters.incoming_prompt_count, window_ms),
+        ),
+        format!(
+            "task activity: agent_turns started={} completed={} shell_completions={} draw_avg={} draw_max={}",
+            counters.agent_turn_started_count,
+            counters.agent_turn_completed_count,
+            counters.shell_complete_count,
+            format_duration_ms(avg_us(counters.draw_total_us, counters.draw_count) / 1_000),
+            format_duration_ms(counters.draw_max_us / 1_000),
+        ),
+        "task metrics are Themion activity counters and approximate handler timing, not exact Tokio task CPU percentages".to_string(),
+    ]
+}
+
+#[cfg(feature = "stylos")]
+fn format_stylos_activity_lines(snapshot: StylosActivitySnapshot) -> Vec<String> {
+    vec![
+        format!(
+            "  status_publish count={} avg={} max={}",
+            snapshot.status_publish_count,
+            format_duration_ms(avg_us(snapshot.status_publish_total_us, snapshot.status_publish_count) / 1_000),
+            format_duration_ms(snapshot.status_publish_max_us / 1_000),
+        ),
+        format!(
+            "  query_request count={} avg={} max={}",
+            snapshot.query_request_count,
+            format_duration_ms(avg_us(snapshot.query_request_total_us, snapshot.query_request_count) / 1_000),
+            format_duration_ms(snapshot.query_request_max_us / 1_000),
+        ),
+        format!(
+            "  bridges cmd_events={} prompt_events={} event_messages={}",
+            snapshot.cmd_event_count,
+            snapshot.prompt_event_count,
+            snapshot.event_message_count,
+        ),
+    ]
+}
+
+fn sample_thread_cpu_lines() -> Vec<String> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::fs;
+        let Ok(entries) = fs::read_dir("/proc/self/task") else {
+            return vec!["linux thread snapshot unavailable".to_string()];
+        };
+        let mut out = Vec::new();
+        for entry in entries.flatten().take(8) {
+            let tid = entry.file_name().to_string_lossy().to_string();
+            let stat_path = entry.path().join("stat");
+            let Ok(stat) = fs::read_to_string(stat_path) else {
+                continue;
+            };
+            if let Some(line) = parse_linux_thread_stat_line(&tid, &stat) {
+                out.push(line);
+            }
+        }
+        if out.is_empty() {
+            vec!["linux thread snapshot unavailable".to_string()]
+        } else {
+            out
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        vec!["thread cpu snapshot unavailable on this platform".to_string()]
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_thread_stat_line(tid: &str, stat: &str) -> Option<String> {
+    let close = stat.rfind(')')?;
+    let after = stat.get(close + 2..)?;
+    let fields: Vec<&str> = after.split_whitespace().collect();
+    if fields.len() < 15 {
+        return None;
+    }
+    let state = fields[0];
+    let utime = fields.get(11)?;
+    let stime = fields.get(12)?;
+    let comm_start = stat.find('(')? + 1;
+    let comm = &stat[comm_start..close];
+    Some(format!(
+        "tid={} name={} state={} cpu_ticks=user:{} system:{} (sampled total, not percent)",
+        tid, comm, state, utime, stime
+    ))
 }

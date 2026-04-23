@@ -77,6 +77,91 @@ tools.rs
   └─ ToolCtx { db: Arc<DbHandle>, session_id, project_dir }
 ```
 
+## Process and thread model
+
+Themion normally runs as a single OS process.
+
+In both print mode and TUI mode, `crates/themion-cli/src/main.rs` uses `#[tokio::main]`, and the repository does not currently override that with a custom Tokio runtime builder. In practice, this means the app uses Tokio's default runtime setup for that macro rather than a repository-specific thread layout.
+
+A useful mental model is:
+
+```text
+themion process
+└─ Tokio runtime
+   ├─ main startup path
+   ├─ TUI event loop            (TUI mode only)
+   ├─ input event task          (TUI mode only)
+   ├─ periodic tick task        (TUI mode only, 150 ms)
+   ├─ agent run task(s)
+   ├─ agent/event bridge task(s)
+   └─ Stylos background tasks   (feature-enabled builds only)
+```
+
+The code in this repository is written primarily in async style with `tokio::spawn`, so the most important concurrency boundary for understanding runtime behavior is usually the task/event model rather than naming individual OS threads ahead of time.
+
+For debugging, the practical thread model is still useful:
+
+- one Themion process
+- Tokio-managed runtime thread(s)
+- one central app event loop in TUI mode
+- multiple async tasks communicating through unbounded `mpsc` channels
+- optional extra background tasks when the `stylos` feature is enabled
+
+### TUI mode structure
+
+In `crates/themion-cli/src/tui.rs`, the app creates a central `AppEvent` channel and then spawns a few long-lived background tasks around one main UI loop.
+
+The main UI loop does this repeatedly:
+
+1. draw the terminal UI
+2. wait for the next `AppEvent`
+3. handle that event
+4. redraw on the next iteration
+
+Around that loop, the current implementation starts these long-lived tasks:
+
+- an input task using `EventStream::new()` to forward keyboard, mouse, and paste events into the app channel
+- a periodic tick task using `tokio::time::interval(Duration::from_millis(150))` to send `AppEvent::Tick`
+- bridge tasks that forward agent events or Stylos events into the same app event channel
+
+That makes the TUI architecture event-driven rather than thread-per-subsystem.
+
+### Agent execution model
+
+When the user submits work, Themion does not create a separate process for the agent. Instead, the current process spawns async work on the Tokio runtime.
+
+In the current code, this usually means:
+
+- one spawned task runs the agent turn or shell-command work
+- one spawned task forwards resulting events back to the TUI event channel when needed
+- the TUI loop remains responsive because it consumes summarized events rather than blocking on provider IO directly
+
+So the user-visible app behaves like one interactive process coordinating background async tasks, not like several child worker processes.
+
+### Stylos-enabled background tasks
+
+When built with the `stylos` cargo feature and enabled in config, `crates/themion-cli/src/stylos.rs` adds a few more long-lived background tasks inside the same process.
+
+Current examples include:
+
+- a status publisher task with a 5-second interval
+- a queryable-serving task that waits on multiple Stylos query surfaces
+- a command subscriber task that receives remote prompt requests
+- TUI-side bridge tasks that forward Stylos command, prompt, and event channels into the main app loop
+
+These are still process-local async tasks. Stylos does not introduce a separate Themion worker process for this runtime shape.
+
+### What this model is good for
+
+This mental model helps explain common debugging symptoms:
+
+- high CPU with one hot thread often means one busy runtime worker or one event source is spinning
+- steady wakeups during otherwise idle TUI use can come from the 150 ms tick task and redraw loop
+- Stylos-enabled builds have more always-on background activity than non-Stylos builds
+- task-level profiling is often more informative than assuming one named thread per feature
+
+If you need to inspect the live process at the OS level, thread-oriented tools such as `top -H`, `ps -T`, `pidstat -t`, `perf`, or `gdb` can still be used, but the source code is organized first around async tasks and channels.
+
 ## Harness Loop (agent.rs)
 
 Each call to `run_loop(user_input)`:
@@ -290,3 +375,19 @@ Current behavior:
 - auto-created done mentions do not recursively generate more done mentions when they are later marked `done`
 
 The receiver-side Stylos query surface now includes `stylos/<realm>/themion/instances/<instance>/query/notes/request` for durable note creation. This supersedes the old idle-only `talk` model for asynchronous work intake, while `talk` remains available as a lightweight realtime path.
+
+
+## Runtime debug command
+
+Themion now includes a built-in `/debug runtime` command in the TUI for app-local runtime diagnostics.
+
+Current behavior:
+
+- reports process-local identity and current app/workflow busy state
+- reports a thread snapshot for the current process only; on Linux this reads `/proc/self/task/*/stat` and shows sampled cumulative thread CPU ticks rather than claiming exact percentages
+- reports Themion-owned runtime activity counters for draws, ticks, input, agent events, incoming prompts, shell completions, and agent-turn start/completion
+- reports approximate draw timing and recent-window activity rates from lightweight in-app counters
+- in `stylos` builds, also reports lightweight Stylos loop counters for status publishing, query handling, and bridge activity
+- explicitly treats task metrics as Themion activity signals, not exact per-Tokio-task CPU accounting
+
+This command is intended to help connect OS-visible symptoms such as hot threads with Themion's own event-loop and async-task structure.

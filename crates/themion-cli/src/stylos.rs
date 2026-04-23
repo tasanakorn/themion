@@ -1,6 +1,7 @@
 #![cfg(feature = "stylos")]
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -89,6 +90,60 @@ pub struct IncomingPromptRequest {
 }
 
 type StylosSnapshotFuture = Pin<Box<dyn Future<Output = StylosStatusSnapshot> + Send>>;
+
+#[derive(Default)]
+struct StylosActivityCounters {
+    status_publish_count: AtomicU64,
+    status_publish_total_us: AtomicU64,
+    status_publish_max_us: AtomicU64,
+    query_request_count: AtomicU64,
+    query_request_total_us: AtomicU64,
+    query_request_max_us: AtomicU64,
+    cmd_event_count: AtomicU64,
+    prompt_event_count: AtomicU64,
+    event_message_count: AtomicU64,
+}
+
+impl StylosActivityCounters {
+    fn record_status_publish(&self, elapsed: Duration) {
+        self.status_publish_count.fetch_add(1, Ordering::Relaxed);
+        let us = elapsed.as_micros() as u64;
+        self.status_publish_total_us.fetch_add(us, Ordering::Relaxed);
+        update_atomic_max(&self.status_publish_max_us, us);
+    }
+
+    fn record_query_request(&self, elapsed: Duration) {
+        self.query_request_count.fetch_add(1, Ordering::Relaxed);
+        let us = elapsed.as_micros() as u64;
+        self.query_request_total_us.fetch_add(us, Ordering::Relaxed);
+        update_atomic_max(&self.query_request_max_us, us);
+    }
+
+    fn snapshot(&self) -> crate::tui::StylosActivitySnapshot {
+        crate::tui::StylosActivitySnapshot {
+            status_publish_count: self.status_publish_count.load(Ordering::Relaxed),
+            status_publish_total_us: self.status_publish_total_us.load(Ordering::Relaxed),
+            status_publish_max_us: self.status_publish_max_us.load(Ordering::Relaxed),
+            query_request_count: self.query_request_count.load(Ordering::Relaxed),
+            query_request_total_us: self.query_request_total_us.load(Ordering::Relaxed),
+            query_request_max_us: self.query_request_max_us.load(Ordering::Relaxed),
+            cmd_event_count: self.cmd_event_count.load(Ordering::Relaxed),
+            prompt_event_count: self.prompt_event_count.load(Ordering::Relaxed),
+            event_message_count: self.event_message_count.load(Ordering::Relaxed),
+        }
+    }
+}
+
+fn update_atomic_max(slot: &AtomicU64, value: u64) {
+    let mut current = slot.load(Ordering::Relaxed);
+    while value > current {
+        match slot.compare_exchange(current, value, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(next) => current = next,
+        }
+    }
+}
+
 type StylosSnapshotProvider = Arc<dyn Fn() -> StylosSnapshotFuture + Send + Sync>;
 
 #[derive(Clone)]
@@ -455,6 +510,7 @@ pub struct StylosHandle {
     event_rx: Option<mpsc::UnboundedReceiver<String>>,
     snapshot_provider: Arc<RwLock<Option<StylosSnapshotProvider>>>,
     query_context: StylosQueryContext,
+    activity_counters: Arc<StylosActivityCounters>,
 }
 
 impl StylosHandle {
@@ -479,6 +535,7 @@ impl StylosHandle {
                 notes_db,
                 local_instance: String::new(),
             },
+            activity_counters: Arc::new(StylosActivityCounters::default()),
         }
     }
 
@@ -500,6 +557,13 @@ impl StylosHandle {
 
     pub fn query_context(&self) -> StylosQueryContext {
         self.query_context.clone()
+    }
+
+    pub fn activity_snapshot(&self) -> Option<crate::tui::StylosActivitySnapshot> {
+        match self.state {
+            StylosRuntimeState::Active { .. } => Some(self.activity_counters.snapshot()),
+            _ => None,
+        }
     }
 
     pub async fn set_snapshot_provider(&self, provider: StylosSnapshotProvider) {
@@ -917,6 +981,7 @@ async fn start_inner(
     let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let task_registry = TaskRegistry::new();
+    let activity_counters = Arc::new(StylosActivityCounters::default());
     let query_context = StylosQueryContext {
         prompt_tx,
         event_tx,
@@ -939,6 +1004,7 @@ async fn start_inner(
     let status_mode = mode.clone();
     let status_realm = realm.clone();
     let status_instance = key_instance.clone();
+    let status_activity_counters = activity_counters.clone();
     let status_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -946,6 +1012,7 @@ async fn start_inner(
             tokio::select! {
                 _ = status_ct.cancelled() => break,
                 _ = interval.tick() => {
+                    let publish_started = Instant::now();
                     let provider = status_snapshot_provider.read().await.clone();
                     let snapshot = match provider {
                         Some(provider) => provider().await,
@@ -984,6 +1051,7 @@ async fn start_inner(
                             .congestion_control(CongestionControl::Drop)
                             .await;
                     }
+                    status_activity_counters.record_status_publish(publish_started.elapsed());
                 }
             }
         }
@@ -1031,6 +1099,7 @@ async fn start_inner(
     let query_context_for_task = query_context.clone();
     let query_instance = key_instance.clone();
     let query_session_id = session.id.to_string();
+    let query_activity_counters = activity_counters.clone();
     let queryable_task = tokio::spawn(async move {
         let info_queryable = match q_session.declare_queryable(&q_info_key).await {
             Ok(q) => q,
@@ -1087,69 +1156,87 @@ async fn start_inner(
                 },
                 res = alive_queryable.recv_async() => match res {
                     Ok(query) => {
+                        let query_started = Instant::now();
                         if let Some(reply) = build_discovery_reply(&query_snapshot_provider, &query_instance, &query_session_id, DiscoveryMode::Alive).await {
                             let _ = reply_cbor(query, q_alive_key.clone(), &reply).await;
                         }
+                        query_activity_counters.record_query_request(query_started.elapsed());
                     }
                     Err(_) => break,
                 },
                 res = free_queryable.recv_async() => match res {
                     Ok(query) => {
+                        let query_started = Instant::now();
                         if let Some(reply) = build_discovery_reply(&query_snapshot_provider, &query_instance, &query_session_id, DiscoveryMode::Free).await {
                             let _ = reply_cbor(query, q_free_key.clone(), &reply).await;
                         }
+                        query_activity_counters.record_query_request(query_started.elapsed());
                     }
                     Err(_) => break,
                 },
                 res = git_queryable.recv_async() => match res {
                     Ok(query) => {
+                        let query_started = Instant::now();
                         let req = parse_cbor_payload::<GitQueryRequest>(&query);
                         if let Some(reply) = build_git_reply(&query_snapshot_provider, &query_instance, &query_session_id, req).await {
                             let _ = reply_cbor(query, q_git_key.clone(), &reply).await;
                         }
+                        query_activity_counters.record_query_request(query_started.elapsed());
                     }
                     Err(_) => break,
                 },
                 res = status_queryable.recv_async() => match res {
                     Ok(query) => {
+                        let query_started = Instant::now();
                         let req = parse_cbor_payload::<StatusFilterRequest>(&query);
                         let reply = build_status_reply(&query_snapshot_provider, &query_instance, &query_session_id, req).await;
                         let _ = reply_cbor(query, q_status_key.clone(), &reply).await;
+                        query_activity_counters.record_query_request(query_started.elapsed());
                     }
                     Err(_) => break,
                 },
                 res = talk_queryable.recv_async() => match res {
                     Ok(query) => {
+                        let query_started = Instant::now();
                         let reply = handle_talk_query(&query_snapshot_provider, &query_context_for_task, parse_cbor_payload::<TalkRequest>(&query)).await;
                         let _ = reply_cbor(query, q_talk_key.clone(), &reply).await;
+                        query_activity_counters.record_query_request(query_started.elapsed());
                     }
                     Err(_) => break,
                 },
                 res = note_queryable.recv_async() => match res {
                     Ok(query) => {
+                        let query_started = Instant::now();
                         let reply = handle_note_delivery_query(&query_snapshot_provider, &query_context_for_task, parse_cbor_payload::<NoteRequest>(&query)).await;
                         let _ = reply_cbor(query, q_note_key.clone(), &reply).await;
+                        query_activity_counters.record_query_request(query_started.elapsed());
                     }
                     Err(_) => break,
                 },
                 res = task_request_queryable.recv_async() => match res {
                     Ok(query) => {
+                        let query_started = Instant::now();
                         let reply = handle_task_request_query(&query_snapshot_provider, &query_context_for_task, parse_cbor_payload::<TaskRequestPayload>(&query)).await;
                         let _ = reply_cbor(query, q_task_request_key.clone(), &reply).await;
+                        query_activity_counters.record_query_request(query_started.elapsed());
                     }
                     Err(_) => break,
                 },
                 res = task_status_queryable.recv_async() => match res {
                     Ok(query) => {
+                        let query_started = Instant::now();
                         let reply = handle_task_status_query(&query_context_for_task, parse_cbor_payload::<TaskLookupRequest>(&query)).await;
                         let _ = reply_cbor(query, q_task_status_key.clone(), &reply).await;
+                        query_activity_counters.record_query_request(query_started.elapsed());
                     }
                     Err(_) => break,
                 },
                 res = task_result_queryable.recv_async() => match res {
                     Ok(query) => {
+                        let query_started = Instant::now();
                         let reply = handle_task_result_query(&query_context_for_task, parse_cbor_payload::<TaskResultRequest>(&query)).await;
                         let _ = reply_cbor(query, q_task_result_key.clone(), &reply).await;
+                        query_activity_counters.record_query_request(query_started.elapsed());
                     }
                     Err(_) => break,
                 },
@@ -1161,6 +1248,7 @@ async fn start_inner(
     let cmd_ct = ct.clone();
     let cmd_session = session_handle.clone();
     let cmd_key = format!("stylos/{}/themion/{}/cmd", realm, key_instance);
+    let cmd_activity_counters = activity_counters.clone();
     let cmd_task = tokio::spawn(async move {
         let subscriber = match cmd_session.declare_subscriber(&cmd_key).await {
             Ok(sub) => sub,
@@ -1181,6 +1269,7 @@ async fn start_inner(
                         if prompt.is_empty() {
                             continue;
                         }
+                        cmd_activity_counters.cmd_event_count.fetch_add(1, Ordering::Relaxed);
                         let _ = cmd_tx.send(StylosCmdRequest { prompt });
                     }
                     Err(_) => break,
@@ -1204,6 +1293,7 @@ async fn start_inner(
         event_rx: Some(event_rx),
         snapshot_provider,
         query_context,
+        activity_counters,
     })
 }
 
