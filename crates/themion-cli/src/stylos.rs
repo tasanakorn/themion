@@ -108,7 +108,8 @@ impl StylosActivityCounters {
     fn record_status_publish(&self, elapsed: Duration) {
         self.status_publish_count.fetch_add(1, Ordering::Relaxed);
         let us = elapsed.as_micros() as u64;
-        self.status_publish_total_us.fetch_add(us, Ordering::Relaxed);
+        self.status_publish_total_us
+            .fetch_add(us, Ordering::Relaxed);
         update_atomic_max(&self.status_publish_max_us, us);
     }
 
