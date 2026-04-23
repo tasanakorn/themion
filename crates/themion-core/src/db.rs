@@ -254,7 +254,7 @@ fn migrate_board_notes_identifiers(conn: &Connection) -> Result<()> {
     drop(duplicate_stmt);
     if !duplicate_summaries.is_empty() {
         eprintln!(
-            "warning: found duplicate stylos note slugs before migration: {}",
+            "warning: found duplicate board note slugs before migration: {}",
             duplicate_summaries.join("; ")
         );
     }
@@ -814,14 +814,14 @@ impl DbHandle {
         Ok(out)
     }
 
-    pub fn create_stylos_note(&self, args: CreateNoteArgs) -> Result<StylosNote> {
+    pub fn create_board_note(&self, args: CreateNoteArgs) -> Result<BoardNote> {
         let now_ms = now_unix_ms();
         let note_id = Uuid::parse_str(&args.note_id)
             .map(|uuid| uuid.to_string())
             .unwrap_or_else(|_| Uuid::new_v4().to_string());
         let conn = self.conn.lock().unwrap();
         let note_slug = make_unique_note_slug(&conn, &note_id, &args.body, None)?;
-        let note = StylosNote {
+        let note = BoardNote {
             note_id: note_id.clone(),
             note_slug: note_slug.clone(),
             note_kind: args.note_kind,
@@ -870,11 +870,11 @@ impl DbHandle {
             ],
         )?;
         drop(conn);
-        self.get_stylos_note(&note_id)?
+        self.get_board_note(&note_id)?
             .ok_or_else(|| anyhow::anyhow!("note insert failed"))
     }
 
-    pub fn get_stylos_note(&self, note_id: &str) -> Result<Option<StylosNote>> {
+    pub fn get_board_note(&self, note_id: &str) -> Result<Option<BoardNote>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT note_id, note_slug, note_kind, origin_note_id, completion_notified_at_ms, from_instance, from_agent_id, to_instance, to_agent_id, body,
@@ -892,7 +892,7 @@ impl DbHandle {
         to_instance: Option<&str>,
         to_agent_id: Option<&str>,
         column: Option<NoteColumn>,
-    ) -> Result<Vec<StylosNote>> {
+    ) -> Result<Vec<BoardNote>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT note_id, note_slug, note_kind, origin_note_id, completion_notified_at_ms, from_instance, from_agent_id, to_instance, to_agent_id, body,
@@ -914,11 +914,7 @@ impl DbHandle {
         Ok(out)
     }
 
-    pub fn move_stylos_note(
-        &self,
-        note_id: &str,
-        column: NoteColumn,
-    ) -> Result<Option<StylosNote>> {
+    pub fn move_board_note(&self, note_id: &str, column: NoteColumn) -> Result<Option<BoardNote>> {
         let now_ms = now_unix_ms();
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -936,14 +932,14 @@ impl DbHandle {
             ],
         )?;
         drop(conn);
-        self.get_stylos_note(note_id)
+        self.get_board_note(note_id)
     }
 
-    pub fn update_stylos_note_result(
+    pub fn update_board_note_result(
         &self,
         note_id: &str,
         result_text: Option<&str>,
-    ) -> Result<Option<StylosNote>> {
+    ) -> Result<Option<BoardNote>> {
         let now_ms = now_unix_ms();
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -951,14 +947,14 @@ impl DbHandle {
             rusqlite::params![note_id, result_text, now_ms],
         )?;
         drop(conn);
-        self.get_stylos_note(note_id)
+        self.get_board_note(note_id)
     }
 
-    pub fn next_stylos_note_for_injection(
+    pub fn next_board_note_for_injection(
         &self,
         to_instance: &str,
         to_agent_id: &str,
-    ) -> Result<Option<StylosNote>> {
+    ) -> Result<Option<BoardNote>> {
         let conn = self.conn.lock().unwrap();
         let in_progress = conn
             .query_row(
@@ -991,10 +987,7 @@ impl DbHandle {
         .map_err(Into::into)
     }
 
-    pub fn mark_stylos_note_completion_notified(
-        &self,
-        note_id: &str,
-    ) -> Result<Option<StylosNote>> {
+    pub fn mark_board_note_completion_notified(&self, note_id: &str) -> Result<Option<BoardNote>> {
         let now_ms = now_unix_ms();
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -1004,10 +997,10 @@ impl DbHandle {
             rusqlite::params![note_id, now_ms],
         )?;
         drop(conn);
-        self.get_stylos_note(note_id)
+        self.get_board_note(note_id)
     }
 
-    pub fn mark_stylos_note_injected(&self, note_id: &str) -> Result<Option<StylosNote>> {
+    pub fn mark_board_note_injected(&self, note_id: &str) -> Result<Option<BoardNote>> {
         let now_ms = now_unix_ms();
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -1020,7 +1013,7 @@ impl DbHandle {
             rusqlite::params![note_id, now_ms, now_ms + BLOCKED_RETRY_COOLDOWN_MS],
         )?;
         drop(conn);
-        self.get_stylos_note(note_id)
+        self.get_board_note(note_id)
     }
 
     pub fn search(&self, args: SearchArgs) -> Result<Vec<SearchHit>> {
@@ -1083,11 +1076,11 @@ impl DbHandle {
     }
 }
 
-fn map_note_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StylosNote> {
+fn map_note_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BoardNote> {
     let note_kind_raw: String = row.get(2)?;
     let column_raw: String = row.get(10)?;
     let injection_raw: String = row.get(12)?;
-    Ok(StylosNote {
+    Ok(BoardNote {
         note_id: row.get(0)?,
         note_slug: row.get(1)?,
         note_kind: NoteKind::from_str(&note_kind_raw).ok_or_else(|| {
@@ -1210,7 +1203,7 @@ impl NoteInjectionState {
 }
 
 #[derive(Debug, Clone)]
-pub struct StylosNote {
+pub struct BoardNote {
     pub note_id: String,
     pub note_slug: String,
     pub note_kind: NoteKind,

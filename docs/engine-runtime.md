@@ -54,8 +54,8 @@ In the current implementation:
 
 - Stylos queryables are registered in `crates/themion-cli/src/stylos.rs`
 - query handlers read the current exported process snapshot from a snapshot provider set by the TUI runtime
-- accepted `talk`, durable `notes/request`, and `tasks/request` queries are converted into `StylosRemotePromptRequest` values or persisted note records and sent over an in-process/local-runtime path
-- the TUI event loop receives those requests as `AppEvent::StylosRemotePrompt`
+- accepted `talk`, durable `notes/request`, and `tasks/request` queries are converted into `IncomingPromptRequest` values or persisted note records and sent over an in-process/local-runtime path
+- the TUI event loop receives those requests as `AppEvent::IncomingPrompt`
 - the TUI either rejects the request immediately if the current local execution path is already busy, or submits the prompt through the same local turn path used for normal input
 
 This means Stylos does not bypass the harness loop, call providers directly, or move history/tool execution into the transport layer. It only injects new work into the existing local input path.
@@ -169,8 +169,8 @@ Current behavior:
 - idle injection priority is `in_progress`, then `todo`, then cooldown-eligible `blocked`
 - `themion-core` exposes `board_*` note tools for create/list/read/move/update-result operations using canonical durable UUID `note_id` values and returns companion `note_slug` metadata for human-readable inspection
 - sender `from` and `from_agent_id` are forwarded from the calling runtime context into Stylos note delivery so receiver-side logs and stored note metadata reflect the actual calling agent
-- successful receiver-side note insertion emits `created stylos note in db note_id=<uuid> ...` before the note is queued for later injection
-- inbound note delivery logging is distinct from talk logging: note delivery uses `Stylos note receive ...`, while talk delivery uses `Stylos hear ...`
+- successful receiver-side note insertion emits `created board note in db note_id=<uuid> ...` before the note is queued for later injection
+- inbound note delivery logging is distinct from talk logging: note delivery uses `Board note intake ...`, while talk delivery uses `Stylos hear ...`
 - the TUI checks for pending local notes on tick when no local turn is active
 - idle injection prefers pending `in_progress` notes; `todo` is considered only when no pending `in_progress` note exists for that agent
 - injected notes use a note-specific prompt wrapper, include core note metadata (`note_id`, `note_slug`, sender/target identities, current column, then body), and are marked injected to avoid duplicate delivery

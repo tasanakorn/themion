@@ -76,7 +76,7 @@ pub struct StylosCmdRequest {
 }
 
 #[derive(Clone, Debug)]
-pub struct StylosRemotePromptRequest {
+pub struct IncomingPromptRequest {
     pub prompt: String,
     pub agent_id: Option<String>,
     pub task_id: Option<String>,
@@ -93,7 +93,7 @@ type StylosSnapshotProvider = Arc<dyn Fn() -> StylosSnapshotFuture + Send + Sync
 
 #[derive(Clone)]
 pub struct StylosQueryContext {
-    prompt_tx: mpsc::UnboundedSender<StylosRemotePromptRequest>,
+    prompt_tx: mpsc::UnboundedSender<IncomingPromptRequest>,
     event_tx: mpsc::UnboundedSender<String>,
     task_registry: TaskRegistry,
     notes_db: Arc<themion_core::db::DbHandle>,
@@ -101,7 +101,7 @@ pub struct StylosQueryContext {
 }
 
 impl StylosQueryContext {
-    pub fn submit_prompt(&self, request: StylosRemotePromptRequest) -> Result<(), String> {
+    pub fn submit_incoming_prompt(&self, request: IncomingPromptRequest) -> Result<(), String> {
         self.prompt_tx
             .send(request)
             .map_err(|_| "prompt queue unavailable".to_string())
@@ -451,7 +451,7 @@ pub struct StylosHandle {
     queryable_task: Option<JoinHandle<()>>,
     cmd_task: Option<JoinHandle<()>>,
     cmd_rx: Option<mpsc::UnboundedReceiver<StylosCmdRequest>>,
-    prompt_rx: Option<mpsc::UnboundedReceiver<StylosRemotePromptRequest>>,
+    prompt_rx: Option<mpsc::UnboundedReceiver<IncomingPromptRequest>>,
     event_rx: Option<mpsc::UnboundedReceiver<String>>,
     snapshot_provider: Arc<RwLock<Option<StylosSnapshotProvider>>>,
     query_context: StylosQueryContext,
@@ -490,7 +490,7 @@ impl StylosHandle {
         self.cmd_rx.take()
     }
 
-    pub fn take_prompt_rx(&mut self) -> Option<mpsc::UnboundedReceiver<StylosRemotePromptRequest>> {
+    pub fn take_prompt_rx(&mut self) -> Option<mpsc::UnboundedReceiver<IncomingPromptRequest>> {
         self.prompt_rx.take()
     }
 
@@ -1127,7 +1127,7 @@ async fn start_inner(
                 },
                 res = note_queryable.recv_async() => match res {
                     Ok(query) => {
-                        let reply = handle_note_query(&query_snapshot_provider, &query_context_for_task, parse_cbor_payload::<NoteRequest>(&query)).await;
+                        let reply = handle_note_delivery_query(&query_snapshot_provider, &query_context_for_task, parse_cbor_payload::<NoteRequest>(&query)).await;
                         let _ = reply_cbor(query, q_note_key.clone(), &reply).await;
                     }
                     Err(_) => break,
@@ -1347,7 +1347,7 @@ async fn handle_talk_query(
             let sender = render_instance_identifier(req.from.as_deref());
             let target = render_instance_identifier(req.to.as_deref());
             let prompt = build_peer_message_prompt(&sender, &target, &agent.agent_id, &req.message);
-            let result = query_context.submit_prompt(StylosRemotePromptRequest {
+            let result = query_context.submit_incoming_prompt(IncomingPromptRequest {
                 prompt,
                 agent_id: Some(agent.agent_id.clone()),
                 task_id: None,
@@ -1389,7 +1389,7 @@ async fn handle_talk_query(
     }
 }
 
-async fn handle_note_query(
+async fn handle_note_delivery_query(
     snapshot_provider: &Arc<RwLock<Option<StylosSnapshotProvider>>>,
     query_context: &StylosQueryContext,
     req: Option<NoteRequest>,
@@ -1453,13 +1453,13 @@ async fn handle_note_query(
         }
     };
     let _ = query_context.submit_event(format!(
-        "received note create request via stylos from={} from_agent_id={} to={} to_agent_id={}",
+        "received remote board note create request via stylos from={} from_agent_id={} to={} to_agent_id={}",
         req.from.as_deref().unwrap_or("unknown sender"),
         req.from_agent_id.as_deref().unwrap_or("unknown"),
         req.to.as_deref().unwrap_or(query_context.local_instance()),
         req.to_agent_id,
     ));
-    let created = query_context.notes_db().create_stylos_note(CreateNoteArgs {
+    let created = query_context.notes_db().create_board_note(CreateNoteArgs {
         note_id: note_id.clone(),
         note_kind,
         column,
@@ -1474,7 +1474,7 @@ async fn handle_note_query(
     match created {
         Ok(note) => {
             let _ = query_context.submit_event(format!(
-                "created stylos note in db note_id={} from={} from_agent_id={} to={} to_agent_id={} column={}",
+                "created board note in db note_id={} from={} from_agent_id={} to={} to_agent_id={} column={}",
                 note.note_id,
                 note.from_instance.as_deref().unwrap_or("unknown sender"),
                 note.from_agent_id.as_deref().unwrap_or("unknown"),
@@ -1482,7 +1482,7 @@ async fn handle_note_query(
                 note.to_agent_id,
                 note.column.as_str(),
             ));
-            let prompt = build_note_prompt(
+            let prompt = build_board_note_prompt(
                 &note.note_id,
                 &note.note_slug,
                 note.note_kind,
@@ -1494,7 +1494,7 @@ async fn handle_note_query(
                 note.column,
                 &note.body,
             );
-            let _ = query_context.submit_prompt(StylosRemotePromptRequest {
+            let _ = query_context.submit_incoming_prompt(IncomingPromptRequest {
                 prompt,
                 agent_id: Some(note.to_agent_id.clone()),
                 task_id: None,
@@ -1585,7 +1585,7 @@ async fn handle_task_request_query(
         .task_registry()
         .insert_queued(task_id.clone(), agent.agent_id.clone())
         .await;
-    let submit_result = query_context.submit_prompt(StylosRemotePromptRequest {
+    let submit_result = query_context.submit_incoming_prompt(IncomingPromptRequest {
         prompt: req.task,
         agent_id: Some(agent.agent_id.clone()),
         task_id: Some(task_id.clone()),
@@ -1931,7 +1931,7 @@ fn render_instance_identifier(instance: Option<&str>) -> String {
         .to_string()
 }
 
-pub fn build_note_prompt(
+pub fn build_board_note_prompt(
     note_id: &str,
     note_slug: &str,
     note_kind: NoteKind,
@@ -2146,7 +2146,7 @@ mod tests {
 
     #[test]
     fn note_prompt_mentions_note_identity_and_body() {
-        let prompt = build_note_prompt(
+        let prompt = build_board_note_prompt(
             "123e4567-e89b-12d3-a456-426614174000",
             "fix-tests-123e4567",
             NoteKind::WorkRequest,

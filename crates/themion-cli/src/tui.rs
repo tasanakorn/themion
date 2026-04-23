@@ -1,7 +1,7 @@
 use crate::config::{save_profiles, Config, ProfileConfig};
 #[cfg(feature = "stylos")]
 use crate::stylos::{
-    tool_bridge, StylosHandle, StylosRemotePromptRequest, StylosRuntimeState, StylosToolBridge,
+    tool_bridge, IncomingPromptRequest, StylosHandle, StylosRuntimeState, StylosToolBridge,
 };
 use crate::{format_stats, Session};
 use crossterm::{
@@ -50,7 +50,7 @@ enum AppEvent {
     #[cfg(feature = "stylos")]
     StylosCmd(crate::stylos::StylosCmdRequest),
     #[cfg(feature = "stylos")]
-    StylosRemotePrompt(StylosRemotePromptRequest),
+    IncomingPrompt(IncomingPromptRequest),
     #[cfg(feature = "stylos")]
     StylosEvent(String),
     LoginPrompt {
@@ -291,7 +291,7 @@ pub struct App<'a> {
     workflow_state: WorkflowState,
     active_turn_cancellation: Option<TurnCancellation>,
     #[cfg(feature = "stylos")]
-    active_remote_request: Option<StylosRemotePromptRequest>,
+    active_incoming_prompt: Option<IncomingPromptRequest>,
     #[cfg(feature = "stylos")]
     last_assistant_text: Option<String>,
     #[cfg(feature = "stylos")]
@@ -429,7 +429,7 @@ impl<'a> App<'a> {
             workflow_state: WorkflowState::default(),
             active_turn_cancellation: None,
             #[cfg(feature = "stylos")]
-            active_remote_request: None,
+            active_incoming_prompt: None,
             #[cfg(feature = "stylos")]
             last_assistant_text: None,
             #[cfg(feature = "stylos")]
@@ -676,12 +676,16 @@ impl<'a> App<'a> {
         }
     }
 
-    fn handle_agent_event(&mut self, ev: AgentEvent, #[cfg(feature = "stylos")] app_tx: &mpsc::UnboundedSender<AppEvent>) {
+    fn handle_agent_event(
+        &mut self,
+        ev: AgentEvent,
+        #[cfg(feature = "stylos")] app_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
         match ev {
             AgentEvent::LlmStart => {
                 #[cfg(feature = "stylos")]
                 if let (Some(remote), Some(handle)) =
-                    (self.active_remote_request.as_ref(), self.stylos.as_ref())
+                    (self.active_incoming_prompt.as_ref(), self.stylos.as_ref())
                 {
                     if let Some(task_id) = remote.task_id.clone() {
                         let query_context = handle.query_context();
@@ -769,7 +773,7 @@ impl<'a> App<'a> {
                 self.maybe_emit_done_mention_for_completed_note(app_tx);
                 #[cfg(feature = "stylos")]
                 if let (Some(remote), Some(handle)) =
-                    (self.active_remote_request.take(), self.stylos.as_ref())
+                    (self.active_incoming_prompt.take(), self.stylos.as_ref())
                 {
                     if let Some(task_id) = remote.task_id {
                         let result_text = self.last_assistant_text.clone();
@@ -824,7 +828,7 @@ impl<'a> App<'a> {
 
     #[cfg(feature = "stylos")]
     fn maybe_log_sender_side_stylos_talk(&mut self) {
-        if self.active_remote_request.is_some() {
+        if self.active_incoming_prompt.is_some() {
             return;
         }
         let Some(Entry::ToolDone) = self.entries.last() else {
@@ -1266,7 +1270,7 @@ impl<'a> App<'a> {
 
         #[cfg(feature = "stylos")]
         let target_agent_id = self
-            .active_remote_request
+            .active_incoming_prompt
             .as_ref()
             .and_then(|request| request.agent_id.as_deref());
         #[cfg(feature = "stylos")]
@@ -1282,7 +1286,7 @@ impl<'a> App<'a> {
             .expect("interactive agent");
 
         #[cfg(feature = "stylos")]
-        if self.active_remote_request.is_none() {
+        if self.active_incoming_prompt.is_none() {
             self.push(Entry::User(text.clone()));
         }
         #[cfg(not(feature = "stylos"))]
@@ -1292,7 +1296,7 @@ impl<'a> App<'a> {
     }
 
     #[cfg(feature = "stylos")]
-    fn maybe_inject_pending_note(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) {
+    fn maybe_inject_pending_board_note(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) {
         if self.agent_busy {
             return;
         }
@@ -1312,11 +1316,11 @@ impl<'a> App<'a> {
         let Some(agent_id) = interactive_agent_id.or(main_agent_id) else {
             return;
         };
-        let Ok(Some(note)) = self.db.next_stylos_note_for_injection(&instance, &agent_id) else {
+        let Ok(Some(note)) = self.db.next_board_note_for_injection(&instance, &agent_id) else {
             return;
         };
-        let _ = self.db.mark_stylos_note_injected(&note.note_id);
-        let prompt = crate::stylos::build_note_prompt(
+        let _ = self.db.mark_board_note_injected(&note.note_id);
+        let prompt = crate::stylos::build_board_note_prompt(
             &note.note_id,
             &note.note_slug,
             note.note_kind,
@@ -1329,13 +1333,13 @@ impl<'a> App<'a> {
             &note.body,
         );
         self.push(Entry::RemoteEvent(format!(
-            "Stylos note note_id={} to={} to_agent_id={} column={}",
+            "Board note injection note_id={} to={} to_agent_id={} column={}",
             note.note_id,
             note.to_instance,
             note.to_agent_id,
             note.column.as_str()
         )));
-        self.active_remote_request = Some(StylosRemotePromptRequest {
+        self.active_incoming_prompt = Some(IncomingPromptRequest {
             prompt: prompt.clone(),
             agent_id: Some(note.to_agent_id.clone()),
             task_id: None,
@@ -1353,7 +1357,7 @@ impl<'a> App<'a> {
         &mut self,
         app_tx: &mpsc::UnboundedSender<AppEvent>,
     ) {
-        let Some(remote) = self.active_remote_request.as_ref().cloned() else {
+        let Some(remote) = self.active_incoming_prompt.as_ref().cloned() else {
             return;
         };
         if !remote.prompt.starts_with("type=stylos_note ") {
@@ -1366,7 +1370,7 @@ impl<'a> App<'a> {
         let Some(note_id) = note_id else {
             return;
         };
-        let Ok(Some(note)) = self.db.get_stylos_note(note_id) else {
+        let Ok(Some(note)) = self.db.get_board_note(note_id) else {
             return;
         };
         if note.column != themion_core::db::NoteColumn::Done {
@@ -1375,7 +1379,7 @@ impl<'a> App<'a> {
                 note.note_id,
                 note.column.as_str(),
             );
-            self.active_remote_request = Some(remote);
+            self.active_incoming_prompt = Some(remote);
             self.submit_text(prompt, app_tx);
             return;
         }
@@ -1420,7 +1424,7 @@ Result:
             })
         } else {
             self.db
-                .create_stylos_note(themion_core::db::CreateNoteArgs {
+                .create_board_note(themion_core::db::CreateNoteArgs {
                     note_id: uuid::Uuid::new_v4().to_string(),
                     note_kind: themion_core::db::NoteKind::DoneMention,
                     column: themion_core::db::NoteColumn::Todo,
@@ -1454,9 +1458,9 @@ Result:
                             .map(str::to_string)
                     })
                     .unwrap_or_else(|| "unknown".to_string());
-                let _ = self.db.mark_stylos_note_completion_notified(&note.note_id);
+                let _ = self.db.mark_board_note_completion_notified(&note.note_id);
                 self.push(Entry::RemoteEvent(format!(
-                    "Stylos done mention note_id={} origin_note_id={} to={} to_agent_id={}",
+                    "Board done mention note_id={} origin_note_id={} to={} to_agent_id={}",
                     created_note_id, note.note_id, to_instance, to_agent_id,
                 )));
             }
@@ -2146,7 +2150,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
             let app_tx_prompt = app_tx.clone();
             tokio::spawn(async move {
                 while let Some(request) = prompt_rx.recv().await {
-                    let _ = app_tx_prompt.send(AppEvent::StylosRemotePrompt(request));
+                    let _ = app_tx_prompt.send(AppEvent::IncomingPrompt(request));
                 }
             });
         }
@@ -2323,7 +2327,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
             Some(AppEvent::Tick) => {
                 app.on_tick();
                 #[cfg(feature = "stylos")]
-                app.maybe_inject_pending_note(&app_tx);
+                app.maybe_inject_pending_board_note(&app_tx);
             }
             #[cfg(feature = "stylos")]
             Some(AppEvent::StylosCmd(cmd)) => {
@@ -2332,7 +2336,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     "Stylos cmd scope=local preview={}",
                     cmd.prompt.lines().next().unwrap_or("")
                 )));
-                app.active_remote_request = None;
+                app.active_incoming_prompt = None;
                 app.submit_text(cmd.prompt, &app_tx);
             }
             #[cfg(feature = "stylos")]
@@ -2340,7 +2344,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 app.push(Entry::RemoteEvent(text));
             }
             #[cfg(feature = "stylos")]
-            Some(AppEvent::StylosRemotePrompt(request)) => {
+            Some(AppEvent::IncomingPrompt(request)) => {
                 let target = request
                     .agent_id
                     .clone()
@@ -2362,7 +2366,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                             .and_then(|part| part.strip_prefix("note_id="))
                             .unwrap_or("unknown");
                         app.push(Entry::RemoteEvent(format!(
-                            "Stylos note receive note_id={} from={} from_agent_id={} to={} to_agent_id={} rejected: local agent busy",
+                            "Board note intake note_id={} from={} from_agent_id={} to={} to_agent_id={} deferred: local agent busy",
                             note_id, sender, sender_agent, target_instance, target_agent
                         )));
                     } else {
@@ -2411,7 +2415,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                             .and_then(|part| part.strip_prefix("column="))
                             .unwrap_or("unknown");
                         app.push(Entry::RemoteEvent(format!(
-                            "Stylos note receive note_id={} from={} from_agent_id={} to={} to_agent_id={} column={}",
+                            "Board note intake note_id={} from={} from_agent_id={} to={} to_agent_id={} column={}",
                             note_id, sender, sender_agent, target_instance, target_agent, column
                         )));
                     } else {
@@ -2420,13 +2424,13 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                             sender, sender_agent, target_instance, target_agent
                         )));
                     }
-                    app.active_remote_request = Some(request.clone());
+                    app.active_incoming_prompt = Some(request.clone());
                     app.submit_text(request.prompt, &app_tx);
                 }
             }
-#[cfg(feature = "stylos")]
+            #[cfg(feature = "stylos")]
             Some(AppEvent::Agent(ev)) => app.handle_agent_event(ev, &app_tx),
-#[cfg(not(feature = "stylos"))]
+            #[cfg(not(feature = "stylos"))]
             Some(AppEvent::Agent(ev)) => app.handle_agent_event(ev),
             Some(AppEvent::AgentReady(agent, sid)) => {
                 let agent = *agent;
@@ -2690,7 +2694,7 @@ mod tests {
             handle("main", &["main", "interactive"]),
             handle("worker", &["background"]),
         ];
-        let request = StylosRemotePromptRequest {
+        let request = IncomingPromptRequest {
             prompt: "hi".to_string(),
             agent_id: Some("worker".to_string()),
             task_id: None,

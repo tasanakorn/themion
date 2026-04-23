@@ -233,8 +233,8 @@ Examples:
 - when an inbound Stylos talk is received, the receiver-side TUI emits one `Stylos hear from=<from> from_agent_id=<from_agent_id> to=<to> to_agent_id=<to_agent_id>` line using the inbound payload fields directly.
 - when an outbound `stylos_request_talk` call is accepted, the sender-side TUI emits `Stylos talk to=<hostname>:<pid> from=<hostname>:<pid>` using the same exact identifier format.
 - `notes/request` accepts note-creation delivery for a target instance and agent; sender instance and sender agent identity are resolved automatically by the local runtime.
-- when an inbound Stylos note delivery is accepted for local processing, the receiver-side TUI emits `Stylos note receive note_id=<uuid> from=<from> from_agent_id=<from_agent_id> to=<to> to_agent_id=<to_agent_id> column=todo` rather than reusing `Stylos hear ...` talk logging.
-- when a receiver-side note delivery is stored successfully, the runtime emits `created stylos note in db note_id=<uuid> from=<from> from_agent_id=<from_agent_id> to=<to> to_agent_id=<to_agent_id> column=todo`.
+- when an inbound Stylos note delivery is accepted for local processing, the receiver-side TUI emits `Board note intake note_id=<uuid> from=<from> from_agent_id=<from_agent_id> to=<to> to_agent_id=<to_agent_id> column=todo` rather than reusing `Stylos hear ...` talk logging.
+- when a receiver-side note delivery is stored successfully, the runtime emits `created board note in db note_id=<uuid> from=<from> from_agent_id=<from_agent_id> to=<to> to_agent_id=<to_agent_id> column=todo`.
 - receiver-side inbound note logging and talk logging remain distinct; one inbound note delivery must not surface as a `Stylos hear ...` talk event.
 - `talk` keeps acknowledgement-oriented semantics: it reports delivery acceptance or rejection and does not wait for the remote agent’s final natural-language answer.
 - when the target agent is busy and `wait_for_idle_timeout_ms` is positive, the CLI query layer polls the exported snapshot until the peer becomes `idle` or `nap` or the timeout expires; timeout produces `timed_out_waiting_for_idle`.

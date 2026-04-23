@@ -133,7 +133,10 @@ fn tool_call_detail(name: &str, args_json: &str) -> String {
             format!(
                 "board_create_note to_instance={} to_agent_id={}",
                 center_trim(resolved_to_instance, TOOL_DETAIL_MAX_CHARS),
-                center_trim(args["to_agent_id"].as_str().unwrap_or("main"), TOOL_DETAIL_MAX_CHARS,)
+                center_trim(
+                    args["to_agent_id"].as_str().unwrap_or("main"),
+                    TOOL_DETAIL_MAX_CHARS,
+                )
             )
         }
         _ => name.to_string(),
@@ -903,7 +906,7 @@ impl Agent {
                 tool_call_id: None,
             });
 
-#[cfg(feature = "stylos")]
+            #[cfg(feature = "stylos")]
             msgs_with_system.push(Message {
                 role: "system".to_string(),
                 content: Some({
@@ -917,7 +920,7 @@ impl Agent {
                 tool_call_id: None,
             });
 
-#[cfg(not(feature = "stylos"))]
+            #[cfg(not(feature = "stylos"))]
             msgs_with_system.push(Message {
                 role: "system".to_string(),
                 content: Some(
@@ -1454,7 +1457,10 @@ mod tests {
     #[test]
     fn center_trim_inserts_marker_and_keeps_ends() {
         let trimmed = center_trim("abcdefghijklmnopqrstuvwxyz", 10);
-        assert_eq!(trimmed, format!("abcd{}vwxyz", TOOL_DETAIL_CENTER_TRIM_MARKER));
+        assert_eq!(
+            trimmed,
+            format!("abcd{}vwxyz", TOOL_DETAIL_CENTER_TRIM_MARKER)
+        );
     }
 
     #[test]
