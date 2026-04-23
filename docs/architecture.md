@@ -111,12 +111,14 @@ For debugging, the practical thread model is still useful:
 
 In `crates/themion-cli/src/tui.rs`, the app creates a central `AppEvent` channel and then spawns a few long-lived background tasks around one main UI loop.
 
-The main UI loop does this repeatedly:
+The main UI loop now works as a request-driven redraw loop:
 
-1. draw the terminal UI
-2. wait for the next `AppEvent`
-3. handle that event
-4. redraw on the next iteration
+1. perform the initial terminal draw
+2. wait for the next `AppEvent` or a scheduled redraw notification
+3. handle the event and mark visible UI regions dirty when needed
+4. redraw only when a visible change or full invalidation is pending
+
+The CLI keeps redraw requests separate from draw execution. Internal event paths request future frames, redraw requests may be coalesced, and idle wakeups such as ticks do not automatically imply a draw. Ratatui still handles terminal buffer diffing for actual frame updates.
 
 Around that loop, the current implementation starts these long-lived tasks:
 
@@ -385,11 +387,13 @@ Current behavior:
 
 - reports process-local identity and current app/workflow busy state
 - reports a thread snapshot for the current process only; on Linux this reads `/proc/self/task/*/stat` and shows sampled cumulative thread CPU ticks rather than claiming exact percentages
-- reports Themion-owned runtime activity counters for draws, ticks, input, agent events, incoming prompts, shell completions, and agent-turn start/completion
+- reports Themion-owned runtime activity counters for draw requests, executed draws, skipped-clean redraw attempts, ticks, input, agent events, incoming prompts, shell completions, and agent-turn start/completion
 - reports recent-window activity counts and rates from snapshot deltas between retained in-app samples
 - labels lifetime activity totals separately so they are not confused with recent-window metrics
 - reports approximate draw timing from the same lightweight in-app counters
 - in `stylos` builds, also reports lightweight Stylos loop counters for status publishing, query handling, and bridge activity
 - explicitly treats task metrics as Themion activity signals, not exact per-Tokio-task CPU accounting
+
+The redraw path is now dirty-gated and request-driven rather than unconditionally redrawing at the top of every loop iteration. Tick wakeups still occur, but they only cause a draw when some visible state actually changed.
 
 This command is intended to help connect OS-visible symptoms such as hot threads with Themion's own event-loop and async-task structure.

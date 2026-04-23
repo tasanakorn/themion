@@ -47,10 +47,11 @@
 | PRD-035 | [Add `blocked` Board Column with Cooldown-Aware Revisit Semantics](prd/prd-035-blocked-board-column-and-cooldown.md) | Implemented | v0.21.0 | `themion-core`, `themion-cli`, docs |
 | PRD-036 | [Prompt Guidance for Self-Note Creation Beyond Simple Q&A](prd/prd-036-prompt-guidance-for-self-note-creation-beyond-simple-qa.md) | Proposed | v0.22.0 | `themion-core`, docs |
 | PRD-037 | [Remove the Hard-Coded 10-Round Harness Loop Limit and Rely on State-Based Termination](prd/prd-037-replace-hard-coded-harness-loop-limit.md) | Implemented | v0.23.0 | `themion-core`, docs |
-| PRD-038 | [Center Trim Tool Call Chat Labels](prd/prd-038-center-trim-tool-call-chat-labels.md) | Implemented | v0.23.1 | `themion-core`, `themion-cli`, docs |
+| PRD-038 | [Center Trim Tool Call Chat Labels](prd/prd-038-center-trim-tool-call-chat-labels.md) | Implemented | v0.26.0 | `themion-core`, `themion-cli`, docs |
 | PRD-039 | [Refactor Board and Note Naming Toward Local-Board-First Semantics](prd/prd-039-refactor-board-and-note-naming-toward-local-board-first-semantics.md) | Implemented | v0.24.0 | `themion-core`, `themion-cli`, docs |
 | PRD-040 | [Debug Command for Themion Process, Thread, and Task Utilization](prd/prd-040-debug-command-for-themion-process-thread-task-utilization.md) | Implemented | v0.25.0 | `themion-cli`, docs |
-| PRD-041 | [Fix `/debug runtime` Recent-Window Counter and Rate Reporting](prd/prd-041-fix-debug-runtime-recent-window-reporting.md) | Proposed | v0.25.1 | `themion-cli`, docs |
+| PRD-041 | [Fix `/debug runtime` Recent-Window Counter and Rate Reporting](prd/prd-041-fix-debug-runtime-recent-window-reporting.md) | Implemented | v0.26.0 | `themion-cli`, docs |
+| PRD-042 | [Dirty-Region and Partial TUI Redraws](prd/prd-042-dirty-region-and-partial-tui-redraws.md) | Implemented | v0.26.0 | `themion-cli`, docs |
 
 ## Roadmap note
 

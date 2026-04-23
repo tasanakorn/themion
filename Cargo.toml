@@ -27,7 +27,7 @@ zenoh = "=1.9.0"
 stylos = { git = "https://github.com/tasanakorn/stylos.git", rev = "73b30ca7314257e6c28ce2d82cf72102cb2da94f" }
 
 [workspace.package]
-version = "0.23.1"
+version = "0.26.0"
 edition = "2021"
 
 [profile.dev]

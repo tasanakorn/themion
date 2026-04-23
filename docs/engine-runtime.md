@@ -155,6 +155,22 @@ That means:
 This feature improves user-facing review behavior without changing runtime semantics in `themion-core`.
 
 
+
+## CLI redraw scheduling
+
+`crates/themion-cli/src/tui.rs` now uses a request-driven redraw path rather than unconditionally drawing once per event-loop iteration.
+
+Current behavior:
+
+- the TUI performs an initial draw at startup
+- later draws are triggered by scheduled redraw notifications after event handlers mark visible state dirty
+- dirty tracking is coarse and UI-shaped: conversation, input, status, overlay, or full invalidation
+- multiple redraw requests may be coalesced before one actual `terminal.draw(...)` call
+- the 150 ms tick still updates runtime counters and idle-time logic, but it only results in a draw when visible UI state changed
+- `/debug runtime` distinguishes draw requests, executed draws, and skipped-clean redraw attempts so redraw churn can be inspected without confusing wakeups with actual draws
+
+This keeps Ratatui's buffer-diff renderer in place while avoiding unnecessary frame rebuilding during idle periods.
+
 ## Durable Stylos notes runtime
 
 PRD-029 phase 1 adds a durable board-backed note path.

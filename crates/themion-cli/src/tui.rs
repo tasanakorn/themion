@@ -33,7 +33,7 @@ use themion_core::db::DbHandle;
 use themion_core::workflow::WorkflowState;
 use themion_core::ModelInfo;
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_stream::StreamExt;
 use tui_textarea::CursorMove;
 use tui_textarea::TextArea;
@@ -205,6 +205,98 @@ fn build_stylos_status_snapshot(
     })
 }
 
+#[derive(Clone, Copy, Default)]
+struct UiDirty {
+    conversation: bool,
+    input: bool,
+    status: bool,
+    overlay: bool,
+    full: bool,
+}
+
+impl UiDirty {
+    fn any(&self) -> bool {
+        self.full || self.conversation || self.input || self.status || self.overlay
+    }
+
+    fn mark_all(&mut self) {
+        self.full = true;
+        self.conversation = true;
+        self.input = true;
+        self.status = true;
+        self.overlay = true;
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[derive(Clone)]
+struct FrameRequester {
+    tx: mpsc::UnboundedSender<Instant>,
+}
+
+impl FrameRequester {
+    fn new(draw_tx: broadcast::Sender<()>) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(FrameScheduler::new(rx, draw_tx).run());
+        Self { tx }
+    }
+
+    fn schedule_frame(&self) {
+        let _ = self.tx.send(Instant::now());
+    }
+}
+
+struct FrameScheduler {
+    rx: mpsc::UnboundedReceiver<Instant>,
+    draw_tx: broadcast::Sender<()>,
+    last_emitted_at: Option<Instant>,
+}
+
+impl FrameScheduler {
+    fn new(rx: mpsc::UnboundedReceiver<Instant>, draw_tx: broadcast::Sender<()>) -> Self {
+        Self {
+            rx,
+            draw_tx,
+            last_emitted_at: None,
+        }
+    }
+
+    fn clamp_deadline(&self, requested: Instant) -> Instant {
+        const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+        match self.last_emitted_at {
+            Some(last) => requested.max(last + MIN_FRAME_INTERVAL),
+            None => requested,
+        }
+    }
+
+    async fn run(mut self) {
+        const ONE_YEAR: Duration = Duration::from_secs(60 * 60 * 24 * 365);
+        let mut next_deadline: Option<Instant> = None;
+        loop {
+            let target = next_deadline.unwrap_or_else(|| Instant::now() + ONE_YEAR);
+            let deadline = tokio::time::sleep_until(target.into());
+            tokio::pin!(deadline);
+            tokio::select! {
+                requested = self.rx.recv() => {
+                    let Some(requested) = requested else { break; };
+                    let requested = self.clamp_deadline(requested);
+                    next_deadline = Some(next_deadline.map_or(requested, |current| current.min(requested)));
+                }
+                _ = &mut deadline => {
+                    if next_deadline.is_some() {
+                        next_deadline = None;
+                        self.last_emitted_at = Some(target);
+                        let _ = self.draw_tx.send(());
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 enum AgentActivity {
     PreparingRequest,
@@ -221,6 +313,8 @@ enum AgentActivity {
 #[derive(Clone, Copy)]
 struct ActivityCountersSnapshot {
     draw_count: u64,
+    draw_request_count: u64,
+    draw_skip_clean_count: u64,
     tick_count: u64,
     input_key_count: u64,
     input_mouse_count: u64,
@@ -238,6 +332,8 @@ struct ActivityCountersSnapshot {
 #[derive(Default)]
 struct ActivityCounters {
     draw_count: u64,
+    draw_request_count: u64,
+    draw_skip_clean_count: u64,
     tick_count: u64,
     input_key_count: u64,
     input_mouse_count: u64,
@@ -256,6 +352,8 @@ impl ActivityCounters {
     fn snapshot(&self) -> ActivityCountersSnapshot {
         ActivityCountersSnapshot {
             draw_count: self.draw_count,
+            draw_request_count: self.draw_request_count,
+            draw_skip_clean_count: self.draw_skip_clean_count,
             tick_count: self.tick_count,
             input_key_count: self.input_key_count,
             input_mouse_count: self.input_mouse_count,
@@ -276,6 +374,12 @@ impl ActivityCountersSnapshot {
     fn saturating_sub(&self, earlier: &Self) -> Self {
         Self {
             draw_count: self.draw_count.saturating_sub(earlier.draw_count),
+            draw_request_count: self
+                .draw_request_count
+                .saturating_sub(earlier.draw_request_count),
+            draw_skip_clean_count: self
+                .draw_skip_clean_count
+                .saturating_sub(earlier.draw_skip_clean_count),
             tick_count: self.tick_count.saturating_sub(earlier.tick_count),
             input_key_count: self.input_key_count.saturating_sub(earlier.input_key_count),
             input_mouse_count: self
@@ -392,6 +496,7 @@ pub struct App<'a> {
     history_draft: String,
     streaming_idx: Option<usize>,
     anim_frame: u8,
+    dirty: UiDirty,
     agents: Vec<AgentHandle>,
     db: Arc<DbHandle>,
     project_dir: PathBuf,
@@ -528,6 +633,11 @@ impl<'a> App<'a> {
             history_draft: String::new(),
             streaming_idx: None,
             anim_frame: 0,
+            dirty: {
+                let mut d = UiDirty::default();
+                d.mark_all();
+                d
+            },
             agents: vec![handle],
             db,
             startup_project_dir: project_dir.clone(),
@@ -653,6 +763,7 @@ impl<'a> App<'a> {
         self.idle_since = None;
         self.idle_status_changed_at = None;
         self.pending = Some(self.pending_str());
+        self.mark_dirty_status();
         self.refresh_stylos_status();
     }
 
@@ -662,6 +773,7 @@ impl<'a> App<'a> {
         self.idle_since = Some(Instant::now());
         self.idle_status_changed_at = Some(unix_epoch_now_ms());
         self.pending = None;
+        self.mark_dirty_status();
         self.refresh_stylos_status();
     }
 
@@ -682,14 +794,44 @@ impl<'a> App<'a> {
     fn on_tick(&mut self) {
         self.activity_counters.tick_count += 1;
         self.record_runtime_snapshot();
+        let previous = self.pending.clone();
         self.anim_frame = self.anim_frame.wrapping_add(1);
         if self.agent_busy && self.pending.is_some() {
             self.pending = Some(self.pending_str());
         }
+        if self.pending != previous {
+            self.mark_dirty_status();
+        }
+    }
+
+    fn mark_dirty_conversation(&mut self) {
+        self.dirty.conversation = true;
+    }
+
+    fn mark_dirty_input(&mut self) {
+        self.dirty.input = true;
+    }
+
+    fn mark_dirty_status(&mut self) {
+        self.dirty.status = true;
+    }
+
+    fn mark_dirty_overlay(&mut self) {
+        self.dirty.overlay = true;
+    }
+
+    fn mark_dirty_all(&mut self) {
+        self.dirty.mark_all();
+    }
+
+    fn request_draw(&mut self, frame_requester: &FrameRequester) {
+        self.activity_counters.draw_request_count += 1;
+        frame_requester.schedule_frame();
     }
 
     fn push(&mut self, entry: Entry) {
         self.entries.push(entry);
+        self.mark_dirty_conversation();
     }
 
     fn activity_status_value(&self) -> String {
@@ -885,12 +1027,14 @@ impl<'a> App<'a> {
             }
             AgentEvent::WorkflowStateChanged(state) => {
                 self.workflow_state = state;
+                self.mark_dirty_status();
                 self.refresh_stylos_status();
             }
             AgentEvent::Stats(text) => {
                 if let Some(json) = text.strip_prefix("[rate-limit] ") {
                     if let Ok(report) = serde_json::from_str::<ApiCallRateLimitReport>(json) {
                         self.status_rate_limits = Some(report);
+                        self.mark_dirty_status();
                         self.refresh_stylos_status();
                     }
                     return;
@@ -2424,25 +2568,41 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
         }
     }
 
+    let (draw_tx, mut draw_rx) = broadcast::channel::<()>(8);
+    let frame_requester = FrameRequester::new(draw_tx);
+    app.request_draw(&frame_requester);
+
     while app.running {
-        let draw_started = Instant::now();
-        terminal.draw(|f| draw(f, &app))?;
-        let draw_us = draw_started.elapsed().as_micros() as u64;
-        app.activity_counters.draw_count += 1;
-        app.activity_counters.draw_total_us += draw_us;
-        app.activity_counters.draw_max_us = app.activity_counters.draw_max_us.max(draw_us);
-        match app_rx.recv().await {
+        tokio::select! {
+            maybe_draw = draw_rx.recv() => {
+                if maybe_draw.is_ok() {
+                    if app.dirty.any() {
+                        let draw_started = Instant::now();
+                        terminal.draw(|f| draw(f, &app))?;
+                        let draw_us = draw_started.elapsed().as_micros() as u64;
+                        app.activity_counters.draw_count += 1;
+                        app.activity_counters.draw_total_us += draw_us;
+                        app.activity_counters.draw_max_us = app.activity_counters.draw_max_us.max(draw_us);
+                        app.dirty.clear();
+                    } else {
+                        app.activity_counters.draw_skip_clean_count += 1;
+                    }
+                }
+            }
+            event = app_rx.recv() => match event {
             Some(AppEvent::Mouse(m)) => {
                 app.activity_counters.input_mouse_count += 1;
                 match m.kind {
-                    MouseEventKind::ScrollUp => app.scroll_up(),
-                    MouseEventKind::ScrollDown => app.scroll_down(),
+                    MouseEventKind::ScrollUp => { app.scroll_up(); app.mark_dirty_conversation(); app.request_draw(&frame_requester); }
+                    MouseEventKind::ScrollDown => { app.scroll_down(); app.mark_dirty_conversation(); app.request_draw(&frame_requester); }
                     _ => {}
                 }
             }
             Some(AppEvent::Paste(text)) => {
                 app.activity_counters.input_paste_count += 1;
                 handle_paste(&mut app, text);
+                app.mark_dirty_input();
+                app.request_draw(&frame_requester);
             }
             Some(AppEvent::Key(key)) => {
                 app.activity_counters.input_key_count += 1;
@@ -2520,7 +2680,9 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 match (key.code, key.modifiers) {
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.running = false,
                     (KeyCode::Esc, _) if app.review_mode == ReviewMode::Transcript => {
-                        app.close_transcript_review()
+                        app.close_transcript_review();
+                        app.mark_dirty_overlay();
+                        app.request_draw(&frame_requester);
                     }
                     (KeyCode::Esc, _) if app.agent_busy => app.request_interrupt(),
                     (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
@@ -2555,12 +2717,14 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     }
                     (KeyCode::Up, KeyModifiers::ALT) => app.scroll_up(),
                     (KeyCode::Down, KeyModifiers::ALT) => app.scroll_down(),
-                    (KeyCode::Char('g'), KeyModifiers::ALT) => app.return_to_latest(),
+                    (KeyCode::Char('g'), KeyModifiers::ALT) => { app.return_to_latest(); app.mark_dirty_conversation(); app.request_draw(&frame_requester); },
                     (KeyCode::Char('t'), KeyModifiers::ALT) => {
                         if app.review_mode == ReviewMode::Transcript {
                             app.close_transcript_review();
                         } else {
                             app.open_transcript_review();
+                            app.mark_dirty_overlay();
+                            app.request_draw(&frame_requester);
                         }
                     }
                     (KeyCode::Home, KeyModifiers::ALT) => {
@@ -2568,16 +2732,18 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                         app.jump_to_top(total, height);
                     }
                     (KeyCode::Up, KeyModifiers::NONE) if app.review_mode == ReviewMode::Closed => {
-                        app.history_up()
+                        app.history_up(); app.mark_dirty_input(); app.request_draw(&frame_requester)
                     }
                     (KeyCode::Down, KeyModifiers::NONE)
                         if app.review_mode == ReviewMode::Closed =>
                     {
-                        app.history_down()
+                        app.history_down(); app.mark_dirty_input(); app.request_draw(&frame_requester)
                     }
                     _ => {
                         if app.review_mode == ReviewMode::Closed {
                             app.input.input(key);
+                            app.mark_dirty_input();
+                            app.request_draw(&frame_requester);
                             match key.code {
                                 KeyCode::Char(_) => {
                                     let has_ctrl_or_alt =
@@ -2595,7 +2761,11 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 }
             }
             Some(AppEvent::Tick) => {
+                let was_dirty = app.dirty.any();
                 app.on_tick();
+                if app.dirty.any() && !was_dirty {
+                    app.request_draw(&frame_requester);
+                }
                 #[cfg(feature = "stylos")]
                 app.maybe_inject_pending_board_note(&app_tx);
             }
@@ -2702,12 +2872,14 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
             #[cfg(feature = "stylos")]
             Some(AppEvent::Agent(ev)) => {
                 app.activity_counters.agent_event_count += 1;
-                app.handle_agent_event(ev, &app_tx)
+                app.handle_agent_event(ev, &app_tx);
+                if app.dirty.any() { app.request_draw(&frame_requester); }
             }
             #[cfg(not(feature = "stylos"))]
             Some(AppEvent::Agent(ev)) => {
                 app.activity_counters.agent_event_count += 1;
-                app.handle_agent_event(ev)
+                app.handle_agent_event(ev);
+                if app.dirty.any() { app.request_draw(&frame_requester); }
             }
             Some(AppEvent::AgentReady(agent, sid)) => {
                 let agent = *agent;
@@ -2718,6 +2890,8 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 }
                 app.agent_busy = false;
                 app.active_turn_cancellation = None;
+                app.mark_dirty_status();
+                app.request_draw(&frame_requester);
             }
             Some(AppEvent::LoginPrompt {
                 user_code,
@@ -2728,6 +2902,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     "open {} and enter code {}",
                     verification_uri, user_code
                 )));
+                app.request_draw(&frame_requester);
             }
             Some(AppEvent::LoginComplete(Ok(auth))) => {
                 app.clear_agent_activity();
@@ -2787,6 +2962,8 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                         )));
                         app.push(Entry::Blank);
                         app.agent_busy = false;
+                        app.mark_dirty_all();
+                        app.request_draw(&frame_requester);
                     }
                     Err(e) => {
                         app.push(Entry::Assistant(format!(
@@ -2794,6 +2971,8 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                             e
                         )));
                         app.agent_busy = false;
+                        app.mark_dirty_all();
+                        app.request_draw(&frame_requester);
                     }
                 }
             }
@@ -2801,6 +2980,8 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 app.clear_agent_activity();
                 app.push(Entry::Assistant(format!("login failed: {}", e)));
                 app.agent_busy = false;
+                app.mark_dirty_all();
+                app.request_draw(&frame_requester);
             }
             Some(AppEvent::ShellComplete { output, exit_code }) => {
                 app.activity_counters.shell_complete_count += 1;
@@ -2813,8 +2994,11 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                 }
                 app.push(Entry::Blank);
                 app.agent_busy = false;
+                app.mark_dirty_all();
+                app.request_draw(&frame_requester);
             }
             None => {}
+        }
         }
     }
 
@@ -3043,8 +3227,10 @@ fn format_runtime_activity_lines(
 ) -> Vec<String> {
     vec![
         format!(
-            "recent activity counts: draws={} ticks={} keys={} mouse={} paste={} commands={}",
+            "recent activity counts: draws={} draw_requests={} draw_skipped_clean={} ticks={} keys={} mouse={} paste={} commands={}",
             counters.draw_count,
+            counters.draw_request_count,
+            counters.draw_skip_clean_count,
             counters.tick_count,
             counters.input_key_count,
             counters.input_mouse_count,
@@ -3074,8 +3260,10 @@ fn format_runtime_activity_lines(
 fn format_runtime_lifetime_lines(counters: &ActivityCountersSnapshot) -> Vec<String> {
     vec![
         format!(
-            "lifetime activity counts: draws={} ticks={} keys={} mouse={} paste={} commands={}",
+            "lifetime activity counts: draws={} draw_requests={} draw_skipped_clean={} ticks={} keys={} mouse={} paste={} commands={}",
             counters.draw_count,
+            counters.draw_request_count,
+            counters.draw_skip_clean_count,
             counters.tick_count,
             counters.input_key_count,
             counters.input_mouse_count,
