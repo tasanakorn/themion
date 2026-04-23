@@ -6,7 +6,8 @@ use crate::workflow::{
     normalize_workflow_name, phase_instructions, previous_phase, start_phase_for_workflow,
     PhaseResult, WorkflowState, WorkflowStatus, DEFAULT_AGENT,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
+use base64::Engine;
 use serde_json::{json, Value};
 use std::fs;
 #[cfg(feature = "stylos")]
@@ -15,6 +16,7 @@ use std::path::PathBuf;
 #[cfg(feature = "stylos")]
 use std::pin::Pin;
 use std::sync::Arc;
+use tokio::time::timeout;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -51,6 +53,12 @@ pub type StylosToolInvoker = Arc<dyn Fn(String, Value) -> StylosToolFuture + Sen
 
 const MAX_SLEEP_MS: u64 = 30_000;
 const SELF_TARGET_KEYWORD: &str = "SELF";
+const DEFAULT_READ_MODE: &str = "base64";
+const DEFAULT_WRITE_MODE: &str = "base64";
+const DEFAULT_READ_LIMIT: usize = 128 * 1024;
+const MAX_READ_LIMIT: usize = 2 * 1024 * 1024;
+const DEFAULT_SHELL_RESULT_LIMIT: usize = 16 * 1024;
+const DEFAULT_SHELL_TIMEOUT_MS: u64 = 5 * 60 * 1000;
 
 pub struct ToolCtx {
     pub db: Arc<DbHandle>,
@@ -109,6 +117,95 @@ fn resolve_board_target(
     }
 }
 
+fn parse_mode<'a>(value: Option<&'a str>, default_mode: &'static str) -> Result<&'a str> {
+    match value.unwrap_or(default_mode) {
+        "raw" => Ok("raw"),
+        "base64" => Ok("base64"),
+        other => anyhow::bail!("invalid mode: {other}"),
+    }
+}
+
+fn parse_nonnegative_offset(args: &Value) -> Result<usize> {
+    let Some(value) = args.get("offset") else {
+        return Ok(0);
+    };
+    let offset = value
+        .as_u64()
+        .ok_or_else(|| anyhow::anyhow!("offset must be a non-negative integer"))?;
+    usize::try_from(offset).context("offset too large")
+}
+
+fn parse_read_limit(args: &Value) -> Result<usize> {
+    let limit = match args.get("limit") {
+        Some(value) => {
+            let limit = value
+                .as_u64()
+                .ok_or_else(|| anyhow::anyhow!("limit must be a positive integer"))?;
+            usize::try_from(limit).context("limit too large")?
+        }
+        None => DEFAULT_READ_LIMIT,
+    };
+    if limit == 0 {
+        anyhow::bail!("limit must be greater than 0");
+    }
+    if limit > MAX_READ_LIMIT {
+        anyhow::bail!("limit exceeds maximum {MAX_READ_LIMIT}");
+    }
+    Ok(limit)
+}
+
+fn parse_shell_result_limit(args: &Value) -> Result<usize> {
+    match args.get("result_limit") {
+        Some(value) => {
+            let limit = value
+                .as_u64()
+                .ok_or_else(|| anyhow::anyhow!("result_limit must be a positive integer"))?;
+            let limit = usize::try_from(limit).context("result_limit too large")?;
+            if limit == 0 {
+                anyhow::bail!("result_limit must be greater than 0");
+            }
+            Ok(limit)
+        }
+        None => Ok(DEFAULT_SHELL_RESULT_LIMIT),
+    }
+}
+
+fn parse_shell_timeout_ms(args: &Value) -> Result<u64> {
+    match args.get("timeout_ms") {
+        Some(value) => {
+            let timeout_ms = value
+                .as_u64()
+                .ok_or_else(|| anyhow::anyhow!("timeout_ms must be a non-negative integer"))?;
+            if timeout_ms == 0 {
+                anyhow::bail!("timeout_ms must be greater than 0");
+            }
+            Ok(timeout_ms)
+        }
+        None => Ok(DEFAULT_SHELL_TIMEOUT_MS),
+    }
+}
+
+fn truncate_output_with_notice(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_string();
+    }
+    let mut end = 0usize;
+    for (idx, ch) in text.char_indices() {
+        let next = idx + ch.len_utf8();
+        if next > limit {
+            break;
+        }
+        end = next;
+    }
+    let truncated_bytes = text.len().saturating_sub(end);
+    format!(
+        "{}\n[truncated: omitted {} byte(s) after result_limit={}]",
+        &text[..end],
+        truncated_bytes,
+        limit
+    )
+}
+
 pub fn tool_definitions() -> Value {
     let base_defs = vec![
         json!({
@@ -119,7 +216,10 @@ pub fn tool_definitions() -> Value {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "File path to read" }
+                        "path": { "type": "string", "description": "File path to read" },
+                        "mode": { "type": "string", "enum": ["raw", "base64"], "description": "Response encoding mode. Defaults to base64." },
+                        "offset": { "type": "integer", "description": "Byte offset to start reading from. Defaults to 0." },
+                        "limit": { "type": "integer", "description": "Maximum bytes to read. Defaults to 131072 and max 2097152." }
                     },
                     "required": ["path"]
                 }
@@ -134,7 +234,8 @@ pub fn tool_definitions() -> Value {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "File path to write" },
-                        "content": { "type": "string", "description": "Content to write" }
+                        "content": { "type": "string", "description": "Content to write" },
+                        "mode": { "type": "string", "enum": ["raw", "base64"], "description": "Content encoding mode. Defaults to base64." }
                     },
                     "required": ["path", "content"]
                 }
@@ -162,7 +263,9 @@ pub fn tool_definitions() -> Value {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "description": "Shell command to run" }
+                        "command": { "type": "string", "description": "Shell command to run" },
+                        "result_limit": { "type": "integer", "description": "Maximum returned stdout+stderr bytes. Defaults to 16384." },
+                        "timeout_ms": { "type": "integer", "description": "Command timeout in milliseconds. Defaults to 300000." }
                     },
                     "required": ["command"]
                 }
@@ -458,12 +561,35 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
 
     match name {
         "fs_read_file" | "read_file" => {
-            let path = args["path"]
+            let path_arg = args["path"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing path"))?;
-            let path = ctx.project_dir.join(path);
-            let content = fs::read_to_string(path)?;
-            Ok(content)
+            let path = ctx.project_dir.join(path_arg);
+            let mode = parse_mode(args["mode"].as_str(), DEFAULT_READ_MODE)?;
+            let offset = parse_nonnegative_offset(&args)?;
+            let limit = parse_read_limit(&args)?;
+            let bytes = fs::read(&path)?;
+            let start = offset.min(bytes.len());
+            let end = start.saturating_add(limit).min(bytes.len());
+            let slice = &bytes[start..end];
+            let content = match mode {
+                "raw" => std::str::from_utf8(slice)
+                    .context("raw mode requires valid UTF-8; use mode=base64 for binary content")?
+                    .to_string(),
+                "base64" => base64::engine::general_purpose::STANDARD.encode(slice),
+                _ => unreachable!(),
+            };
+            Ok(json!({
+                "path": path_arg,
+                "mode": mode,
+                "offset": start,
+                "limit": limit,
+                "returned_bytes": slice.len(),
+                "file_size": bytes.len(),
+                "eof": end >= bytes.len(),
+                "content": content,
+            })
+            .to_string())
         }
         "fs_write_file" | "write_file" => {
             let path = args["path"]
@@ -473,8 +599,16 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             let content = args["content"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing content"))?;
-            fs::write(path, content)?;
-            Ok(format!("Written"))
+            let mode = parse_mode(args["mode"].as_str(), DEFAULT_WRITE_MODE)?;
+            let bytes = match mode {
+                "raw" => content.as_bytes().to_vec(),
+                "base64" => base64::engine::general_purpose::STANDARD
+                    .decode(content)
+                    .context("invalid base64 content")?,
+                _ => unreachable!(),
+            };
+            fs::write(path, bytes)?;
+            Ok("Written".to_string())
         }
         "fs_list_directory" | "list_directory" => {
             let path = args["path"]
@@ -491,15 +625,25 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             let command = args["command"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing command"))?;
-            let output = tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(command)
-                .current_dir(&ctx.project_dir)
-                .output()
-                .await?;
+            let result_limit = parse_shell_result_limit(&args)?;
+            let timeout_ms = parse_shell_timeout_ms(&args)?;
+            let output = match timeout(
+                Duration::from_millis(timeout_ms),
+                tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(command)
+                    .current_dir(&ctx.project_dir)
+                    .output(),
+            )
+            .await
+            {
+                Ok(output) => output?,
+                Err(_) => return Ok(format!("Error: command timed out after {} ms", timeout_ms)),
+            };
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            Ok(format!("{stdout}{stderr}"))
+            let combined = format!("{stdout}{stderr}");
+            Ok(truncate_output_with_notice(&combined, result_limit))
         }
         "time_sleep" => {
             let ms = args["ms"]

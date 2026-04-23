@@ -127,6 +127,25 @@ This sender-side log is distinct from generic tool-call text and is intended to 
 
 Tool-call chat labels remain compact, but long tool detail values are now center-trimmed to about 60 characters with `󱑼` so the display can preserve both the beginning and the end of paths, commands, and other long identifiers.
 
+## File and shell tool bounds
+
+`themion-core` now uses more explicit and bounded contracts for the main local filesystem and shell tools.
+
+Current behavior:
+
+- `fs_read_file` accepts `path` plus optional `mode`, `offset`, and `limit`
+- `fs_read_file` defaults to `mode=base64`, `offset=0`, and `limit=131072` bytes
+- `fs_read_file` rejects `limit` values above `2097152` bytes
+- `fs_read_file` returns the selected byte range together with range metadata such as returned byte count, file size, and EOF state
+- `fs_read_file` only allows `mode=raw` when the selected byte slice is valid UTF-8; otherwise it returns an error directing the caller to `base64`
+- `fs_write_file` accepts optional `mode` and defaults to `base64`, decoding bytes before writing in that default mode
+- `fs_write_file` still supports direct text writes through `mode=raw`
+- `shell_run_command` accepts optional `result_limit` and `timeout_ms`, defaulting to `16384` bytes and `300000` ms
+- `shell_run_command` truncates oversized returned output with an explicit truncation notice
+- `shell_run_command` returns a clear timeout result when the command exceeds the configured timeout
+
+These defaults make binary-safe file transfer and bounded shell usage the normal path rather than a caller-side convention.
+
 ## Lightweight wait tool
 
 `themion-core` now exposes a built-in `time_sleep` tool for short bounded waits.

@@ -52,6 +52,7 @@
 | PRD-040 | [Debug Command for Themion Process, Thread, and Task Utilization](prd/prd-040-debug-command-for-themion-process-thread-task-utilization.md) | Implemented | v0.25.0 | `themion-cli`, docs |
 | PRD-041 | [Fix `/debug runtime` Recent-Window Counter and Rate Reporting](prd/prd-041-fix-debug-runtime-recent-window-reporting.md) | Implemented | v0.26.0 | `themion-cli`, docs |
 | PRD-042 | [Dirty-Region and Partial TUI Redraws](prd/prd-042-dirty-region-and-partial-tui-redraws.md) | Implemented | v0.26.0 | `themion-cli`, docs |
+| PRD-043 | [Safer and More Bounded File and Shell Tool Parameters](prd/prd-043-safer-and-more-bounded-file-and-shell-tool-parameters.md) | Implemented | v0.27.0 | `themion-core`, docs |
 
 ## Roadmap note
 
