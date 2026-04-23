@@ -50,9 +50,11 @@
 | PRD-038 | [Center Trim Tool Call Chat Labels](prd/prd-038-center-trim-tool-call-chat-labels.md) | Implemented | v0.26.0 | `themion-core`, `themion-cli`, docs |
 | PRD-039 | [Refactor Board and Note Naming Toward Local-Board-First Semantics](prd/prd-039-refactor-board-and-note-naming-toward-local-board-first-semantics.md) | Implemented | v0.24.0 | `themion-core`, `themion-cli`, docs |
 | PRD-040 | [Debug Command for Themion Process, Thread, and Task Utilization](prd/prd-040-debug-command-for-themion-process-thread-task-utilization.md) | Implemented | v0.25.0 | `themion-cli`, docs |
-| PRD-041 | [Fix `/debug runtime` Recent-Window Counter and Rate Reporting](prd/prd-041-fix-debug-runtime-recent-window-reporting.md) | Implemented | v0.26.0 | `themion-cli`, docs |
+| PRD-041 | [Fix `/debug runtime` Recent-Window Counter and Rate Reporting](prd/prd-041-fix-debug-runtime-recent-window-reporting.md) | Implemented | v0.25.1 | `themion-cli`, docs |
 | PRD-042 | [Dirty-Region and Partial TUI Redraws](prd/prd-042-dirty-region-and-partial-tui-redraws.md) | Implemented | v0.26.0 | `themion-cli`, docs |
 | PRD-043 | [Safer and More Bounded File and Shell Tool Parameters](prd/prd-043-safer-and-more-bounded-file-and-shell-tool-parameters.md) | Implemented | v0.27.0 | `themion-core`, docs |
+| PRD-044 | [Fix Multiline Input Newline and Wrapped-Cursor Tracking](prd/prd-044-fix-multiline-input-newline-and-wrapped-cursor-tracking.md) | Implemented | v0.26.1 | `themion-cli`, docs |
+| PRD-045 | [Project-Wide History Recall and Search Across Sessions](prd/prd-045-project-wide-history-recall-and-search-across-sessions.md) | Proposed | v0.28.0 | `themion-core`, docs |
 
 ## Roadmap note
 
