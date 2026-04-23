@@ -192,6 +192,8 @@ Current behavior:
 - prints process identity, current busy/workflow state, and thread snapshot data for the running Themion process
 - on Linux, thread details come from `/proc/self/task/*/stat` and are reported as sampled cumulative user/system CPU ticks, not exact percentages
 - prints Themion task/activity metrics derived from lightweight counters and handler timing around the TUI loop, input path, tick path, agent event path, shell completion path, and agent-turn lifecycle
+- keeps cumulative counters internally but renders the recent-window section from snapshot deltas rather than from raw lifetime totals
+- labels separately shown lifetime totals explicitly as lifetime values
 - when the `stylos` feature is enabled, also prints lightweight Stylos runtime counters for status publishing, query handling, and bridge event categories
 
 Because Tokio tasks are cooperatively scheduled async tasks rather than kernel threads, the task section is intentionally described as activity/busy-time observability. It must not be read as exact per-Tokio-task CPU accounting.

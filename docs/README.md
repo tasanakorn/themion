@@ -50,6 +50,7 @@
 | PRD-038 | [Center Trim Tool Call Chat Labels](prd/prd-038-center-trim-tool-call-chat-labels.md) | Implemented | v0.23.1 | `themion-core`, `themion-cli`, docs |
 | PRD-039 | [Refactor Board and Note Naming Toward Local-Board-First Semantics](prd/prd-039-refactor-board-and-note-naming-toward-local-board-first-semantics.md) | Implemented | v0.24.0 | `themion-core`, `themion-cli`, docs |
 | PRD-040 | [Debug Command for Themion Process, Thread, and Task Utilization](prd/prd-040-debug-command-for-themion-process-thread-task-utilization.md) | Implemented | v0.25.0 | `themion-cli`, docs |
+| PRD-041 | [Fix `/debug runtime` Recent-Window Counter and Rate Reporting](prd/prd-041-fix-debug-runtime-recent-window-reporting.md) | Proposed | v0.25.1 | `themion-cli`, docs |
 
 ## Roadmap note
 

@@ -386,7 +386,9 @@ Current behavior:
 - reports process-local identity and current app/workflow busy state
 - reports a thread snapshot for the current process only; on Linux this reads `/proc/self/task/*/stat` and shows sampled cumulative thread CPU ticks rather than claiming exact percentages
 - reports Themion-owned runtime activity counters for draws, ticks, input, agent events, incoming prompts, shell completions, and agent-turn start/completion
-- reports approximate draw timing and recent-window activity rates from lightweight in-app counters
+- reports recent-window activity counts and rates from snapshot deltas between retained in-app samples
+- labels lifetime activity totals separately so they are not confused with recent-window metrics
+- reports approximate draw timing from the same lightweight in-app counters
 - in `stylos` builds, also reports lightweight Stylos loop counters for status publishing, query handling, and bridge activity
 - explicitly treats task metrics as Themion activity signals, not exact per-Tokio-task CPU accounting
 

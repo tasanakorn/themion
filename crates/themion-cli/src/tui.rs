@@ -218,7 +218,6 @@ enum AgentActivity {
     Finishing,
 }
 
-
 #[derive(Clone, Copy)]
 struct ActivityCountersSnapshot {
     draw_count: u64,
@@ -273,6 +272,40 @@ impl ActivityCounters {
     }
 }
 
+impl ActivityCountersSnapshot {
+    fn saturating_sub(&self, earlier: &Self) -> Self {
+        Self {
+            draw_count: self.draw_count.saturating_sub(earlier.draw_count),
+            tick_count: self.tick_count.saturating_sub(earlier.tick_count),
+            input_key_count: self.input_key_count.saturating_sub(earlier.input_key_count),
+            input_mouse_count: self
+                .input_mouse_count
+                .saturating_sub(earlier.input_mouse_count),
+            input_paste_count: self
+                .input_paste_count
+                .saturating_sub(earlier.input_paste_count),
+            agent_event_count: self
+                .agent_event_count
+                .saturating_sub(earlier.agent_event_count),
+            incoming_prompt_count: self
+                .incoming_prompt_count
+                .saturating_sub(earlier.incoming_prompt_count),
+            shell_complete_count: self
+                .shell_complete_count
+                .saturating_sub(earlier.shell_complete_count),
+            agent_turn_started_count: self
+                .agent_turn_started_count
+                .saturating_sub(earlier.agent_turn_started_count),
+            agent_turn_completed_count: self
+                .agent_turn_completed_count
+                .saturating_sub(earlier.agent_turn_completed_count),
+            draw_total_us: self.draw_total_us.saturating_sub(earlier.draw_total_us),
+            draw_max_us: self.draw_max_us.max(earlier.draw_max_us),
+            command_count: self.command_count.saturating_sub(earlier.command_count),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct RuntimeMetricsSnapshot {
     at_ms: u64,
@@ -280,10 +313,13 @@ struct RuntimeMetricsSnapshot {
     counters: ActivityCountersSnapshot,
 }
 
-#[derive(Clone)]
-struct TimedRuntimeSnapshot {
-    snapshot: RuntimeMetricsSnapshot,
+#[derive(Clone, Copy)]
+struct TimedRuntimeDelta {
+    latest_at_ms: u64,
+    latest_uptime_ms: u64,
     wall_elapsed_ms: u64,
+    counter_delta: ActivityCountersSnapshot,
+    lifetime_counters: ActivityCountersSnapshot,
 }
 
 #[cfg(feature = "stylos")]
@@ -978,15 +1014,18 @@ impl<'a> App<'a> {
         }
     }
 
-    fn recent_runtime_delta(&self) -> Option<TimedRuntimeSnapshot> {
+    fn recent_runtime_delta(&self) -> Option<TimedRuntimeDelta> {
         let latest = *self.recent_runtime_snapshots.back()?;
         let earliest = *self.recent_runtime_snapshots.front()?;
         if latest.at_ms <= earliest.at_ms {
             return None;
         }
-        Some(TimedRuntimeSnapshot {
-            snapshot: latest,
+        Some(TimedRuntimeDelta {
+            latest_at_ms: latest.at_ms,
+            latest_uptime_ms: latest.uptime_ms,
             wall_elapsed_ms: latest.at_ms.saturating_sub(earliest.at_ms),
+            counter_delta: latest.counters.saturating_sub(&earliest.counters),
+            lifetime_counters: latest.counters,
         })
     }
 
@@ -1021,10 +1060,11 @@ impl<'a> App<'a> {
         {
             let stylos_state = match self.stylos.as_ref().map(|h| h.state()) {
                 Some(StylosRuntimeState::Off) => "off".to_string(),
-                Some(StylosRuntimeState::Active { mode, realm, instance }) => format!(
-                    "active mode={} realm={} instance={}",
-                    mode, realm, instance
-                ),
+                Some(StylosRuntimeState::Active {
+                    mode,
+                    realm,
+                    instance,
+                }) => format!("active mode={} realm={} instance={}", mode, realm, instance),
                 Some(StylosRuntimeState::Error(err)) => format!("error {}", err),
                 None => "off".to_string(),
             };
@@ -1034,22 +1074,35 @@ impl<'a> App<'a> {
         out.push("stylos feature disabled".to_string());
 
         out.push("threads:".to_string());
-        out.extend(sample_thread_cpu_lines().into_iter().map(|line| format!("  {}", line)));
+        out.extend(
+            sample_thread_cpu_lines()
+                .into_iter()
+                .map(|line| format!("  {}", line)),
+        );
 
         if let Some(recent) = self.recent_runtime_delta() {
             out.push(format!(
                 "recent window={} ending_at_ms={} uptime={}",
                 format_duration_ms(recent.wall_elapsed_ms),
-                recent.snapshot.at_ms,
-                format_duration_ms(recent.snapshot.uptime_ms),
+                recent.latest_at_ms,
+                format_duration_ms(recent.latest_uptime_ms),
             ));
-            out.extend(format_runtime_activity_lines(&recent.snapshot.counters, recent.wall_elapsed_ms));
+            out.extend(format_runtime_activity_lines(
+                &recent.counter_delta,
+                recent.wall_elapsed_ms,
+            ));
+            out.extend(format_runtime_lifetime_lines(&recent.lifetime_counters));
         } else {
             out.push("recent window=unavailable (need more than one sample)".to_string());
-            out.extend(format_runtime_activity_lines(&self.activity_counters.snapshot(), uptime_ms.max(1)));
+            out.extend(format_runtime_lifetime_lines(
+                &self.activity_counters.snapshot(),
+            ));
         }
 
-        if let Some(changed_at) = self.agent_activity_changed_at.or(self.idle_status_changed_at) {
+        if let Some(changed_at) = self
+            .agent_activity_changed_at
+            .or(self.idle_status_changed_at)
+        {
             out.push(format!(
                 "activity_status_changed {} ago",
                 format_duration_ms(now_ms.saturating_sub(changed_at))
@@ -1284,7 +1337,10 @@ impl<'a> App<'a> {
             return out;
         }
 
-        out.push(format!("unknown command '{}'.  try /config or /debug runtime", input));
+        out.push(format!(
+            "unknown command '{}'.  try /config or /debug runtime",
+            input
+        ));
         out
     }
 
@@ -2379,11 +2435,11 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
             Some(AppEvent::Mouse(m)) => {
                 app.activity_counters.input_mouse_count += 1;
                 match m.kind {
-                MouseEventKind::ScrollUp => app.scroll_up(),
-                MouseEventKind::ScrollDown => app.scroll_down(),
-                _ => {}
+                    MouseEventKind::ScrollUp => app.scroll_up(),
+                    MouseEventKind::ScrollDown => app.scroll_down(),
+                    _ => {}
                 }
-            },
+            }
             Some(AppEvent::Paste(text)) => {
                 app.activity_counters.input_paste_count += 1;
                 handle_paste(&mut app, text);
@@ -2647,12 +2703,12 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
             Some(AppEvent::Agent(ev)) => {
                 app.activity_counters.agent_event_count += 1;
                 app.handle_agent_event(ev, &app_tx)
-            },
+            }
             #[cfg(not(feature = "stylos"))]
             Some(AppEvent::Agent(ev)) => {
                 app.activity_counters.agent_event_count += 1;
                 app.handle_agent_event(ev)
-            },
+            }
             Some(AppEvent::AgentReady(agent, sid)) => {
                 let agent = *agent;
                 app.status_model_info = agent.model_info().cloned();
@@ -2955,7 +3011,6 @@ mod tests {
     }
 }
 
-
 fn format_duration_ms(ms: u64) -> String {
     if ms >= 60_000 {
         format!("{:.1}m", ms as f64 / 60_000.0)
@@ -2975,13 +3030,20 @@ fn per_second(count: u64, window_ms: u64) -> f64 {
 }
 
 fn avg_us(total_us: u64, count: u64) -> u64 {
-    if count == 0 { 0 } else { total_us / count }
+    if count == 0 {
+        0
+    } else {
+        total_us / count
+    }
 }
 
-fn format_runtime_activity_lines(counters: &ActivityCountersSnapshot, window_ms: u64) -> Vec<String> {
+fn format_runtime_activity_lines(
+    counters: &ActivityCountersSnapshot,
+    window_ms: u64,
+) -> Vec<String> {
     vec![
         format!(
-            "activity counts: draws={} ticks={} keys={} mouse={} paste={} commands={}",
+            "recent activity counts: draws={} ticks={} keys={} mouse={} paste={} commands={}",
             counters.draw_count,
             counters.tick_count,
             counters.input_key_count,
@@ -2990,7 +3052,7 @@ fn format_runtime_activity_lines(counters: &ActivityCountersSnapshot, window_ms:
             counters.command_count,
         ),
         format!(
-            "activity rates: draw={:.2}/s tick={:.2}/s input={:.2}/s agent_events={:.2}/s incoming_prompts={:.2}/s",
+            "recent activity rates: draw={:.2}/s tick={:.2}/s input={:.2}/s agent_events={:.2}/s incoming_prompts={:.2}/s",
             per_second(counters.draw_count, window_ms),
             per_second(counters.tick_count, window_ms),
             per_second(counters.input_key_count + counters.input_mouse_count + counters.input_paste_count, window_ms),
@@ -2998,7 +3060,7 @@ fn format_runtime_activity_lines(counters: &ActivityCountersSnapshot, window_ms:
             per_second(counters.incoming_prompt_count, window_ms),
         ),
         format!(
-            "task activity: agent_turns started={} completed={} shell_completions={} draw_avg={} draw_max={}",
+            "recent task activity: agent_turns started={} completed={} shell_completions={} draw_avg={} draw_max=lifetime:{}",
             counters.agent_turn_started_count,
             counters.agent_turn_completed_count,
             counters.shell_complete_count,
@@ -3009,26 +3071,56 @@ fn format_runtime_activity_lines(counters: &ActivityCountersSnapshot, window_ms:
     ]
 }
 
+fn format_runtime_lifetime_lines(counters: &ActivityCountersSnapshot) -> Vec<String> {
+    vec![
+        format!(
+            "lifetime activity counts: draws={} ticks={} keys={} mouse={} paste={} commands={}",
+            counters.draw_count,
+            counters.tick_count,
+            counters.input_key_count,
+            counters.input_mouse_count,
+            counters.input_paste_count,
+            counters.command_count,
+        ),
+        format!(
+            "lifetime task activity: agent_turns started={} completed={} shell_completions={} draw_avg={} draw_max={}",
+            counters.agent_turn_started_count,
+            counters.agent_turn_completed_count,
+            counters.shell_complete_count,
+            format_duration_ms(avg_us(counters.draw_total_us, counters.draw_count) / 1_000),
+            format_duration_ms(counters.draw_max_us / 1_000),
+        ),
+    ]
+}
+
 #[cfg(feature = "stylos")]
 fn format_stylos_activity_lines(snapshot: StylosActivitySnapshot) -> Vec<String> {
     vec![
         format!(
             "  status_publish count={} avg={} max={}",
             snapshot.status_publish_count,
-            format_duration_ms(avg_us(snapshot.status_publish_total_us, snapshot.status_publish_count) / 1_000),
+            format_duration_ms(
+                avg_us(
+                    snapshot.status_publish_total_us,
+                    snapshot.status_publish_count
+                ) / 1_000
+            ),
             format_duration_ms(snapshot.status_publish_max_us / 1_000),
         ),
         format!(
             "  query_request count={} avg={} max={}",
             snapshot.query_request_count,
-            format_duration_ms(avg_us(snapshot.query_request_total_us, snapshot.query_request_count) / 1_000),
+            format_duration_ms(
+                avg_us(
+                    snapshot.query_request_total_us,
+                    snapshot.query_request_count
+                ) / 1_000
+            ),
             format_duration_ms(snapshot.query_request_max_us / 1_000),
         ),
         format!(
             "  bridges cmd_events={} prompt_events={} event_messages={}",
-            snapshot.cmd_event_count,
-            snapshot.prompt_event_count,
-            snapshot.event_message_count,
+            snapshot.cmd_event_count, snapshot.prompt_event_count, snapshot.event_message_count,
         ),
     ]
 }
