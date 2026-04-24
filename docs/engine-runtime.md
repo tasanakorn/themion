@@ -225,8 +225,9 @@ Current behavior:
 - blocked notes store durable `blocked_until_ms` cooldown metadata and are only eligible for automatic idle-time reinjection after cooldown expires
 - idle injection priority is `in_progress`, then `todo`, then cooldown-eligible `blocked`
 - `themion-core` exposes `board_*` note tools for create/list/read/move/update-result operations using canonical durable UUID `note_id` values and returns companion `note_slug` metadata for human-readable inspection
+- TUI chat-panel/operator-facing note lifecycle events prefer `note_slug` as the visible note identifier, while machine-facing tool results and prompt metadata preserve canonical `note_id`
 - sender `from` and `from_agent_id` are forwarded from the calling runtime context into Stylos note delivery so receiver-side logs and stored note metadata reflect the actual calling agent
-- successful receiver-side note insertion emits `created board note in db note_id=<uuid> ...` before the note is queued for later injection
+- successful receiver-side note insertion emits `created board note in db note_slug=<slug> ...` before the note is queued for later injection
 - inbound note delivery logging is distinct from talk logging: note delivery uses `Board note intake ...`, while talk delivery uses `Stylos hear ...`
 - the TUI checks for pending local notes on tick when no local turn is active
 - idle injection prefers pending `in_progress` notes; `todo` is considered only when no pending `in_progress` note exists for that agent

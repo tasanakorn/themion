@@ -344,8 +344,8 @@ Examples:
 - when an inbound Stylos talk is received, the receiver-side TUI emits one `Stylos hear from=<from> from_agent_id=<from_agent_id> to=<to> to_agent_id=<to_agent_id>` line using the inbound payload fields directly.
 - when an outbound `stylos_request_talk` call is accepted, the sender-side TUI emits `Stylos talk to=<hostname>:<pid> from=<hostname>:<pid>` using the same exact identifier format.
 - `notes/request` accepts note-creation delivery for a target instance and agent; sender instance and sender agent identity are resolved automatically by the local runtime.
-- when an inbound Stylos note delivery is accepted for local processing, the receiver-side TUI emits `Board note intake note_id=<uuid> from=<from> from_agent_id=<from_agent_id> to=<to> to_agent_id=<to_agent_id> column=todo` rather than reusing `Stylos hear ...` talk logging.
-- when a receiver-side note delivery is stored successfully, the runtime emits `created board note in db note_id=<uuid> from=<from> from_agent_id=<from_agent_id> to=<to> to_agent_id=<to_agent_id> column=todo`.
+- when an inbound Stylos note delivery is accepted for local processing, the receiver-side TUI emits `Board note intake note_slug=<slug> from=<from> from_agent_id=<from_agent_id> to=<to> to_agent_id=<to_agent_id> column=todo` rather than reusing `Stylos hear ...` talk logging.
+- when a receiver-side note delivery is stored successfully, the runtime emits `created board note in db note_slug=<slug> from=<from> from_agent_id=<from_agent_id> to=<to> to_agent_id=<to_agent_id> column=todo`.
 - receiver-side inbound note logging and talk logging remain distinct; one inbound note delivery must not surface as a `Stylos hear ...` talk event.
 - `talk` keeps acknowledgement-oriented semantics: it reports delivery acceptance or rejection and does not wait for the remote agent’s final natural-language answer.
 - when the target agent is busy and `wait_for_idle_timeout_ms` is positive, the CLI query layer polls the exported snapshot until the peer becomes `idle` or `nap` or the timeout expires; timeout produces `timed_out_waiting_for_idle`.
@@ -385,6 +385,7 @@ Current behavior:
 
 - note records live in the main `system.db` SQLite database
 - each note stores canonical UUID `note_id`, globally unique human-friendly `note_slug`, optional sender identity, exact target instance `<hostname>:<pid>`, target `agent_id`, body, board column, result text, and millisecond timestamps
+- chat-panel/operator-facing note lifecycle events prefer `note_slug` as the visible note identifier, while tools, storage, and prompt metadata keep canonical UUID `note_id` where machine identity is required
 - board columns are `todo`, `in_progress`, `blocked`, and `done`
 - newly created notes start in `todo` by default, or may start in `blocked` for waiting-first follow-up work
 - notes are model-visible through dedicated `board_*` note tools rather than transcript scraping

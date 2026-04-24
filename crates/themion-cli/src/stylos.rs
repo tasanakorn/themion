@@ -760,6 +760,7 @@ struct NoteReply {
     agent_id: String,
     request_id: Option<String>,
     note_id: Option<String>,
+    note_slug: Option<String>,
     reason: Option<String>,
 }
 
@@ -1491,6 +1492,7 @@ async fn handle_note_delivery_query(
             agent_id: String::new(),
             request_id: None,
             note_id: None,
+            note_slug: None,
             reason: Some("invalid_request".to_string()),
         };
     };
@@ -1500,6 +1502,7 @@ async fn handle_note_delivery_query(
             agent_id: req.to_agent_id,
             request_id: req.request_id,
             note_id: None,
+            note_slug: None,
             reason: Some("snapshot_unavailable".to_string()),
         };
     };
@@ -1513,6 +1516,7 @@ async fn handle_note_delivery_query(
             agent_id: req.to_agent_id,
             request_id: req.request_id,
             note_id: None,
+            note_slug: None,
             reason: Some("not_found".to_string()),
         };
     };
@@ -1526,6 +1530,7 @@ async fn handle_note_delivery_query(
                 agent_id: agent.agent_id,
                 request_id: req.request_id,
                 note_id: None,
+                note_slug: None,
                 reason: Some("invalid_column".to_string()),
             }
         }
@@ -1539,6 +1544,7 @@ async fn handle_note_delivery_query(
                 agent_id: agent.agent_id,
                 request_id: req.request_id,
                 note_id: None,
+                note_slug: None,
                 reason: Some("invalid_note_kind".to_string()),
             }
         }
@@ -1565,8 +1571,8 @@ async fn handle_note_delivery_query(
     match created {
         Ok(note) => {
             let _ = query_context.submit_event(format!(
-                "created board note in db note_id={} from={} from_agent_id={} to={} to_agent_id={} column={}",
-                note.note_id,
+                "created board note in db note_slug={} from={} from_agent_id={} to={} to_agent_id={} column={}",
+                note.note_slug,
                 note.from_instance.as_deref().unwrap_or("unknown sender"),
                 note.from_agent_id.as_deref().unwrap_or("unknown"),
                 note.to_instance,
@@ -1600,6 +1606,7 @@ async fn handle_note_delivery_query(
                 agent_id: agent.agent_id,
                 request_id: req.request_id,
                 note_id: Some(note_id),
+                note_slug: Some(note.note_slug),
                 reason: None,
             }
         }
@@ -1608,6 +1615,7 @@ async fn handle_note_delivery_query(
             agent_id: agent.agent_id,
             request_id: req.request_id,
             note_id: None,
+            note_slug: None,
             reason: Some(err.to_string()),
         },
     }

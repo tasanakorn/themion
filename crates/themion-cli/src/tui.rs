@@ -1738,8 +1738,8 @@ impl<'a> App<'a> {
             &note.body,
         );
         self.push(Entry::RemoteEvent(format!(
-            "Board note injection note_id={} to={} to_agent_id={} column={}",
-            note.note_id,
+            "Board note injection note_slug={} to={} to_agent_id={} column={}",
+            note.note_slug,
             note.to_instance,
             note.to_agent_id,
             note.column.as_str()
@@ -1781,7 +1781,7 @@ impl<'a> App<'a> {
         if note.column != themion_core::db::NoteColumn::Done {
             let prompt = format!(
                 "This turn ended but note {} is still in {}. You still have a pending board task. Continue handling this note now. Decide from the note context whether any real action remains. If no further action is needed, move the note to done in this turn. Otherwise keep progressing it through the board workflow and do not end the turn while it is still pending.",
-                note.note_id,
+                note.note_slug,
                 note.column.as_str(),
             );
             self.active_incoming_prompt = Some(remote);
@@ -1845,6 +1845,7 @@ Result:
                     serde_json::json!({
                         "accepted": true,
                         "note_id": done_note.note_id,
+                        "note_slug": done_note.note_slug,
                         "agent_id": done_note.to_agent_id,
                     })
                     .to_string()
@@ -1854,19 +1855,20 @@ Result:
 
         match create_reply {
             Ok(reply) => {
-                let created_note_id = serde_json::from_str::<serde_json::Value>(&reply)
+                let created_note_slug = serde_json::from_str::<serde_json::Value>(&reply)
                     .ok()
                     .and_then(|value| {
                         value
-                            .get("note_id")
+                            .get("note_slug")
+                            .or_else(|| value.get("note_id"))
                             .and_then(|v| v.as_str())
                             .map(str::to_string)
                     })
                     .unwrap_or_else(|| "unknown".to_string());
                 let _ = self.db.mark_board_note_completion_notified(&note.note_id);
                 self.push(Entry::RemoteEvent(format!(
-                    "Board done mention note_id={} origin_note_id={} to={} to_agent_id={}",
-                    created_note_id, note.note_id, to_instance, to_agent_id,
+                    "Board done mention note_slug={} origin_note_slug={} to={} to_agent_id={}",
+                    created_note_slug, note.note_slug, to_instance, to_agent_id,
                 )));
             }
             Err(err) => {
@@ -2320,6 +2322,28 @@ fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Lin
     }
 
     lines
+}
+
+
+#[cfg(feature = "stylos")]
+fn stylos_note_header_value<'a>(prompt: &'a str, key: &str) -> Option<&'a str> {
+    let prefix = format!("{key}=");
+    prompt
+        .lines()
+        .next()?
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix(&prefix))
+}
+
+#[cfg(feature = "stylos")]
+fn stylos_note_display_identifier(prompt: &str) -> String {
+    if let Some(note_slug) = stylos_note_header_value(prompt, "note_slug") {
+        format!("note_slug={note_slug}")
+    } else if let Some(note_id) = stylos_note_header_value(prompt, "note_id") {
+        format!("note_id={note_id}")
+    } else {
+        "note_id=unknown".to_string()
+    }
 }
 
 fn scroll_from_bottom(offset_from_bottom: usize, total_visual: usize, height: usize) -> u16 {
@@ -2842,19 +2866,10 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     let target_instance = request.to.as_deref().unwrap_or("unknown target");
                     let target_agent = request.to_agent_id.as_deref().unwrap_or(target.as_str());
                     if request.prompt.starts_with("type=stylos_note ") {
-                        let note_id = request
-                            .prompt
-                            .lines()
-                            .next()
-                            .and_then(|line| {
-                                line.split_whitespace()
-                                    .find(|part| part.starts_with("note_id="))
-                            })
-                            .and_then(|part| part.strip_prefix("note_id="))
-                            .unwrap_or("unknown");
+                        let note_identifier = stylos_note_display_identifier(&request.prompt);
                         app.push(Entry::RemoteEvent(format!(
-                            "Board note intake note_id={} from={} from_agent_id={} to={} to_agent_id={} deferred: local agent busy",
-                            note_id, sender, sender_agent, target_instance, target_agent
+                            "Board note intake {} from={} from_agent_id={} to={} to_agent_id={} deferred: local agent busy",
+                            note_identifier, sender, sender_agent, target_instance, target_agent
                         )));
                     } else {
                         app.push(Entry::RemoteEvent(format!(
@@ -2881,29 +2896,12 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     let target_instance = request.to.as_deref().unwrap_or("unknown target");
                     let target_agent = request.to_agent_id.as_deref().unwrap_or(target.as_str());
                     if request.prompt.starts_with("type=stylos_note ") {
-                        let note_id = request
-                            .prompt
-                            .lines()
-                            .next()
-                            .and_then(|line| {
-                                line.split_whitespace()
-                                    .find(|part| part.starts_with("note_id="))
-                            })
-                            .and_then(|part| part.strip_prefix("note_id="))
-                            .unwrap_or("unknown");
-                        let column = request
-                            .prompt
-                            .lines()
-                            .next()
-                            .and_then(|line| {
-                                line.split_whitespace()
-                                    .find(|part| part.starts_with("column="))
-                            })
-                            .and_then(|part| part.strip_prefix("column="))
+                        let note_identifier = stylos_note_display_identifier(&request.prompt);
+                        let column = stylos_note_header_value(&request.prompt, "column")
                             .unwrap_or("unknown");
                         app.push(Entry::RemoteEvent(format!(
-                            "Board note intake note_id={} from={} from_agent_id={} to={} to_agent_id={} column={}",
-                            note_id, sender, sender_agent, target_instance, target_agent, column
+                            "Board note intake {} from={} from_agent_id={} to={} to_agent_id={} column={}",
+                            note_identifier, sender, sender_agent, target_instance, target_agent, column
                         )));
                     } else {
                         app.push(Entry::RemoteEvent(format!(
@@ -3176,6 +3174,25 @@ mod tests {
             label: agent_id.to_string(),
             roles: roles.iter().map(|r| r.to_string()).collect(),
         }
+    }
+
+
+    #[test]
+    fn stylos_note_display_identifier_prefers_slug() {
+        let prompt = "type=stylos_note note_id=123e4567-e89b-12d3-a456-426614174000 note_slug=fix-tests-123e4567 column=todo\n\nbody";
+        assert_eq!(
+            stylos_note_display_identifier(prompt),
+            "note_slug=fix-tests-123e4567"
+        );
+    }
+
+    #[test]
+    fn stylos_note_display_identifier_falls_back_to_note_id() {
+        let prompt = "type=stylos_note note_id=123e4567-e89b-12d3-a456-426614174000 column=todo\n\nbody";
+        assert_eq!(
+            stylos_note_display_identifier(prompt),
+            "note_id=123e4567-e89b-12d3-a456-426614174000"
+        );
     }
 
     #[test]
