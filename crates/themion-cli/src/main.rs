@@ -2,11 +2,14 @@ mod auth_store;
 mod config;
 mod login_codex;
 mod paste_burst;
+mod runtime_domains;
 #[cfg(feature = "stylos")]
 mod stylos;
 mod tui;
 use config::{Config, ProfileConfig};
+use runtime_domains::RuntimeDomains;
 use std::collections::HashMap;
+use std::sync::Arc;
 use themion_core::agent::TurnStats;
 use themion_core::ModelInfo;
 
@@ -89,10 +92,8 @@ impl Session {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let cfg = Config::load()?;
-
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     let (project_dir_override, remaining_args) = {
@@ -114,63 +115,87 @@ async fn main() -> anyhow::Result<()> {
     };
 
     if !remaining_args.is_empty() {
-        let prompt = remaining_args.join(" ");
-
-        let project_dir = project_dir_override
-            .unwrap_or_else(|| {
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-            })
-            .canonicalize()
-            .unwrap_or_else(|_| {
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-            });
-
-        let db = match dirs::data_dir() {
-            Some(d) => themion_core::db::open_default_in_data_dir(&d).unwrap_or_else(|_| {
-                themion_core::db::DbHandle::open_in_memory().expect("in-memory db")
-            }),
-            None => themion_core::db::DbHandle::open_in_memory().expect("in-memory db"),
-        };
-
-        let session_id = uuid::Uuid::new_v4();
-        let _ = db.insert_session(session_id, &project_dir, false);
-
-        let client: Box<dyn themion_core::ChatBackend + Send + Sync> =
-            if cfg.provider == "openai-codex" {
-                let auth = auth_store::load()
-                    .unwrap_or(None)
-                    .ok_or_else(|| anyhow::anyhow!("no codex auth; run /login codex first"))?;
-                Box::new(themion_core::client_codex::CodexClient::new(
-                    cfg.base_url,
-                    auth,
-                    Box::new(|a: &themion_core::CodexAuth| auth_store::save(a)),
-                ))
-            } else {
-                Box::new(themion_core::client::ChatClient::new(
-                    cfg.base_url,
-                    cfg.api_key,
-                ))
-            };
-        let mut agent = themion_core::agent::Agent::new_with_db(
-            client,
-            cfg.model,
-            cfg.system_prompt,
-            session_id,
-            project_dir,
-            db,
-        );
-        #[cfg(feature = "stylos")]
-        {
-            agent.set_local_agent_id(Some("main".to_string()));
-            agent.set_local_instance_id(Some(stylos::derive_local_instance_id()));
-        }
-        agent.refresh_model_info().await;
-        let (result, stats) = agent.run_loop(&prompt).await?;
-        println!("{result}");
-        eprintln!("{}", format_stats(&stats));
+        let runtime_domains = Arc::new(RuntimeDomains::for_print_mode()?);
+        runtime_domains.core().block_on(run_print_mode(
+            cfg,
+            project_dir_override,
+            remaining_args,
+            runtime_domains,
+        ))
     } else {
-        tui::run(cfg, project_dir_override).await?;
+        let runtime_domains = Arc::new(RuntimeDomains::for_tui_mode()?);
+        let tui_runtime = runtime_domains
+            .tui()
+            .expect("tui runtime available in TUI mode");
+        let runtime_domains_for_run = runtime_domains.clone();
+        let result = tui_runtime.block_on(async move {
+            tui::run(cfg, project_dir_override, runtime_domains_for_run).await
+        });
+        drop(tui_runtime);
+        drop(runtime_domains);
+        result
     }
+}
 
+async fn run_print_mode(
+    cfg: Config,
+    project_dir_override: Option<std::path::PathBuf>,
+    remaining_args: Vec<String>,
+    _runtime_domains: Arc<RuntimeDomains>,
+) -> anyhow::Result<()> {
+    let prompt = remaining_args.join(" ");
+
+    let project_dir = project_dir_override
+        .unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        })
+        .canonicalize()
+        .unwrap_or_else(|_| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        });
+
+    let db = match dirs::data_dir() {
+        Some(d) => themion_core::db::open_default_in_data_dir(&d).unwrap_or_else(|_| {
+            themion_core::db::DbHandle::open_in_memory().expect("in-memory db")
+        }),
+        None => themion_core::db::DbHandle::open_in_memory().expect("in-memory db"),
+    };
+
+    let session_id = uuid::Uuid::new_v4();
+    let _ = db.insert_session(session_id, &project_dir, false);
+
+    let client: Box<dyn themion_core::ChatBackend + Send + Sync> =
+        if cfg.provider == "openai-codex" {
+            let auth = auth_store::load()
+                .unwrap_or(None)
+                .ok_or_else(|| anyhow::anyhow!("no codex auth; run /login codex first"))?;
+            Box::new(themion_core::client_codex::CodexClient::new(
+                cfg.base_url,
+                auth,
+                Box::new(|a: &themion_core::CodexAuth| auth_store::save(a)),
+            ))
+        } else {
+            Box::new(themion_core::client::ChatClient::new(
+                cfg.base_url,
+                cfg.api_key,
+            ))
+        };
+    let mut agent = themion_core::agent::Agent::new_with_db(
+        client,
+        cfg.model,
+        cfg.system_prompt,
+        session_id,
+        project_dir,
+        db,
+    );
+    #[cfg(feature = "stylos")]
+    {
+        agent.set_local_agent_id(Some("main".to_string()));
+        agent.set_local_instance_id(Some(stylos::derive_local_instance_id()));
+    }
+    agent.refresh_model_info().await;
+    let (result, stats) = agent.run_loop(&prompt).await?;
+    println!("{result}");
+    eprintln!("{}", format_stats(&stats));
     Ok(())
 }

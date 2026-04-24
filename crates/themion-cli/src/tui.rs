@@ -1,4 +1,5 @@
 use crate::config::{save_profiles, Config, ProfileConfig};
+use crate::runtime_domains::{DomainHandle, RuntimeDomains};
 #[cfg(feature = "stylos")]
 use crate::stylos::{
     tool_bridge, IncomingPromptRequest, StylosHandle, StylosRuntimeState, StylosToolBridge,
@@ -6,7 +7,7 @@ use crate::stylos::{
 use crate::{format_stats, Session};
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode,
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode,
         KeyModifiers, MouseEventKind,
     },
     event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
@@ -34,7 +35,6 @@ use themion_core::workflow::WorkflowState;
 use themion_core::ModelInfo;
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc};
-use tokio_stream::StreamExt;
 use tui_textarea::CursorMove;
 use tui_textarea::TextArea;
 use unicode_width::UnicodeWidthChar;
@@ -239,9 +239,9 @@ struct FrameRequester {
 }
 
 impl FrameRequester {
-    fn new(draw_tx: broadcast::Sender<()>) -> Self {
+    fn new(draw_tx: broadcast::Sender<()>, domain: &DomainHandle) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(FrameScheduler::new(rx, draw_tx).run());
+        domain.spawn(FrameScheduler::new(rx, draw_tx).run());
         Self { tx }
     }
 
@@ -848,9 +848,10 @@ impl<'a> App<'a> {
         }
     }
 
+
     fn refresh_stylos_status(&self) {
         #[cfg(feature = "stylos")]
-        if let Some(handle) = self.stylos.as_ref() {
+        if self.stylos.is_some() {
             if validate_agent_roles(&self.agents).is_err() {
                 return;
             }
@@ -942,11 +943,15 @@ impl<'a> App<'a> {
                         >,
                     >
             });
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(handle.set_snapshot_provider(provider));
-            });
+            if let Some(handle) = self.stylos.as_ref() {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(handle.set_snapshot_provider(provider));
+                });
+            }
         }
     }
+
+
 
     fn handle_agent_event(
         &mut self,
@@ -961,10 +966,8 @@ impl<'a> App<'a> {
                 {
                     if let Some(task_id) = remote.task_id.clone() {
                         let query_context = handle.query_context();
-                        tokio::task::block_in_place(|| {
-                            tokio::runtime::Handle::current().block_on(async move {
-                                query_context.task_registry().set_running(&task_id).await;
-                            });
+                        tokio::spawn(async move {
+                            query_context.task_registry().set_running(&task_id).await;
                         });
                     }
                 }
@@ -1029,14 +1032,14 @@ impl<'a> App<'a> {
             AgentEvent::WorkflowStateChanged(state) => {
                 self.workflow_state = state;
                 self.mark_dirty_status();
-                self.refresh_stylos_status();
+        
             }
             AgentEvent::Stats(text) => {
                 if let Some(json) = text.strip_prefix("[rate-limit] ") {
                     if let Ok(report) = serde_json::from_str::<ApiCallRateLimitReport>(json) {
                         self.status_rate_limits = Some(report);
                         self.mark_dirty_status();
-                        self.refresh_stylos_status();
+                
                     }
                     return;
                 }
@@ -1052,13 +1055,11 @@ impl<'a> App<'a> {
                     if let Some(task_id) = remote.task_id {
                         let result_text = self.last_assistant_text.clone();
                         let query_context = handle.query_context();
-                        tokio::task::block_in_place(|| {
-                            tokio::runtime::Handle::current().block_on(async move {
-                                query_context
-                                    .task_registry()
-                                    .set_completed(&task_id, result_text, None)
-                                    .await;
-                            });
+                        tokio::spawn(async move {
+                            query_context
+                                .task_registry()
+                                .set_completed(&task_id, result_text, None)
+                                .await;
                         });
                     }
                 }
@@ -1670,6 +1671,7 @@ impl<'a> App<'a> {
                 self.push(Entry::Assistant(line));
             }
             self.push(Entry::Blank);
+            self.mark_dirty_input();
             return;
         }
 
@@ -1880,9 +1882,11 @@ Result:
         }
     }
 
-    fn submit_input(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) {
+    fn submit_input(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) -> bool {
         let text: String = self.input.lines().join("\n");
+        let was_dirty = self.dirty.any();
         self.submit_text(text, app_tx);
+        self.dirty.any() && !was_dirty
     }
 }
 
@@ -2504,7 +2508,11 @@ fn draw(f: &mut Frame, app: &App) {
     }
 }
 
-pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+pub async fn run(
+    cfg: Config,
+    dir_override: Option<std::path::PathBuf>,
+    runtime_domains: Arc<RuntimeDomains>,
+) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(
@@ -2561,27 +2569,38 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
     let session = Session::from_config(cfg);
     let (app_tx, mut app_rx) = mpsc::unbounded_channel::<AppEvent>();
 
+    let tui_domain = runtime_domains.tui().expect("tui runtime available in TUI mode");
+    #[cfg(feature = "stylos")]
+    let network_domain = runtime_domains.network();
+
     let app_tx_input = app_tx.clone();
-    tokio::spawn(async move {
-        let mut stream = EventStream::new();
-        while let Some(Ok(ev)) = stream.next().await {
-            match ev {
-                Event::Key(key) => {
-                    let _ = app_tx_input.send(AppEvent::Key(key));
+    std::thread::spawn(move || {
+        loop {
+            match event::read() {
+                Ok(Event::Key(key)) => {
+                    if app_tx_input.send(AppEvent::Key(key)).is_err() {
+                        break;
+                    }
                 }
-                Event::Mouse(m) => {
-                    let _ = app_tx_input.send(AppEvent::Mouse(m));
+                Ok(Event::Mouse(m)) => {
+                    if app_tx_input.send(AppEvent::Mouse(m)).is_err() {
+                        break;
+                    }
                 }
-                Event::Paste(text) => {
-                    let _ = app_tx_input.send(AppEvent::Paste(text));
+                Ok(Event::Paste(text)) => {
+                    if app_tx_input.send(AppEvent::Paste(text)).is_err() {
+                        break;
+                    }
                 }
-                _ => {}
+                Ok(_) => {}
+                Err(_) => break,
             }
         }
     });
 
     let app_tx_tick = app_tx.clone();
-    tokio::spawn(async move {
+    let tui_domain_for_tick = tui_domain.clone();
+    tui_domain_for_tick.spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(150));
         loop {
             interval.tick().await;
@@ -2592,8 +2611,31 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
     });
 
     #[cfg(feature = "stylos")]
-    let stylos_handle =
-        Some(crate::stylos::start(&stylos_cfg, &session, &project_dir, db.clone()).await);
+    let stylos_handle = Some(
+        match network_domain
+            .spawn({
+                let stylos_cfg = stylos_cfg.clone();
+                let session = session.clone();
+                let project_dir = project_dir.clone();
+                let db = db.clone();
+                let network_domain = network_domain.clone();
+                async move {
+                    crate::stylos::start(
+                        &stylos_cfg,
+                        &session,
+                        &project_dir,
+                        db,
+                        network_domain,
+                    )
+                    .await
+                }
+            })
+            .await
+        {
+            Ok(handle) => handle,
+            Err(err) => return Err(anyhow::anyhow!("failed to start stylos runtime: {}", err)),
+        },
+    );
 
     let mut app = App::new(
         session,
@@ -2604,13 +2646,15 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
         stylos_handle,
     );
 
+
+    #[cfg(feature = "stylos")]
     app.refresh_stylos_status();
 
     #[cfg(feature = "stylos")]
     if let Some(handle) = app.stylos.as_mut() {
         if let Some(mut cmd_rx) = handle.take_cmd_rx() {
             let app_tx_cmd = app_tx.clone();
-            tokio::spawn(async move {
+            tui_domain.spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     let _ = app_tx_cmd.send(AppEvent::StylosCmd(cmd));
                 }
@@ -2618,7 +2662,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
         }
         if let Some(mut prompt_rx) = handle.take_prompt_rx() {
             let app_tx_prompt = app_tx.clone();
-            tokio::spawn(async move {
+            tui_domain.spawn(async move {
                 while let Some(request) = prompt_rx.recv().await {
                     let _ = app_tx_prompt.send(AppEvent::IncomingPrompt(request));
                 }
@@ -2626,7 +2670,7 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
         }
         if let Some(mut event_rx) = handle.take_event_rx() {
             let app_tx_event = app_tx.clone();
-            tokio::spawn(async move {
+            tui_domain.spawn(async move {
                 while let Some(event) = event_rx.recv().await {
                     let _ = app_tx_event.send(AppEvent::StylosEvent(event));
                 }
@@ -2635,7 +2679,9 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
     }
 
     let (draw_tx, mut draw_rx) = broadcast::channel::<()>(8);
-    let frame_requester = FrameRequester::new(draw_tx);
+    let frame_requester = FrameRequester::new(draw_tx, &tui_domain);
+    terminal.draw(|f| draw(f, &app))?;
+    app.dirty.clear();
     app.request_draw(&frame_requester);
 
     while app.running {
@@ -2672,9 +2718,6 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
             }
             Some(AppEvent::Key(key)) => {
                 app.activity_counters.input_key_count += 1;
-                if key.kind != event::KeyEventKind::Press {
-                    continue;
-                }
 
                 let now = Instant::now();
                 match app.paste_burst.flush_if_due(now) {
@@ -2753,7 +2796,9 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                     (KeyCode::Esc, _) if app.agent_busy => app.request_interrupt(),
                     (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
                         let tx = app_tx.clone();
-                        app.submit_input(&tx);
+                        if app.submit_input(&tx) {
+                            app.request_draw(&frame_requester);
+                        }
                     }
                     (KeyCode::Enter, KeyModifiers::NONE) => {
                         if app.review_mode != ReviewMode::Closed {
@@ -2765,7 +2810,9 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                             app.paste_burst.extend_window(now);
                         } else {
                             let tx = app_tx.clone();
-                            app.submit_input(&tx);
+                            if app.submit_input(&tx) {
+                                app.request_draw(&frame_requester);
+                            }
                         }
                     }
                     (KeyCode::Enter, KeyModifiers::SHIFT)
@@ -2881,13 +2928,11 @@ pub async fn run(cfg: Config, dir_override: Option<std::path::PathBuf>) -> anyho
                         (app.stylos.as_ref(), request.task_id.clone())
                     {
                         let query_context = handle.query_context();
-                        tokio::task::block_in_place(|| {
-                            tokio::runtime::Handle::current().block_on(async move {
-                                query_context
-                                    .task_registry()
-                                    .set_failed(&task_id, "agent_busy".to_string())
-                                    .await;
-                            });
+                        tokio::spawn(async move {
+                            query_context
+                                .task_registry()
+                                .set_failed(&task_id, "agent_busy".to_string())
+                                .await;
                         });
                     }
                 } else {

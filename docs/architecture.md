@@ -87,29 +87,35 @@ Themion normally runs as a single OS process.
 
 In both print mode and TUI mode, `crates/themion-cli/src/main.rs` uses `#[tokio::main]`, and the repository does not currently override that with a custom Tokio runtime builder. In practice, this means the app uses Tokio's default runtime setup for that macro rather than a repository-specific thread layout.
 
-A useful mental model is:
+A useful mental model is now:
 
 ```text
 themion process
-└─ Tokio runtime
-   ├─ main startup path
-   ├─ TUI event loop            (TUI mode only)
-   ├─ input event task          (TUI mode only)
-   ├─ periodic tick task        (TUI mode only, 150 ms)
-   ├─ agent run task(s)
-   ├─ agent/event bridge task(s)
-   └─ Stylos background tasks   (feature-enabled builds only)
+├─ Tokio runtime domain: tui         (TUI mode only, current-thread)
+│  ├─ TUI event loop
+│  ├─ input event task
+│  ├─ periodic tick task
+│  ├─ frame scheduler
+│  └─ TUI-side bridge tasks
+├─ Tokio runtime domain: core        (multi-thread)
+│  ├─ main startup coordination
+│  ├─ print-mode agent turns
+│  └─ core harness/orchestration work
+├─ Tokio runtime domain: network     (multi-thread)
+│  └─ Stylos long-lived networking tasks
+└─ Tokio runtime domain: background  (multi-thread, reserved in phase 1)
 ```
 
-The code in this repository is written primarily in async style with `tokio::spawn`, so the most important concurrency boundary for understanding runtime behavior is usually the task/event model rather than naming individual OS threads ahead of time.
+`crates/themion-cli/src/main.rs` now constructs these runtime domains explicitly through a CLI-local runtime-topology helper instead of relying on `#[tokio::main]`. The most important concurrency boundary is still the task/event model, but the repository now also has explicit executor-domain ownership for major workload classes.
 
-For debugging, the practical thread model is still useful:
+For debugging, the practical thread model is now:
 
 - one Themion process
-- Tokio-managed runtime thread(s)
-- one central app event loop in TUI mode
+- explicit Tokio runtime domains owned by `themion-cli`
+- one current-thread TUI runtime in TUI mode
+- separate multi-thread core and network runtimes
+- a reserved background runtime domain for lower-priority work
 - multiple async tasks communicating through unbounded `mpsc` channels
-- optional extra background tasks when the `stylos` feature is enabled
 
 ### TUI mode structure
 
@@ -126,9 +132,9 @@ The CLI keeps redraw requests separate from draw execution. Internal event paths
 
 Around that loop, the current implementation starts these long-lived tasks:
 
-- an input task using `EventStream::new()` to forward keyboard, mouse, and paste events into the app channel
-- a periodic tick task using `tokio::time::interval(Duration::from_millis(150))` to send `AppEvent::Tick`
-- bridge tasks that forward agent events or Stylos events into the same app event channel
+- an input task using `EventStream::new()` to forward keyboard, mouse, and paste events into the app channel on the TUI runtime domain
+- a periodic tick task using `tokio::time::interval(Duration::from_millis(150))` to send `AppEvent::Tick` on the TUI runtime domain
+- bridge tasks that forward agent events or Stylos events into the same app event channel on the TUI runtime domain
 
 That makes the TUI architecture event-driven rather than thread-per-subsystem.
 
@@ -146,7 +152,7 @@ So the user-visible app behaves like one interactive process coordinating backgr
 
 ### Stylos-enabled background tasks
 
-When built with the `stylos` cargo feature and enabled in config, `crates/themion-cli/src/stylos.rs` adds a few more long-lived background tasks inside the same process.
+When built with the `stylos` cargo feature and enabled in config, `crates/themion-cli/src/stylos.rs` adds a few more long-lived networking tasks inside the same process. In the current phase-1 implementation, these long-lived Stylos tasks run on the explicit `network` runtime domain.
 
 Current examples include:
 

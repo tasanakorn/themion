@@ -47,13 +47,31 @@ A single user turn follows this shape:
 
 This keeps reusable harness behavior in core while allowing the CLI to publish process-level multi-agent status for Stylos.
 
+## CLI-local runtime domains
+
+`themion-cli` now owns explicit Tokio runtime construction through a CLI-local runtime topology helper.
+
+Current phase-1 runtime domains:
+
+- `tui` — current-thread runtime for TUI event intake, tick scheduling, frame scheduling, and TUI-side bridge tasks
+- `core` — multi-thread runtime for startup coordination, print-mode execution, and core harness orchestration paths
+- `network` — multi-thread runtime for long-lived Stylos networking tasks
+- `background` — reserved multi-thread runtime domain for lower-priority maintenance work in this phase
+
+Mode differences:
+
+- TUI mode constructs `tui`, `core`, `network`, and `background`
+- print mode constructs only the currently needed reduced set, which in phase 1 is `core` and `network`
+
+This preserves the single-process architecture while making runtime ownership explicit in startup code.
+
 ## Stylos remote-request bridge
 
 Stylos request handling stays CLI-local even when it ultimately causes an agent turn.
 
 In the current implementation:
 
-- Stylos queryables are registered in `crates/themion-cli/src/stylos.rs`
+- Stylos queryables are registered in `crates/themion-cli/src/stylos.rs` and their long-lived serving/publishing/subscription tasks now run on the CLI-owned `network` runtime domain
 - query handlers read the current exported process snapshot from a snapshot provider set by the TUI runtime
 - accepted `talk`, durable `notes/request`, and `tasks/request` queries are converted into `IncomingPromptRequest` values or persisted note records and sent over an in-process/local-runtime path
 - the TUI event loop receives those requests as `AppEvent::IncomingPrompt`

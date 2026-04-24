@@ -19,6 +19,8 @@ use themion_core::client_codex::ApiCallRateLimitReport;
 use themion_core::workflow::WorkflowState;
 use tokio::sync::{mpsc, Notify, RwLock};
 use tokio::task::JoinHandle;
+
+use crate::runtime_domains::DomainHandle;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -918,12 +920,13 @@ pub async fn start(
     session: &Session,
     project_dir: &PathBuf,
     notes_db: Arc<themion_core::db::DbHandle>,
+    network_domain: DomainHandle,
 ) -> StylosHandle {
     if !settings.enabled() {
         return StylosHandle::off();
     }
 
-    match start_inner(settings, session, project_dir, notes_db).await {
+    match start_inner(settings, session, project_dir, notes_db, network_domain).await {
         Ok(handle) => handle,
         Err(err) => {
             let mut handle = StylosHandle::off();
@@ -938,6 +941,7 @@ async fn start_inner(
     session: &Session,
     project_dir: &PathBuf,
     notes_db: Arc<themion_core::db::DbHandle>,
+    network_domain: DomainHandle,
 ) -> Result<StylosHandle, String> {
     let key_instance = derive_local_instance_id();
     let identity_instance = key_instance
@@ -1007,7 +1011,7 @@ async fn start_inner(
     let status_realm = realm.clone();
     let status_instance = key_instance.clone();
     let status_activity_counters = activity_counters.clone();
-    let status_task = tokio::spawn(async move {
+    let status_task = network_domain.spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -1102,7 +1106,7 @@ async fn start_inner(
     let query_instance = key_instance.clone();
     let query_session_id = session.id.to_string();
     let query_activity_counters = activity_counters.clone();
-    let queryable_task = tokio::spawn(async move {
+    let queryable_task = network_domain.spawn(async move {
         let info_queryable = match q_session.declare_queryable(&q_info_key).await {
             Ok(q) => q,
             Err(_) => return,
@@ -1251,7 +1255,7 @@ async fn start_inner(
     let cmd_session = session_handle.clone();
     let cmd_key = format!("stylos/{}/themion/{}/cmd", realm, key_instance);
     let cmd_activity_counters = activity_counters.clone();
-    let cmd_task = tokio::spawn(async move {
+    let cmd_task = network_domain.spawn(async move {
         let subscriber = match cmd_session.declare_subscriber(&cmd_key).await {
             Ok(sub) => sub,
             Err(_) => return,
