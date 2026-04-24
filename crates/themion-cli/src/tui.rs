@@ -2463,7 +2463,7 @@ fn draw(f: &mut Frame, app: &App) {
         nav,
     );
     let bar_bottom = format!(
-        " {} | in:{} out:{} cached:{} | ctx:{} | PgUp/PgDn page | Alt-g latest | Alt-t review",
+        " {} | in:{} out:{} cached:{} | ctx:{}",
         build_rate_limit_statusline(app.status_rate_limits.as_ref()),
         format_human_count(app.session_tokens.tokens_in),
         format_human_count(app.session_tokens.tokens_out),
