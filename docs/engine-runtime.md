@@ -170,6 +170,7 @@ That means:
 - browsing old content does not alter `themion-core::Agent` message history, turn boundaries, SQLite persistence, tool semantics, or prompt assembly
 - streamed assistant chunks continue to arrive through normal `AgentEvent` handling; the CLI only changes whether the current viewport follows the latest content automatically
 - persistent history tools such as `history_recall` and `history_search` remain the mechanism for model-visible access to older stored history outside the current prompt window
+- these history tools are always scoped to the current project directory; omitted `session_id` means the active session, `session_id="*"` means all sessions in the current project, and explicit UUIDs only match sessions within that current project
 
 This feature improves user-facing review behavior without changing runtime semantics in `themion-core`.
 

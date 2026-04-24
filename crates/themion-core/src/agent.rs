@@ -953,7 +953,7 @@ impl Agent {
                 msgs_with_system.push(Message {
                     role: "system".to_string(),
                     content: Some(format!(
-                        "Note: {} earlier turn(s) (seq 1–{}) are stored in history. Use history_recall to load a range or history_search to find a keyword.",
+                        "Note: {} earlier turn(s) (seq 1–{}) are stored in history. Use history_recall or history_search without session_id for the current session, or pass session_id=\"*\" to search across all sessions in the current project.",
                         omitted, omitted
                     )),
                     tool_calls: None,

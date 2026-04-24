@@ -760,56 +760,71 @@ impl DbHandle {
     pub fn recall(&self, args: RecallArgs) -> Result<Vec<RecalledMessage>> {
         let limit = args.limit.min(200) as i64;
         let conn = self.conn.lock().unwrap();
-
-        let mut filters = Vec::new();
-        if args.session_id.is_some() {
-            filters.push("m.session_id = ?1");
-        }
-        if args.project_dir.is_some() {
-            filters.push("s.project_dir = ?2");
-        }
-        let where_clause = if filters.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", filters.join(" AND "))
-        };
+        let project_str = args.current_project_dir.to_string_lossy().into_owned();
 
         let order = match args.direction {
             RecallDirection::Newest => "DESC",
             RecallDirection::Oldest => "ASC",
         };
 
-        let sql = format!(
-            "SELECT t.turn_seq, m.role, m.content, m.tool_calls_json, m.tool_call_id
-             FROM agent_messages m
-             JOIN agent_turns t ON m.turn_id = t.turn_id
-             JOIN agent_sessions s ON m.session_id = s.session_id
-             {where_clause}
-             ORDER BY t.turn_seq {order}, m.seq {order}
-             LIMIT ?3"
-        );
-
-        let session_str = args.session_id.map(|u| u.to_string()).unwrap_or_default();
-        let project_str = args
-            .project_dir
-            .as_ref()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params![session_str, project_str, limit], |row| {
-            Ok(RecalledMessage {
-                turn_seq: row.get::<_, i64>(0)? as u32,
-                role: row.get(1)?,
-                content: row.get(2)?,
-                tool_calls_json: row.get(3)?,
-                tool_call_id: row.get(4)?,
-            })
-        })?;
-
         let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
+        match args.session_scope {
+            SessionScope::Current => {
+                anyhow::bail!("SessionScope::Current must be resolved before db recall");
+            }
+            SessionScope::AllInCurrentProject => {
+                let sql = format!(
+                    "SELECT m.session_id, t.turn_seq, m.role, m.content, m.tool_calls_json, m.tool_call_id
+                     FROM agent_messages m
+                     JOIN agent_turns t ON m.turn_id = t.turn_id
+                     JOIN agent_sessions s ON m.session_id = s.session_id
+                     WHERE s.project_dir = ?1
+                     ORDER BY s.created_at {order}, t.turn_seq {order}, m.seq {order}
+                     LIMIT ?2"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map(rusqlite::params![project_str, limit], |row| {
+                    Ok(RecalledMessage {
+                        session_id: row.get(0)?,
+                        turn_seq: row.get::<_, i64>(1)? as u32,
+                        role: row.get(2)?,
+                        content: row.get(3)?,
+                        tool_calls_json: row.get(4)?,
+                        tool_call_id: row.get(5)?,
+                    })
+                })?;
+                for r in rows {
+                    out.push(r?);
+                }
+            }
+            SessionScope::Exact(session_id) => {
+                let sql = format!(
+                    "SELECT m.session_id, t.turn_seq, m.role, m.content, m.tool_calls_json, m.tool_call_id
+                     FROM agent_messages m
+                     JOIN agent_turns t ON m.turn_id = t.turn_id
+                     JOIN agent_sessions s ON m.session_id = s.session_id
+                     WHERE m.session_id = ?1 AND s.project_dir = ?2
+                     ORDER BY t.turn_seq {order}, m.seq {order}
+                     LIMIT ?3"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map(
+                    rusqlite::params![session_id.to_string(), project_str, limit],
+                    |row| {
+                        Ok(RecalledMessage {
+                            session_id: row.get(0)?,
+                            turn_seq: row.get::<_, i64>(1)? as u32,
+                            role: row.get(2)?,
+                            content: row.get(3)?,
+                            tool_calls_json: row.get(4)?,
+                            tool_call_id: row.get(5)?,
+                        })
+                    },
+                )?;
+                for r in rows {
+                    out.push(r?);
+                }
+            }
         }
         Ok(out)
     }
@@ -1022,55 +1037,64 @@ impl DbHandle {
         }
         let limit = args.limit.min(100) as i64;
         let conn = self.conn.lock().unwrap();
-
-        let mut extra_filters = Vec::new();
-        if args.session_id.is_some() {
-            extra_filters.push("m.session_id = ?2");
-        }
-        if args.project_dir.is_some() {
-            extra_filters.push("s.project_dir = ?3");
-        }
-        let extra_where = if extra_filters.is_empty() {
-            String::new()
-        } else {
-            format!("AND {}", extra_filters.join(" AND "))
-        };
-
-        let sql = format!(
-            "SELECT m.session_id, t.turn_seq, m.role,
-                    snippet(agent_messages_fts, 0, '**', '**', '...', 16)
-             FROM agent_messages_fts
-             JOIN agent_messages m ON agent_messages_fts.rowid = m.message_id
-             JOIN agent_turns t ON m.turn_id = t.turn_id
-             JOIN agent_sessions s ON m.session_id = s.session_id
-             WHERE agent_messages_fts MATCH ?1
-             {extra_where}
-             LIMIT ?4"
-        );
-
-        let session_str = args.session_id.map(|u| u.to_string()).unwrap_or_default();
-        let project_str = args
-            .project_dir
-            .as_ref()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(
-            rusqlite::params![args.query, session_str, project_str, limit],
-            |row| {
-                Ok(SearchHit {
-                    session_id: row.get(0)?,
-                    turn_seq: row.get::<_, i64>(1)? as u32,
-                    role: row.get(2)?,
-                    snippet: row.get(3)?,
-                })
-            },
-        )?;
-
+        let project_str = args.current_project_dir.to_string_lossy().into_owned();
         let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
+
+        match args.session_scope {
+            SessionScope::Current => {
+                anyhow::bail!("SessionScope::Current must be resolved before db recall");
+            }
+            SessionScope::AllInCurrentProject => {
+                let sql = "SELECT m.session_id, t.turn_seq, m.role,
+                        snippet(agent_messages_fts, 0, '**', '**', '...', 16)
+                 FROM agent_messages_fts
+                 JOIN agent_messages m ON agent_messages_fts.rowid = m.message_id
+                 JOIN agent_turns t ON m.turn_id = t.turn_id
+                 JOIN agent_sessions s ON m.session_id = s.session_id
+                 WHERE agent_messages_fts MATCH ?1
+                   AND s.project_dir = ?2
+                 LIMIT ?3";
+                let mut stmt = conn.prepare(sql)?;
+                let rows =
+                    stmt.query_map(rusqlite::params![args.query, project_str, limit], |row| {
+                        Ok(SearchHit {
+                            session_id: row.get(0)?,
+                            turn_seq: row.get::<_, i64>(1)? as u32,
+                            role: row.get(2)?,
+                            snippet: row.get(3)?,
+                        })
+                    })?;
+                for r in rows {
+                    out.push(r?);
+                }
+            }
+            SessionScope::Exact(session_id) => {
+                let sql = "SELECT m.session_id, t.turn_seq, m.role,
+                        snippet(agent_messages_fts, 0, '**', '**', '...', 16)
+                 FROM agent_messages_fts
+                 JOIN agent_messages m ON agent_messages_fts.rowid = m.message_id
+                 JOIN agent_turns t ON m.turn_id = t.turn_id
+                 JOIN agent_sessions s ON m.session_id = s.session_id
+                 WHERE agent_messages_fts MATCH ?1
+                   AND m.session_id = ?2
+                   AND s.project_dir = ?3
+                 LIMIT ?4";
+                let mut stmt = conn.prepare(sql)?;
+                let rows = stmt.query_map(
+                    rusqlite::params![args.query, session_id.to_string(), project_str, limit],
+                    |row| {
+                        Ok(SearchHit {
+                            session_id: row.get(0)?,
+                            turn_seq: row.get::<_, i64>(1)? as u32,
+                            role: row.get(2)?,
+                            snippet: row.get(3)?,
+                        })
+                    },
+                )?;
+                for r in rows {
+                    out.push(r?);
+                }
+            }
         }
         Ok(out)
     }
@@ -1117,8 +1141,8 @@ fn map_note_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BoardNote> {
 }
 
 pub struct RecallArgs {
-    pub session_id: Option<uuid::Uuid>,
-    pub project_dir: Option<std::path::PathBuf>,
+    pub session_scope: SessionScope,
+    pub current_project_dir: std::path::PathBuf,
     pub limit: u32,
     pub direction: RecallDirection,
 }
@@ -1129,6 +1153,7 @@ pub enum RecallDirection {
 }
 
 pub struct RecalledMessage {
+    pub session_id: String,
     pub turn_seq: u32,
     pub role: String,
     pub content: Option<String>,
@@ -1138,9 +1163,16 @@ pub struct RecalledMessage {
 
 pub struct SearchArgs {
     pub query: String,
-    pub session_id: Option<uuid::Uuid>,
-    pub project_dir: Option<std::path::PathBuf>,
+    pub session_scope: SessionScope,
+    pub current_project_dir: std::path::PathBuf,
     pub limit: u32,
+}
+
+#[derive(Clone, Copy)]
+pub enum SessionScope {
+    Current,
+    Exact(uuid::Uuid),
+    AllInCurrentProject,
 }
 
 pub struct SearchHit {

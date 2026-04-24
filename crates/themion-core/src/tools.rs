@@ -1,5 +1,6 @@
 use crate::db::{
     CreateNoteArgs, DbHandle, NoteColumn, NoteKind, RecallArgs, RecallDirection, SearchArgs,
+    SessionScope,
 };
 use crate::workflow::{
     allowed_transitions, can_retry_current_phase, can_retry_previous_phase, can_transition,
@@ -16,8 +17,8 @@ use std::path::PathBuf;
 #[cfg(feature = "stylos")]
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::time::timeout;
 use std::time::Duration;
+use tokio::time::timeout;
 use uuid::Uuid;
 
 fn parse_note_column(value: &str) -> Option<NoteColumn> {
@@ -293,8 +294,7 @@ pub fn tool_definitions() -> Value {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "session_id": { "type": "string", "description": "UUID of session. Optional; omitted means use the active session." },
-                        "project_dir": { "type": "string", "description": "Filter by project directory." },
+                        "session_id": { "type": "string", "description": "Optional session selector. Omit for the active session, pass \"*\" for all sessions in the current project, or pass one session UUID in the current project." },
                         "limit": { "type": "integer", "description": "Max messages (default 20, max 200)." },
                         "direction": { "type": "string", "enum": ["newest", "oldest"] }
                     },
@@ -311,8 +311,7 @@ pub fn tool_definitions() -> Value {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string", "description": "FTS5 search query." },
-                        "session_id": { "type": "string", "description": "Limit to session UUID." },
-                        "project_dir": { "type": "string", "description": "Limit to project directory." },
+                        "session_id": { "type": "string", "description": "Optional session selector. Omit for the active session, pass \"*\" for all sessions in the current project, or pass one session UUID in the current project." },
                         "limit": { "type": "integer", "description": "Max results (default 10, max 100)." }
                     },
                     "required": ["query"]
@@ -656,22 +655,21 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             Ok(json!({"slept_ms": ms}).to_string())
         }
         "history_recall" | "recall_history" => {
-            let session_id = args["session_id"]
-                .as_str()
-                .and_then(|s| Uuid::parse_str(s).ok())
-                .or(Some(ctx.session_id));
-            let project_dir = args["project_dir"]
-                .as_str()
-                .map(PathBuf::from)
-                .or_else(|| Some(ctx.project_dir.clone()));
+            let session_scope = match args["session_id"].as_str() {
+                Some("*") => SessionScope::AllInCurrentProject,
+                Some(value) => SessionScope::Exact(
+                    Uuid::parse_str(value).map_err(|_| anyhow::anyhow!("invalid session_id"))?,
+                ),
+                None => SessionScope::Exact(ctx.session_id),
+            };
             let limit = args["limit"].as_u64().map(|n| n as u32).unwrap_or(20);
             let direction = match args["direction"].as_str() {
                 Some("oldest") => RecallDirection::Oldest,
                 _ => RecallDirection::Newest,
             };
             match ctx.db.recall(RecallArgs {
-                session_id,
-                project_dir,
+                session_scope,
+                current_project_dir: ctx.project_dir.clone(),
                 limit,
                 direction,
             }) {
@@ -680,7 +678,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                         .iter()
                         .map(|m| {
                             serde_json::json!({
-                                "turn_seq": m.turn_seq, "role": m.role, "content": m.content,
+                                "session_id": m.session_id, "turn_seq": m.turn_seq, "role": m.role, "content": m.content,
                                 "tool_calls": m.tool_calls_json, "tool_call_id": m.tool_call_id,
                             })
                         })
@@ -816,18 +814,18 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
         }
         "history_search" | "search_history" => {
             let query = args["query"].as_str().unwrap_or("").to_string();
-            let session_id = args["session_id"]
-                .as_str()
-                .and_then(|s| Uuid::parse_str(s).ok());
-            let project_dir = args["project_dir"]
-                .as_str()
-                .map(PathBuf::from)
-                .or_else(|| Some(ctx.project_dir.clone()));
+            let session_scope = match args["session_id"].as_str() {
+                Some("*") => SessionScope::AllInCurrentProject,
+                Some(value) => SessionScope::Exact(
+                    Uuid::parse_str(value).map_err(|_| anyhow::anyhow!("invalid session_id"))?,
+                ),
+                None => SessionScope::Exact(ctx.session_id),
+            };
             let limit = args["limit"].as_u64().map(|n| n as u32).unwrap_or(10);
             match ctx.db.search(SearchArgs {
                 query,
-                session_id,
-                project_dir,
+                session_scope,
+                current_project_dir: ctx.project_dir.clone(),
                 limit,
             }) {
                 Ok(hits) => Ok(serde_json::to_string(

@@ -75,6 +75,8 @@ tools.rs
   │    ├─ board_*  ──► local durable notes board operations
   │    └─ workflow_*  ──► workflow state inspection / transitions
   └─ ToolCtx { db: Arc<DbHandle>, session_id, project_dir }
+
+History tools are always scoped to the caller's current project directory. Callers cannot pass a `project_dir` override; omitted `session_id` means the active session, `session_id="*"` means all sessions in the current project, and explicit UUIDs only match sessions within that same current project.
 ```
 
 ## Process and thread model
@@ -192,9 +194,7 @@ Each call to `run_loop(user_input)`:
 [messages from turn (current − window_turns) … now]
 ```
 
-The recall hint is a synthetic `role="system"` message:
-
-> "Note: N earlier turn(s) (seq 1–N) are stored in history. Use history_recall to load a range or history_search to find a keyword."
+The recall hint is a synthetic `role="system"` message that reminds the model that omitted `session_id` stays in the current session and `session_id="*"` explicitly widens recall or search to all sessions in the current project.
 
 The full `messages` Vec is never trimmed — the in-memory copy is always complete. Windowing only affects what is sent over the wire.
 
