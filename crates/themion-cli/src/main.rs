@@ -164,22 +164,22 @@ async fn run_print_mode(
     let session_id = uuid::Uuid::new_v4();
     let _ = db.insert_session(session_id, &project_dir, false);
 
-    let client: Box<dyn themion_core::ChatBackend + Send + Sync> =
-        if cfg.provider == "openai-codex" {
-            let auth = auth_store::load()
-                .unwrap_or(None)
-                .ok_or_else(|| anyhow::anyhow!("no codex auth; run /login codex first"))?;
-            Box::new(themion_core::client_codex::CodexClient::new(
-                cfg.base_url,
-                auth,
-                Box::new(|a: &themion_core::CodexAuth| auth_store::save(a)),
-            ))
-        } else {
-            Box::new(themion_core::client::ChatClient::new(
-                cfg.base_url,
-                cfg.api_key,
-            ))
-        };
+    let client: Box<dyn themion_core::ChatBackend + Send + Sync> = if cfg.provider == "openai-codex"
+    {
+        let auth = auth_store::load()
+            .unwrap_or(None)
+            .ok_or_else(|| anyhow::anyhow!("no codex auth; run /login codex first"))?;
+        Box::new(themion_core::client_codex::CodexClient::new(
+            cfg.base_url,
+            auth,
+            Box::new(|a: &themion_core::CodexAuth| auth_store::save(a)),
+        ))
+    } else {
+        Box::new(themion_core::client::ChatClient::new(
+            cfg.base_url,
+            cfg.api_key,
+        ))
+    };
     let mut agent = themion_core::agent::Agent::new_with_db(
         client,
         cfg.model,
