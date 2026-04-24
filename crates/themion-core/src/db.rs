@@ -311,6 +311,7 @@ fn migrate_board_notes_identifiers(conn: &Connection) -> Result<()> {
 
 fn init_schema(conn: &Connection, fts5: bool) -> Result<()> {
     conn.execute_batch(SCHEMA_BASE)?;
+    crate::memory::init_schema(conn, fts5)?;
     ensure_column(conn, "agent_sessions", "current_workflow", "TEXT")?;
     ensure_column(conn, "agent_sessions", "current_phase", "TEXT")?;
     ensure_column(conn, "agent_sessions", "workflow_status", "TEXT")?;
@@ -1029,6 +1030,10 @@ impl DbHandle {
         )?;
         drop(conn);
         self.get_board_note(note_id)
+    }
+
+    pub fn memory_store(&self) -> crate::memory::MemoryStore<'_> {
+        crate::memory::MemoryStore::new(&self.conn, self.fts5)
     }
 
     pub fn search(&self, args: SearchArgs) -> Result<Vec<SearchHit>> {

@@ -2,6 +2,10 @@ use crate::db::{
     CreateNoteArgs, DbHandle, NoteColumn, NoteKind, RecallArgs, RecallDirection, SearchArgs,
     SessionScope,
 };
+use crate::memory::{
+    metadata_to_string, parse_hashtags_value, parse_nullable_string, CreateNodeArgs, HashtagMatch,
+    LinkNodesArgs, OpenGraphArgs, SearchNodesArgs, UpdateNodeArgs, GLOBAL_PROJECT_DIR,
+};
 use crate::workflow::{
     allowed_transitions, can_retry_current_phase, can_retry_previous_phase, can_transition,
     normalize_workflow_name, phase_instructions, previous_phase, start_phase_for_workflow,
@@ -45,6 +49,111 @@ fn board_note_to_json(note: &crate::db::BoardNote) -> Value {
         "updated_at_ms": note.updated_at_ms,
         "injected_at_ms": note.injected_at_ms,
     })
+}
+
+fn memory_tool(name: &str, description: &str, parameters: Value) -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": parameters,
+        }
+    })
+}
+
+fn memory_tool_definitions() -> Vec<Value> {
+    vec![
+        memory_tool("memory_create_node", "Create an intentional long-term memory knowledge-base node. Prefer specific KB node types such as concept, component, file, task, decision, fact, observation, troubleshooting, or person; use memory only for narrative capture when no more specific type fits.", json!({
+            "type":"object",
+            "properties":{
+                "node_id":{"type":"string","description":"Optional UUID. Generated when omitted."},
+                "project_dir":{"type":"string","description":"Optional memory project context. Defaults to the current session project_dir. Use exact [GLOBAL] for the virtual shared cross-project context; it is not a filesystem path."},
+                "node_type":{"type":"string","description":"Knowledge-base node kind such as concept, component, file, task, decision, fact, observation, troubleshooting, person, or memory. Defaults to observation for lightweight capture."},
+                "title":{"type":"string"},
+                "content":{"type":"string","description":"Optional descriptive/body text."},
+                "hashtags":{"type":"array","items":{"type":"string"},"description":"Flat labels such as #rust or #provider. Case-insensitive; stored normalized with leading #."},
+                "metadata":{"type":"object","description":"Optional lightweight JSON metadata."}
+            },
+            "required":["title"]
+        })),
+        memory_tool("memory_update_node", "Update title, content, type, hashtags, or metadata for a long-term memory knowledge-base node.", json!({
+            "type":"object",
+            "properties":{
+                "node_id":{"type":"string"},
+                "node_type":{"type":"string"},
+                "title":{"type":"string"},
+                "content":{"type":["string","null"]},
+                "hashtags":{"type":"array","items":{"type":"string"}},
+                "metadata":{"type":["object","null"]}
+            },
+            "required":["node_id"]
+        })),
+        memory_tool("memory_link_nodes", "Create a typed directed relationship between any two knowledge-base nodes.", json!({
+            "type":"object",
+            "properties":{
+                "edge_id":{"type":"string","description":"Optional UUID. Generated when omitted."},
+                "from_node_id":{"type":"string"},
+                "to_node_id":{"type":"string"},
+                "relation_type":{"type":"string","description":"Relation such as depends_on, mentions, owned_by, blocks, documents, or relates_to."},
+                "metadata":{"type":"object"}
+            },
+            "required":["from_node_id","to_node_id","relation_type"]
+        })),
+        memory_tool("memory_unlink_nodes", "Remove a knowledge-base relationship by edge_id or by from_node_id, to_node_id, and relation_type.", json!({
+            "type":"object",
+            "properties":{
+                "edge_id":{"type":"string"},
+                "from_node_id":{"type":"string"},
+                "to_node_id":{"type":"string"},
+                "relation_type":{"type":"string"}
+            },
+            "required":[]
+        })),
+        memory_tool("memory_get_node", "Retrieve one knowledge-base node with its content, hashtags, and immediate incoming/outgoing relationships.", json!({
+            "type":"object",
+            "properties":{"node_id":{"type":"string"}},
+            "required":["node_id"]
+        })),
+        memory_tool("memory_search", "Search long-term memory knowledge-base nodes by FTS keyword query, hashtags, node type, project context, and optional relation filters. Defaults to the current project_dir; use exact [GLOBAL] for shared cross-project knowledge.", json!({
+            "type":"object",
+            "properties":{
+                "query":{"type":"string","description":"FTS5 query over title/content. If FTS5 is unavailable, other filters still work."},
+                "project_dir":{"type":"string","description":"Optional memory project context. Defaults to current project_dir. Use exact [GLOBAL] for virtual shared memory."},
+                "hashtags":{"type":"array","items":{"type":"string"}},
+                "hashtag_match":{"type":"string","enum":["any","all"],"description":"Defaults to any."},
+                "node_type":{"type":"string"},
+                "relation_type":{"type":"string"},
+                "linked_node_id":{"type":"string"},
+                "limit":{"type":"integer","description":"Default 20, max 100."}
+            },
+            "required":[]
+        })),
+        memory_tool("memory_open_graph", "Open a bounded local graph neighborhood around one or more anchor nodes.", json!({
+            "type":"object",
+            "properties":{
+                "node_id":{"type":"string"},
+                "node_ids":{"type":"array","items":{"type":"string"}},
+                "depth":{"type":"integer","description":"Default 1, max 3."},
+                "limit":{"type":"integer","description":"Default 50, max 200 nodes."}
+            },
+            "required":[]
+        })),
+        memory_tool("memory_delete_node", "Delete one knowledge-base node and its directly owned relationship and hashtag rows.", json!({
+            "type":"object",
+            "properties":{"node_id":{"type":"string"}},
+            "required":["node_id"]
+        })),
+        memory_tool("memory_list_hashtags", "List hashtags used by knowledge-base nodes in one memory project context, optionally filtered by prefix. Defaults to the current project_dir; use exact [GLOBAL] for shared memory.", json!({
+            "type":"object",
+            "properties":{
+                "project_dir":{"type":"string","description":"Optional memory project context. Defaults to current project_dir. Use exact [GLOBAL] for virtual shared memory."},
+                "prefix":{"type":"string"},
+                "limit":{"type":"integer","description":"Default 50, max 200."}
+            },
+            "required":[]
+        })),
+    ]
 }
 
 #[cfg(feature = "stylos")]
@@ -115,6 +224,18 @@ fn resolve_board_target(
     #[cfg(not(feature = "stylos"))]
     {
         anyhow::bail!("SELF target keyword is unavailable without stylos support");
+    }
+}
+
+fn resolve_memory_project_dir(args: &Value, ctx: &ToolCtx) -> String {
+    match args["project_dir"]
+        .as_str()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        Some(GLOBAL_PROJECT_DIR) => GLOBAL_PROJECT_DIR.to_string(),
+        Some(value) => value.to_string(),
+        None => ctx.project_dir.to_string_lossy().to_string(),
     }
 }
 
@@ -208,7 +329,7 @@ fn truncate_output_with_notice(text: &str, limit: usize) -> String {
 }
 
 pub fn tool_definitions() -> Value {
-    let base_defs = vec![
+    let mut base_defs = vec![
         json!({
             "type": "function",
             "function": {
@@ -474,6 +595,7 @@ pub fn tool_definitions() -> Value {
             }
         }),
     ];
+    base_defs.extend(memory_tool_definitions());
 
     #[cfg(feature = "stylos")]
     let defs = {
@@ -811,6 +933,130 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 Some(note) => board_note_to_json(&note).to_string(),
                 None => json!({"found": false, "note_id": note_id}).to_string(),
             })
+        }
+        "memory_create_node" => {
+            let title = args["title"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing title"))?;
+            let node = ctx.db.memory_store().create_node(CreateNodeArgs {
+                node_id: args["node_id"].as_str().map(str::to_string),
+                project_dir: resolve_memory_project_dir(&args, ctx),
+                node_type: args["node_type"]
+                    .as_str()
+                    .unwrap_or("observation")
+                    .to_string(),
+                title: title.to_string(),
+                content: args["content"].as_str().map(str::to_string),
+                hashtags: parse_hashtags_value(args.get("hashtags"))?,
+                metadata_json: metadata_to_string(args.get("metadata"))?,
+            })?;
+            Ok(serde_json::to_string(&node)?)
+        }
+        "memory_update_node" => {
+            let node_id = args["node_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing node_id"))?;
+            let node = ctx.db.memory_store().update_node(
+                node_id,
+                UpdateNodeArgs {
+                    node_type: args["node_type"].as_str().map(str::to_string),
+                    title: args["title"].as_str().map(str::to_string),
+                    content: parse_nullable_string(args.get("content"))?,
+                    hashtags: if args.get("hashtags").is_some() {
+                        Some(parse_hashtags_value(args.get("hashtags"))?)
+                    } else {
+                        None
+                    },
+                    metadata_json: match args.get("metadata") {
+                        Some(Value::Null) => Some(None),
+                        Some(value) => Some(Some(serde_json::to_string(value)?)),
+                        None => None,
+                    },
+                },
+            )?;
+            Ok(match node {
+                Some(node) => serde_json::to_string(&node)?,
+                None => json!({"found": false, "node_id": node_id}).to_string(),
+            })
+        }
+        "memory_link_nodes" => {
+            let edge = ctx.db.memory_store().link_nodes(LinkNodesArgs {
+                edge_id: args["edge_id"].as_str().map(str::to_string),
+                from_node_id: args["from_node_id"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("missing from_node_id"))?
+                    .to_string(),
+                to_node_id: args["to_node_id"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("missing to_node_id"))?
+                    .to_string(),
+                relation_type: args["relation_type"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("missing relation_type"))?
+                    .to_string(),
+                metadata_json: metadata_to_string(args.get("metadata"))?,
+            })?;
+            Ok(serde_json::to_string(&edge)?)
+        }
+        "memory_unlink_nodes" => {
+            let deleted = ctx.db.memory_store().unlink_nodes(
+                args["edge_id"].as_str(),
+                args["from_node_id"].as_str(),
+                args["to_node_id"].as_str(),
+                args["relation_type"].as_str(),
+            )?;
+            Ok(json!({"deleted_edges": deleted}).to_string())
+        }
+        "memory_get_node" => {
+            let node_id = args["node_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing node_id"))?;
+            let node = ctx.db.memory_store().get_node_with_links(node_id)?;
+            Ok(match node {
+                Some(node) => serde_json::to_string(&node)?,
+                None => json!({"found": false, "node_id": node_id}).to_string(),
+            })
+        }
+        "memory_search" => {
+            let hashtag_match = match args["hashtag_match"].as_str().unwrap_or("any") {
+                value => HashtagMatch::from_str(value)
+                    .ok_or_else(|| anyhow::anyhow!("invalid hashtag_match"))?,
+            };
+            let nodes = ctx.db.memory_store().search_nodes(SearchNodesArgs {
+                query: args["query"].as_str().map(str::to_string),
+                project_dir: resolve_memory_project_dir(&args, ctx),
+                hashtags: parse_hashtags_value(args.get("hashtags"))?,
+                hashtag_match,
+                node_type: args["node_type"].as_str().map(str::to_string),
+                relation_type: args["relation_type"].as_str().map(str::to_string),
+                linked_node_id: args["linked_node_id"].as_str().map(str::to_string),
+                limit: args["limit"].as_u64().map(|n| n as u32).unwrap_or(20),
+            })?;
+            Ok(serde_json::to_string(&nodes)?)
+        }
+        "memory_open_graph" => {
+            let parsed: OpenGraphArgs = serde_json::from_value(args.clone())?;
+            let (node_ids, depth, limit) = parsed.into_parts();
+            if node_ids.is_empty() {
+                anyhow::bail!("memory_open_graph requires node_id or node_ids");
+            }
+            let graph = ctx.db.memory_store().open_graph(node_ids, depth, limit)?;
+            Ok(serde_json::to_string(&graph)?)
+        }
+        "memory_delete_node" => {
+            let node_id = args["node_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing node_id"))?;
+            let deleted = ctx.db.memory_store().delete_node(node_id)?;
+            Ok(json!({"deleted": deleted, "node_id": node_id}).to_string())
+        }
+        "memory_list_hashtags" => {
+            let hashtags = ctx.db.memory_store().list_hashtags(
+                &resolve_memory_project_dir(&args, ctx),
+                args["prefix"].as_str(),
+                args["limit"].as_u64().map(|n| n as u32).unwrap_or(50),
+            )?;
+            Ok(serde_json::to_string(&hashtags)?)
         }
         "history_search" | "search_history" => {
             let query = args["query"].as_str().unwrap_or("").to_string();

@@ -65,6 +65,7 @@ impl TurnCancellation {
 
 const TOOL_DETAIL_MAX_CHARS: usize = 60;
 const TOOL_DETAIL_CENTER_TRIM_MARKER: &str = "󱑼";
+const MEMORY_KB_GUIDANCE: &str = "Long-term memory knowledge-base guidance: memory_* tools are for intentional durable knowledge that should outlive the current session, not for routine transcript logging or disposable task tracking. Prefer knowledge-base shaped entries: concepts, components, files, tasks, decisions, facts, observations, troubleshooting records, and typed links between them. Use node_type values such as concept, component, file, task, decision, fact, observation, troubleshooting, or person. Use node_type=memory only for genuinely narrative long-term capture when a more specific knowledge-base type is not yet known. Add hashtags for retrieval, and link related nodes when the relationship is useful. Keep ordinary conversation history in session history and coordination work in board notes rather than duplicating it into the memory knowledge base.";
 
 fn center_trim(s: &str, max: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
@@ -916,6 +917,13 @@ impl Agent {
                         "Board guidance: simple direct Q&A without tools usually should not create a self-note. If the task needs tools, edits, validation, or durable follow-up tracking, consider creating a durable board note for yourself to help keep track of the work. Your exact self-note target in this session is to_instance={self_instance} to_agent_id={self_agent_id}. For self-notes, you may also call board_create_note with the exact magic keyword SELF for both to_instance and to_agent_id, and the runtime will replace SELF with those exact values. Do not invent placeholders or guesses other than the exact SELF keyword. Multi-agent collaboration guidance: prefer durable board notes over stylos_request_talk when delegating asynchronous or non-urgent work to another agent. Treat stylos_request_talk as an interrupting realtime path for urgent coordination or brief clarification. When you receive a done-mention note, treat it as an informational completion notification rather than a fresh work request."
                     )
                 }),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+
+            msgs_with_system.push(Message {
+                role: "system".to_string(),
+                content: Some(MEMORY_KB_GUIDANCE.to_string()),
                 tool_calls: None,
                 tool_call_id: None,
             });

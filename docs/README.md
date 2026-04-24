@@ -55,6 +55,7 @@
 | PRD-043 | [Safer and More Bounded File and Shell Tool Parameters](prd/prd-043-safer-and-more-bounded-file-and-shell-tool-parameters.md) | Implemented | v0.27.0 | `themion-core`, docs |
 | PRD-044 | [Fix Multiline Input Newline and Wrapped-Cursor Tracking](prd/prd-044-fix-multiline-input-newline-and-wrapped-cursor-tracking.md) | Implemented | v0.26.1 | `themion-cli`, docs |
 | PRD-045 | [Project-Scoped History Recall and Search Across Sessions](prd/prd-045-project-wide-history-recall-and-search-across-sessions.md) | Implemented | v0.28.0 | `themion-core`, docs |
+| PRD-046 | [Lightweight Long-Term Memory Knowledge Base with Hashtag-Based Organization](prd/prd-046-lightweight-unified-memory-graph-with-hashtag-based-organization.md) | Implemented | v0.29.1 | `themion-core`, `themion-cli`, docs |
 
 ## Roadmap note
 
