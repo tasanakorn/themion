@@ -58,6 +58,7 @@
 | PRD-046 | [Lightweight Long-Term Memory Knowledge Base with Hashtag-Based Organization](prd/prd-046-lightweight-unified-memory-graph-with-hashtag-based-organization.md) | Implemented | v0.29.1 | `themion-core`, `themion-cli`, docs |
 | PRD-047 | [Prefer `note_slug` in User-Facing Board Note Chat Events](prd/prd-047-prefer-note-slug-in-chat-events.md) | Implemented | v0.29.2 | `themion-cli`, docs |
 | PRD-048 | [Remove Long Navigation Shortcut Hints from the TUI Statusline](prd/prd-048-remove-navigation-shortcut-hints-from-statusline.md) | Implemented | v0.29.3 | `themion-cli`, docs |
+| PRD-049 | [Project Memory and Global Knowledge Naming for Durable Knowledge Tools](prd/prd-049-project-memory-and-global-knowledge-naming.md) | Implemented | v0.30.0 | `themion-core`, `themion-cli`, docs |
 
 ## Roadmap note
 

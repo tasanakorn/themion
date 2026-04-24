@@ -64,11 +64,11 @@ fn memory_tool(name: &str, description: &str, parameters: Value) -> Value {
 
 fn memory_tool_definitions() -> Vec<Value> {
     vec![
-        memory_tool("memory_create_node", "Create an intentional long-term memory knowledge-base node. Prefer specific KB node types such as concept, component, file, task, decision, fact, observation, troubleshooting, or person; use memory only for narrative capture when no more specific type fits.", json!({
+        memory_tool("memory_create_node", "Create an intentional Project Memory knowledge-base node. Defaults to the current project; use project_dir=\"[GLOBAL]\" only for Global Knowledge: reusable cross-project facts, preferences, conventions, provider/tool behavior, or troubleshooting patterns. When unsure, keep knowledge project-local. Prefer specific KB node types such as concept, component, file, task, decision, fact, observation, troubleshooting, or person; use memory only for narrative capture when no more specific type fits.", json!({
             "type":"object",
             "properties":{
                 "node_id":{"type":"string","description":"Optional UUID. Generated when omitted."},
-                "project_dir":{"type":"string","description":"Optional memory project context. Defaults to the current session project_dir. Use exact [GLOBAL] for the virtual shared cross-project context; it is not a filesystem path."},
+                "project_dir":{"type":"string","description":"Optional Project Memory context. Defaults to the current session project_dir. Use exact [GLOBAL] for Global Knowledge, the virtual cross-project context; it is not a filesystem path."},
                 "node_type":{"type":"string","description":"Knowledge-base node kind such as concept, component, file, task, decision, fact, observation, troubleshooting, person, or memory. Defaults to observation for lightweight capture."},
                 "title":{"type":"string"},
                 "content":{"type":"string","description":"Optional descriptive/body text."},
@@ -77,7 +77,7 @@ fn memory_tool_definitions() -> Vec<Value> {
             },
             "required":["title"]
         })),
-        memory_tool("memory_update_node", "Update title, content, type, hashtags, or metadata for a long-term memory knowledge-base node.", json!({
+        memory_tool("memory_update_node", "Update title, content, type, hashtags, or metadata for a Project Memory knowledge-base node.", json!({
             "type":"object",
             "properties":{
                 "node_id":{"type":"string"},
@@ -89,7 +89,7 @@ fn memory_tool_definitions() -> Vec<Value> {
             },
             "required":["node_id"]
         })),
-        memory_tool("memory_link_nodes", "Create a typed directed relationship between any two knowledge-base nodes.", json!({
+        memory_tool("memory_link_nodes", "Create a typed directed relationship between any two Project Memory knowledge-base nodes.", json!({
             "type":"object",
             "properties":{
                 "edge_id":{"type":"string","description":"Optional UUID. Generated when omitted."},
@@ -100,7 +100,7 @@ fn memory_tool_definitions() -> Vec<Value> {
             },
             "required":["from_node_id","to_node_id","relation_type"]
         })),
-        memory_tool("memory_unlink_nodes", "Remove a knowledge-base relationship by edge_id or by from_node_id, to_node_id, and relation_type.", json!({
+        memory_tool("memory_unlink_nodes", "Remove a Project Memory knowledge-base relationship by edge_id or by from_node_id, to_node_id, and relation_type.", json!({
             "type":"object",
             "properties":{
                 "edge_id":{"type":"string"},
@@ -110,16 +110,16 @@ fn memory_tool_definitions() -> Vec<Value> {
             },
             "required":[]
         })),
-        memory_tool("memory_get_node", "Retrieve one knowledge-base node with its content, hashtags, and immediate incoming/outgoing relationships.", json!({
+        memory_tool("memory_get_node", "Retrieve one Project Memory knowledge-base node with its content, hashtags, and immediate incoming/outgoing relationships.", json!({
             "type":"object",
             "properties":{"node_id":{"type":"string"}},
             "required":["node_id"]
         })),
-        memory_tool("memory_search", "Search long-term memory knowledge-base nodes by FTS keyword query, hashtags, node type, project context, and optional relation filters. Defaults to the current project_dir; use exact [GLOBAL] for shared cross-project knowledge.", json!({
+        memory_tool("memory_search", "Search Project Memory knowledge-base nodes by FTS keyword query, hashtags, node type, project context, and optional relation filters. Defaults to the current project_dir only; use exact [GLOBAL] to search Global Knowledge only. Project searches do not silently include Global Knowledge.", json!({
             "type":"object",
             "properties":{
                 "query":{"type":"string","description":"FTS5 query over title/content. If FTS5 is unavailable, other filters still work."},
-                "project_dir":{"type":"string","description":"Optional memory project context. Defaults to current project_dir. Use exact [GLOBAL] for virtual shared memory."},
+                "project_dir":{"type":"string","description":"Optional Project Memory context. Defaults to current project_dir only. Use exact [GLOBAL] for Global Knowledge only; it is virtual and not a filesystem path."},
                 "hashtags":{"type":"array","items":{"type":"string"}},
                 "hashtag_match":{"type":"string","enum":["any","all"],"description":"Defaults to any."},
                 "node_type":{"type":"string"},
@@ -129,7 +129,7 @@ fn memory_tool_definitions() -> Vec<Value> {
             },
             "required":[]
         })),
-        memory_tool("memory_open_graph", "Open a bounded local graph neighborhood around one or more anchor nodes.", json!({
+        memory_tool("memory_open_graph", "Open a bounded local Project Memory graph neighborhood around one or more anchor nodes.", json!({
             "type":"object",
             "properties":{
                 "node_id":{"type":"string"},
@@ -139,15 +139,15 @@ fn memory_tool_definitions() -> Vec<Value> {
             },
             "required":[]
         })),
-        memory_tool("memory_delete_node", "Delete one knowledge-base node and its directly owned relationship and hashtag rows.", json!({
+        memory_tool("memory_delete_node", "Delete one Project Memory knowledge-base node and its directly owned relationship and hashtag rows.", json!({
             "type":"object",
             "properties":{"node_id":{"type":"string"}},
             "required":["node_id"]
         })),
-        memory_tool("memory_list_hashtags", "List hashtags used by knowledge-base nodes in one memory project context, optionally filtered by prefix. Defaults to the current project_dir; use exact [GLOBAL] for shared memory.", json!({
+        memory_tool("memory_list_hashtags", "List hashtags used by Project Memory knowledge-base nodes in one project context, optionally filtered by prefix. Defaults to the current project_dir only; use exact [GLOBAL] for Global Knowledge only.", json!({
             "type":"object",
             "properties":{
-                "project_dir":{"type":"string","description":"Optional memory project context. Defaults to current project_dir. Use exact [GLOBAL] for virtual shared memory."},
+                "project_dir":{"type":"string","description":"Optional Project Memory context. Defaults to current project_dir only. Use exact [GLOBAL] for Global Knowledge only; it is virtual and not a filesystem path."},
                 "prefix":{"type":"string"},
                 "limit":{"type":"integer","description":"Default 50, max 200."}
             },

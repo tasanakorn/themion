@@ -24,7 +24,7 @@ This separation is intentional: reusable harness/runtime and provider behavior b
 - **No framework dependencies** — the harness loop, HTTP client, tool dispatch, and TUI are all hand-rolled.
 - **Stateful conversation, context-windowed** — `Agent` owns the full in-memory history but sends only the last N turns to the API. Older turns persist in SQLite and are reachable via tools.
 - **OpenAI-style tool calling** — tools are described as JSON function schemas; compatible providers can invoke them and return structured tool calls.
-- **Long-term memory knowledge base** — distilled reusable knowledge is stored as SQLite-backed graph nodes and edges, with hashtags as the lightweight organization layer.
+- **Project Memory knowledge base** — distilled reusable project knowledge is stored as SQLite-backed graph nodes and edges, with hashtags as the lightweight organization layer; the explicit `[GLOBAL]` context is Global Knowledge for reusable cross-project facts.
 - **Event-driven TUI** — `Agent` emits `AgentEvent` variants over an `mpsc` channel; the TUI renders each event as it arrives, giving streaming token display without blocking the input loop.
 - **Provider abstraction** — the core harness speaks through a `ChatBackend` trait so different transports and wire formats can be swapped at runtime.
 - **Separated prompt inputs** — the base system prompt, predefined coding guardrails, a predefined Codex CLI web-search instruction, and contextual instruction files such as `AGENTS.md` are treated as distinct prompt inputs rather than merged into a single message.
@@ -74,7 +74,7 @@ tools.rs
   │    ├─ history_recall  ──► ctx.db.recall(RecallArgs)
   │    ├─ history_search  ──► ctx.db.search(SearchArgs)
   │    ├─ board_*  ──► local durable notes board operations
-│    ├─ memory_* ──► SQLite long-term memory KB nodes, hashtags, and edges
+│    ├─ memory_* ──► SQLite Project Memory KB nodes, hashtags, and edges
   │    └─ workflow_*  ──► workflow state inspection / transitions
   └─ ToolCtx { db: Arc<DbHandle>, session_id, project_dir }
 
@@ -231,28 +231,28 @@ History and note persistence currently use these main tables:
 - `agent_messages` — one row per persisted message; assistant tool-call payloads are stored in `tool_calls_json`, and tool result rows link back through `tool_call_id`
 - `agent_workflow_transitions` — workflow/phase transition audit trail
 - `board_notes` — durable note board rows keyed by canonical UUID `note_id` with unique human-friendly `note_slug`
-- `memory_nodes` — long-term memory knowledge-base nodes for concepts, components, files, tasks, decisions, facts, observations, troubleshooting records, people, and occasional narrative memory records; each row includes a `project_dir` memory context
+- `memory_nodes` — Project Memory knowledge-base nodes for concepts, components, files, tasks, decisions, facts, observations, troubleshooting records, people, and occasional narrative memory records; each row includes a `project_dir` context
 - `memory_node_hashtags` — normalized hashtag labels for memory nodes
 - `memory_edges` — typed directed links between knowledge-base nodes
 
 Machine-consumed note timestamps use explicit milliseconds fields such as `created_at_ms`, `updated_at_ms`, `injected_at_ms`, `completion_notified_at_ms`, and `blocked_until_ms`.
 
-## Long-term memory knowledge base
+## Project Memory knowledge base
 
-Themion includes a lightweight SQLite-backed long-term memory knowledge base for distilled durable knowledge that should outlive one conversation. The knowledge base complements persistent transcript history and board notes rather than replacing either of them. History remains the log of conversation turns, board notes remain task-coordination records, and the knowledge base stores intentional reusable facts, decisions, concepts, file contracts, troubleshooting records, and relationships.
+Themion includes Project Memory: a lightweight SQLite-backed long-term durable knowledge base for distilled knowledge that should outlive one conversation. The knowledge base complements persistent transcript history and board notes rather than replacing either of them. History remains the log of conversation turns, board notes remain task-coordination records, and Project Memory stores intentional reusable facts, decisions, concepts, file contracts, troubleshooting records, and relationships.
 
-Storage is graph-backed and unified: concepts, components, files, tasks, decisions, facts, observations, troubleshooting records, people, and occasional narrative memory records are all rows in `memory_nodes`, and any two nodes can be connected through typed rows in `memory_edges`. Each memory node stores a `project_dir` context. Omitted project selection in memory tools defaults to the current session project directory; the exact selector `[GLOBAL]` is a virtual shared project context for non-repository-specific knowledge and is not resolved as a filesystem path. Project-specific searches do not silently include `[GLOBAL]` rows. Agents should prefer specific KB node types such as `fact`, `observation`, `decision`, `concept`, `component`, or `file`; `memory` is reserved for genuinely narrative capture when no more specific type is known. Hashtags are stored in `memory_node_hashtags` and act as flat retrieval labels such as `#rust`, `#provider`, or `#todo`; there is no separate memory scope hierarchy. Hashtags are normalized to lowercase, leading-`#` form, with hyphens converted to underscores.
+Storage is graph-backed and unified: concepts, components, files, tasks, decisions, facts, observations, troubleshooting records, people, and occasional narrative memory records are all rows in `memory_nodes`, and any two nodes can be connected through typed rows in `memory_edges`. Each memory node stores a `project_dir` context. Omitted project selection in memory tools defaults to the current session project directory only. The exact selector `[GLOBAL]` selects Global Knowledge, the virtual cross-project context inside Project Memory; it is for reusable cross-project facts, preferences, conventions, provider/tool behavior, and troubleshooting patterns, and is not resolved as a filesystem path. When unsure, agents should keep knowledge project-local and promote it to Global Knowledge later only when cross-project usefulness is clear. Project-specific searches do not silently include `[GLOBAL]` rows. Agents should prefer specific KB node types such as `fact`, `observation`, `decision`, `concept`, `component`, or `file`; `memory` is reserved for genuinely narrative capture when no more specific type is known. Hashtags are stored in `memory_node_hashtags` and act as flat retrieval labels such as `#rust`, `#provider`, or `#todo`; there is no separate memory scope hierarchy. Hashtags are normalized to lowercase, leading-`#` form, with hyphens converted to underscores.
 
 The model-visible tool family is:
 
-- `memory_create_node` — create a KB node with title, optional content, type, hashtags, metadata, and optional `project_dir`; omitted `node_type` defaults to `observation`, omitted `project_dir` defaults to the current project, and `[GLOBAL]` writes to shared memory
+- `memory_create_node` — create a Project Memory KB node with title, optional content, type, hashtags, metadata, and optional `project_dir`; omitted `node_type` defaults to `observation`, omitted `project_dir` defaults to the current project, and `[GLOBAL]` writes to Global Knowledge
 - `memory_update_node` — update node fields and replace hashtags when provided
 - `memory_link_nodes` / `memory_unlink_nodes` — add or remove typed directed graph edges
 - `memory_get_node` — read one node with immediate incoming and outgoing links
 - `memory_search` — search by title/content FTS query, hashtags, node type, optional `project_dir`, and optional relation filters
 - `memory_open_graph` — return a bounded local neighborhood around one or more anchor nodes
 - `memory_delete_node` — delete a node and its hashtag/edge rows
-- `memory_list_hashtags` — inspect frequently used labels in the selected memory project context
+- `memory_list_hashtags` — inspect frequently used labels in the selected Project Memory context
 
 Machine-consumed memory timestamps use explicit millisecond fields such as `created_at_ms` and `updated_at_ms`. Neighborhood reads are bounded by depth and node limit so a heavily linked node does not dump the whole graph accidentally.
 
