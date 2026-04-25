@@ -7,7 +7,7 @@ use crate::stylos::{
 use crate::{format_stats, Session};
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode,
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode,
         KeyModifiers, MouseEventKind,
     },
     event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
@@ -25,10 +25,7 @@ use ratatui::{
 use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use themion_core::agent::{Agent, AgentEvent, TurnCancellation, TurnStats};
 use themion_core::client::ChatClient;
@@ -38,6 +35,7 @@ use themion_core::workflow::WorkflowState;
 use themion_core::ModelInfo;
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc};
+use tokio_stream::StreamExt;
 use tui_textarea::CursorMove;
 use tui_textarea::TextArea;
 use unicode_width::UnicodeWidthChar;
@@ -861,7 +859,6 @@ impl<'a> App<'a> {
         }
     }
 
-
     fn refresh_stylos_status(&self) {
         #[cfg(feature = "stylos")]
         if self.stylos.is_some() {
@@ -958,13 +955,12 @@ impl<'a> App<'a> {
             });
             if let Some(handle) = self.stylos.as_ref() {
                 tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(handle.set_snapshot_provider(provider));
+                    tokio::runtime::Handle::current()
+                        .block_on(handle.set_snapshot_provider(provider));
                 });
             }
         }
     }
-
-
 
     fn handle_agent_event(
         &mut self,
@@ -1045,14 +1041,12 @@ impl<'a> App<'a> {
             AgentEvent::WorkflowStateChanged(state) => {
                 self.workflow_state = state;
                 self.mark_dirty_status();
-        
             }
             AgentEvent::Stats(text) => {
                 if let Some(json) = text.strip_prefix("[rate-limit] ") {
                     if let Ok(report) = serde_json::from_str::<ApiCallRateLimitReport>(json) {
                         self.status_rate_limits = Some(report);
                         self.mark_dirty_status();
-                
                     }
                     return;
                 }
@@ -2143,58 +2137,23 @@ fn dispatch_terminal_event(app_tx: &mpsc::UnboundedSender<AppEvent>, event: Even
     app_tx.send(app_event).is_ok()
 }
 
-fn run_terminal_input_loop(app_tx: mpsc::UnboundedSender<AppEvent>, shutdown: Arc<AtomicBool>) {
+async fn run_terminal_input_loop(
+    app_tx: mpsc::UnboundedSender<AppEvent>,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) {
+    let mut events = EventStream::new();
     loop {
-        if shutdown.load(Ordering::Relaxed) {
-            break;
-        }
-        match event::read() {
-            Ok(event) => {
-                if shutdown.load(Ordering::Relaxed) {
-                    break;
+        tokio::select! {
+            _ = shutdown_rx.recv() => break,
+            maybe_event = events.next() => match maybe_event {
+                Some(Ok(event)) => {
+                    if !dispatch_terminal_event(&app_tx, event) {
+                        break;
+                    }
                 }
-                if !dispatch_terminal_event(&app_tx, event) {
-                    break;
-                }
+                Some(Err(_)) | None => break,
             }
-            Err(_) => break,
         }
-    }
-}
-
-struct TerminalInputThread {
-    shutdown: Arc<AtomicBool>,
-    join_handle: Option<std::thread::JoinHandle<()>>,
-}
-
-impl TerminalInputThread {
-    fn spawn(app_tx: mpsc::UnboundedSender<AppEvent>) -> Self {
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let join_handle = std::thread::spawn({
-            let shutdown = Arc::clone(&shutdown);
-            move || run_terminal_input_loop(app_tx, shutdown)
-        });
-        Self {
-            shutdown,
-            join_handle: Some(join_handle),
-        }
-    }
-
-    fn request_shutdown(&self) {
-        self.shutdown.store(true, Ordering::Relaxed);
-    }
-}
-
-impl Drop for TerminalInputThread {
-    fn drop(&mut self) {
-        self.request_shutdown();
-        let Some(join_handle) = self.join_handle.take() else {
-            return;
-        };
-        if !join_handle.is_finished() {
-            return;
-        }
-        let _ = join_handle.join();
     }
 }
 
@@ -2405,7 +2364,6 @@ fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Lin
 
     lines
 }
-
 
 #[cfg(feature = "stylos")]
 fn stylos_note_header_value<'a>(prompt: &'a str, key: &str) -> Option<&'a str> {
@@ -2647,11 +2605,14 @@ pub async fn run(
     let session = Session::from_config(cfg);
     let (app_tx, mut app_rx) = mpsc::unbounded_channel::<AppEvent>();
 
-    let tui_domain = runtime_domains.tui().expect("tui runtime available in TUI mode");
+    let tui_domain = runtime_domains
+        .tui()
+        .expect("tui runtime available in TUI mode");
     #[cfg(feature = "stylos")]
     let network_domain = runtime_domains.network();
 
-    let input_thread = TerminalInputThread::spawn(app_tx.clone());
+    let (input_shutdown_tx, input_shutdown_rx) = broadcast::channel::<()>(1);
+    tui_domain.spawn(run_terminal_input_loop(app_tx.clone(), input_shutdown_rx));
 
     let app_tx_tick = app_tx.clone();
     let tui_domain_for_tick = tui_domain.clone();
@@ -2675,14 +2636,8 @@ pub async fn run(
                 let db = db.clone();
                 let network_domain = network_domain.clone();
                 async move {
-                    crate::stylos::start(
-                        &stylos_cfg,
-                        &session,
-                        &project_dir,
-                        db,
-                        network_domain,
-                    )
-                    .await
+                    crate::stylos::start(&stylos_cfg, &session, &project_dir, db, network_domain)
+                        .await
                 }
             })
             .await
@@ -2704,7 +2659,6 @@ pub async fn run(
         #[cfg(feature = "stylos")]
         stylos_handle,
     );
-
 
     #[cfg(feature = "stylos")]
     app.refresh_stylos_status();
@@ -3150,7 +3104,7 @@ pub async fn run(
         }
     }
 
-    input_thread.request_shutdown();
+    let _ = input_shutdown_tx.send(());
     drop(app_tx);
 
     disable_raw_mode()?;
@@ -3283,7 +3237,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn stylos_note_display_identifier_prefers_slug() {
         let prompt = "type=stylos_note note_id=123e4567-e89b-12d3-a456-426614174000 note_slug=fix-tests-123e4567 column=todo\n\nbody";
@@ -3295,7 +3248,8 @@ mod tests {
 
     #[test]
     fn stylos_note_display_identifier_falls_back_to_note_id() {
-        let prompt = "type=stylos_note note_id=123e4567-e89b-12d3-a456-426614174000 column=todo\n\nbody";
+        let prompt =
+            "type=stylos_note note_id=123e4567-e89b-12d3-a456-426614174000 column=todo\n\nbody";
         assert_eq!(
             stylos_note_display_identifier(prompt),
             "note_id=123e4567-e89b-12d3-a456-426614174000"
