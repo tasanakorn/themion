@@ -2151,7 +2151,13 @@ async fn run_terminal_input_loop(
                         break;
                     }
                 }
-                Some(Err(_)) | None => break,
+                Some(Err(err)) => {
+                    if matches!(err.kind(), io::ErrorKind::Interrupted) {
+                        break;
+                    }
+                    continue;
+                }
+                None => break,
             }
         }
     }
