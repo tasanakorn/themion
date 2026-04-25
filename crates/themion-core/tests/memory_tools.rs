@@ -37,7 +37,8 @@ async fn knowledge_base_node_is_retrievable_by_hashtag_and_keyword() {
         }),
     )
     .await;
-    assert_eq!(node["hashtags"], json!(["#knowledge_base", "#rust"]));
+    assert_eq!(node["entity"], "memory_node");
+    assert_eq!(node["operation"], "create");
 
     let by_tag = call_json(
         &ctx,
@@ -85,6 +86,7 @@ async fn memory_links_are_returned_and_deleted_with_nodes() {
         }),
     )
     .await;
+    assert_eq!(edge["entity"], "memory_edge");
     assert_eq!(edge["relation_type"], "documents");
 
     let fetched = call_json(
@@ -226,4 +228,58 @@ async fn memory_list_hashtags_is_scoped_by_project_dir() {
     .await;
     assert_eq!(global_tags.as_array().unwrap().len(), 1);
     assert_eq!(global_tags[0]["hashtag"], "#global_only");
+}
+
+#[tokio::test]
+async fn board_and_file_mutations_return_compact_acks() {
+    let db = DbHandle::open_in_memory().unwrap();
+    let ctx = test_ctx(db);
+
+    let created = call_json(
+        &ctx,
+        "board_create_note",
+        json!({"to_instance":"local","to_agent_id":"main","body":"hello"}),
+    )
+    .await;
+    assert_eq!(created["entity"], "board_note");
+    assert_eq!(created["operation"], "create");
+
+    let moved = call_json(
+        &ctx,
+        "board_move_note",
+        json!({"note_id": created["note_id"], "column":"done"}),
+    )
+    .await;
+    assert_eq!(moved["operation"], "move");
+    assert!(moved.get("body").is_none());
+
+    let updated = call_json(
+        &ctx,
+        "board_update_note_result",
+        json!({"note_id": created["note_id"], "result_text":"long text"}),
+    )
+    .await;
+    assert_eq!(updated["operation"], "update_result");
+    assert_eq!(updated["changed"]["has_result_text"], true);
+    assert!(updated.get("result_text").is_none());
+
+    let missing = call_json(
+        &ctx,
+        "board_move_note",
+        json!({"note_id": "missing", "column":"done"}),
+    )
+    .await;
+    assert_eq!(missing["ok"], false);
+    assert_eq!(missing["found"], false);
+
+    let tmp = std::env::temp_dir().join(format!("themion-tools-test-{}.txt", Uuid::new_v4()));
+    let rel = tmp.to_string_lossy().to_string();
+    let write = call_json(
+        &ctx,
+        "fs_write_file",
+        json!({"path": rel, "content":"abc", "mode":"raw"}),
+    )
+    .await;
+    assert_eq!(write["operation"], "write");
+    assert_eq!(write["written_bytes"], 3);
 }

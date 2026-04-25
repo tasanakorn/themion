@@ -54,6 +54,74 @@ fn board_note_to_json(note: &crate::db::BoardNote) -> Value {
     })
 }
 
+fn board_note_ack(note: &crate::db::BoardNote, operation: &str, changed: Value) -> Value {
+    json!({
+        "ok": true,
+        "entity": "board_note",
+        "operation": operation,
+        "note_id": note.note_id,
+        "note_slug": note.note_slug,
+        "changed": changed,
+    })
+}
+
+fn board_note_not_found(note_id: &str, operation: &str) -> Value {
+    json!({
+        "ok": false,
+        "entity": "board_note",
+        "operation": operation,
+        "found": false,
+        "note_id": note_id,
+    })
+}
+
+fn memory_node_ack(node: &crate::memory::MemoryNode, operation: &str) -> Value {
+    json!({
+        "ok": true,
+        "entity": "memory_node",
+        "operation": operation,
+        "node_id": node.node_id,
+        "project_dir": node.project_dir,
+        "node_type": node.node_type,
+        "title": node.title,
+        "created_at_ms": node.created_at_ms,
+        "updated_at_ms": node.updated_at_ms,
+    })
+}
+
+fn memory_node_not_found(node_id: &str, operation: &str) -> Value {
+    json!({
+        "ok": false,
+        "entity": "memory_node",
+        "operation": operation,
+        "found": false,
+        "node_id": node_id,
+    })
+}
+
+fn memory_edge_ack(edge: &crate::memory::MemoryEdge, operation: &str) -> Value {
+    json!({
+        "ok": true,
+        "entity": "memory_edge",
+        "operation": operation,
+        "edge_id": edge.edge_id,
+        "from_node_id": edge.from_node_id,
+        "to_node_id": edge.to_node_id,
+        "relation_type": edge.relation_type,
+    })
+}
+
+fn write_file_ack(path: &str, mode: &str, written_bytes: usize) -> Value {
+    json!({
+        "ok": true,
+        "entity": "file",
+        "operation": "write",
+        "path": path,
+        "mode": mode,
+        "written_bytes": written_bytes,
+    })
+}
+
 fn memory_tool(name: &str, description: &str, parameters: Value) -> Value {
     json!({
         "type": "function",
@@ -67,7 +135,7 @@ fn memory_tool(name: &str, description: &str, parameters: Value) -> Value {
 
 fn memory_tool_definitions() -> Vec<Value> {
     vec![
-        memory_tool("memory_create_node", "Create an intentional Project Memory knowledge-base node. Defaults to the current project; use project_dir=\"[GLOBAL]\" only for Global Knowledge: reusable cross-project facts, preferences, conventions, provider/tool behavior, or troubleshooting patterns. When unsure, keep knowledge project-local. Prefer specific KB node types such as concept, component, file, task, decision, fact, observation, troubleshooting, or person; use memory only for narrative capture when no more specific type fits.", json!({
+        memory_tool("memory_create_node", "Create an intentional Project Memory knowledge-base node. Defaults to the current project; use project_dir=\"[GLOBAL]\" only for Global Knowledge: reusable cross-project facts, preferences, conventions, provider/tool behavior, or troubleshooting patterns. When unsure, keep knowledge project-local. Prefer specific KB node types such as concept, component, file, task, decision, fact, observation, troubleshooting, or person; use memory only for narrative capture when no more specific type fits. Returns a compact creation acknowledgement by default.", json!({
             "type":"object",
             "properties":{
                 "node_id":{"type":"string","description":"Optional UUID. Generated when omitted."},
@@ -80,7 +148,7 @@ fn memory_tool_definitions() -> Vec<Value> {
             },
             "required":["title"]
         })),
-        memory_tool("memory_update_node", "Update title, content, type, hashtags, or metadata for a Project Memory knowledge-base node.", json!({
+        memory_tool("memory_update_node", "Update title, content, type, hashtags, or metadata for a Project Memory knowledge-base node. Returns a compact update acknowledgement by default.", json!({
             "type":"object",
             "properties":{
                 "node_id":{"type":"string"},
@@ -92,7 +160,7 @@ fn memory_tool_definitions() -> Vec<Value> {
             },
             "required":["node_id"]
         })),
-        memory_tool("memory_link_nodes", "Create a typed directed relationship between any two Project Memory knowledge-base nodes.", json!({
+        memory_tool("memory_link_nodes", "Create a typed directed relationship between any two Project Memory knowledge-base nodes. Returns a compact acknowledgement by default.", json!({
             "type":"object",
             "properties":{
                 "edge_id":{"type":"string","description":"Optional UUID. Generated when omitted."},
@@ -816,8 +884,13 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                     .context("invalid base64 content")?,
                 _ => unreachable!(),
             };
-            fs::write(path, bytes)?;
-            Ok("Written".to_string())
+            fs::write(path, &bytes)?;
+            Ok(write_file_ack(
+                args["path"].as_str().unwrap(),
+                mode,
+                bytes.len(),
+            )
+            .to_string())
         }
         "fs_list_directory" | "list_directory" => {
             let path = args["path"]
@@ -967,7 +1040,18 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 body: body.to_string(),
                 meta_json: None,
             })?;
-            Ok(board_note_to_json(&note).to_string())
+            Ok(board_note_ack(
+                &note,
+                "create",
+                json!({
+                    "column": note.column.as_str(),
+                    "note_kind": note.note_kind.as_str(),
+                    "to_instance": note.to_instance,
+                    "to_agent_id": note.to_agent_id,
+                    "created_at_ms": note.created_at_ms,
+                }),
+            )
+            .to_string())
         }
         "board_list_notes" => {
             let column = args["column"]
@@ -987,8 +1071,16 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 .ok_or_else(|| anyhow::anyhow!("missing note_id"))?;
             let note = ctx.db.get_board_note(note_id)?;
             Ok(match note {
-                Some(note) => board_note_to_json(&note).to_string(),
-                None => json!({"found": false, "note_id": note_id}).to_string(),
+                Some(note) => board_note_ack(
+                    &note,
+                    "move",
+                    json!({
+                        "column": note.column.as_str(),
+                        "updated_at_ms": note.updated_at_ms,
+                    }),
+                )
+                .to_string(),
+                None => board_note_not_found(note_id, "move").to_string(),
             })
         }
         "board_move_note" => {
@@ -1003,8 +1095,16 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             .ok_or_else(|| anyhow::anyhow!("invalid column"))?;
             let note = ctx.db.move_board_note(note_id, column)?;
             Ok(match note {
-                Some(note) => board_note_to_json(&note).to_string(),
-                None => json!({"found": false, "note_id": note_id}).to_string(),
+                Some(note) => board_note_ack(
+                    &note,
+                    "update_result",
+                    json!({
+                        "has_result_text": note.result_text.is_some(),
+                        "updated_at_ms": note.updated_at_ms,
+                    }),
+                )
+                .to_string(),
+                None => board_note_not_found(note_id, "update_result").to_string(),
             })
         }
         "board_update_note_result" => {
@@ -1038,7 +1138,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 hashtags: parse_hashtags_value(args.get("hashtags"))?,
                 metadata_json: metadata_to_string(args.get("metadata"))?,
             })?;
-            Ok(serde_json::to_string(&node)?)
+            Ok(memory_node_ack(&node, "create").to_string())
         }
         "memory_update_node" => {
             let node_id = args["node_id"]
@@ -1063,8 +1163,8 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 },
             )?;
             Ok(match node {
-                Some(node) => serde_json::to_string(&node)?,
-                None => json!({"found": false, "node_id": node_id}).to_string(),
+                Some(node) => memory_node_ack(&node, "update").to_string(),
+                None => memory_node_not_found(node_id, "update").to_string(),
             })
         }
         "memory_link_nodes" => {
@@ -1084,7 +1184,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                     .to_string(),
                 metadata_json: metadata_to_string(args.get("metadata"))?,
             })?;
-            Ok(serde_json::to_string(&edge)?)
+            Ok(memory_edge_ack(&edge, "link").to_string())
         }
         "memory_unlink_nodes" => {
             let deleted = ctx.db.memory_store().unlink_nodes(

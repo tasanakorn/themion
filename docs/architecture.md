@@ -287,6 +287,8 @@ Themion also exposes `system_inspect_local`, a read-only aggregate local inspect
 
 Durable note operations are exposed as `board_*` tools. These board tools manipulate local SQLite-backed note state for create/list/read/move/update-result operations. Stylos remains the transport and intake layer for remote note delivery and related mesh behavior.
 
+Tool contracts now distinguish reads from writes more explicitly: detailed inspection stays on read/query tools, while several mutation tools now return compact structured acknowledgements by default. In particular, `board_create_note`, `board_move_note`, `board_update_note_result`, `memory_create_node`, `memory_update_node`, `memory_link_nodes`, and `fs_write_file` no longer use full-record or plain-text success returns for their normal mutation path.
+
 ## Persistent History (db.rs)
 
 Database path: `$XDG_DATA_HOME/themion/system.db` (default `~/.local/share/themion/system.db`). Created on first run; WAL mode enabled on every open for safe multi-process access.
