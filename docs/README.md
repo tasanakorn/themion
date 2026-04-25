@@ -59,7 +59,7 @@
 | PRD-047 | [Prefer `note_slug` in User-Facing Board Note Chat Events](prd/prd-047-prefer-note-slug-in-chat-events.md) | Implemented | v0.29.2 | `themion-cli`, docs |
 | PRD-048 | [Remove Long Navigation Shortcut Hints from the TUI Statusline](prd/prd-048-remove-navigation-shortcut-hints-from-statusline.md) | Implemented | v0.29.3 | `themion-cli`, docs |
 | PRD-049 | [Project Memory and Global Knowledge Naming for Durable Knowledge Tools](prd/prd-049-project-memory-and-global-knowledge-naming.md) | Implemented | v0.30.0 | `themion-core`, `themion-cli`, docs |
-| PRD-050 | [Reorganize Tokio Runtime Execution into Domain-Specific Pools](prd/prd-050-reorganize-tokio-runtime-pools.md) | Proposed | v0.31.0 | `themion-cli`, `themion-core`, docs |
+| PRD-050 | [Reorganize Tokio Runtime Execution into Domain-Specific Pools](prd/prd-050-reorganize-tokio-runtime-pools.md) | Partially implemented | v0.31.0 | `themion-cli`, `themion-core`, docs |
 
 ## Roadmap note
 

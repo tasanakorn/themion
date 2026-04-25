@@ -556,7 +556,7 @@ This section exists to keep PRD-050 scoped correctly: explicit runtime-domain ow
 - [x] define `RuntimeDomain`, `DomainHandle`, and `RuntimeDomains`
 - [~] assign thread names and initial builder settings for each domain runtime
 - [ ] verify the concrete runtime type for each domain matches the documented topology, especially whether `tui` is truly `current_thread` versus a single-worker multi-thread runtime
-- [~] move TUI-local spawned tasks such as frame scheduling, input, periodic tick, and bridge tasks onto the TUI domain
+- [~] move TUI-local spawned tasks such as frame scheduling, input, periodic tick, and bridge tasks onto the TUI domain; latest slice moved those task launches onto explicit domain handles, while terminal input still originates from an unmanaged blocking OS thread
 - [ ] verify the TUI input path itself runs by the intended mechanism on the TUI domain rather than escaping into an unmanaged blocking OS thread
 - [x] move Stylos long-lived tasks onto the networking domain
 - [~] route live agent entry/orchestration tasks through the core domain where practical
@@ -567,7 +567,7 @@ This section exists to keep PRD-050 scoped correctly: explicit runtime-domain ow
 - [~] introduce an explicit home for background maintenance work
 - [ ] either place a concrete maintenance workload on the background domain or document that the domain remains intentionally reserved in phase 1
 - [~] review `spawn_blocking` and `block_in_place` usage and align blocking work with the new topology
-- [ ] verify cross-domain shutdown and task lifecycle behavior, including cancellation propagation and clean exit when TUI or Stylos tasks are active
+- [~] verify cross-domain shutdown and task lifecycle behavior, including cancellation propagation and clean exit when TUI or Stylos tasks are active
 - [ ] verify cross-domain communication/backpressure remains acceptable for TUI bridges and Stylos event forwarding
 - [ ] verify startup and background-task errors still surface clearly after moving work onto domain-owned runtimes
 - [~] add minimal runtime-domain observability to `/debug runtime` or equivalent diagnostics
@@ -575,7 +575,7 @@ This section exists to keep PRD-050 scoped correctly: explicit runtime-domain ow
 - [ ] verify documentation matches the actual shipped runtime types, task placement, and input model exactly
 - [~] update `docs/architecture.md` and `docs/engine-runtime.md`
 - [x] keep `docs/README.md` aligned with this PRD entry
-- [ ] validate the touched CLI runtime topology in both default and `--features stylos` builds and treat feature-on/feature-off coverage as a checklist item, not just an implementation note
+- [~] validate the touched CLI runtime topology in both default and `--features stylos` builds and treat feature-on/feature-off coverage as a checklist item, not just an implementation note
 
 
 ## Implementation notes
@@ -586,28 +586,32 @@ Implemented phase 1 as a CLI-owned explicit runtime topology:
 - replaced `#[tokio::main]` startup in `crates/themion-cli/src/main.rs` with explicit runtime construction
 - print mode now starts under `RuntimeDomains::for_print_mode()` and blocks on the core runtime
 - TUI mode now starts under `RuntimeDomains::for_tui_mode()` and passes runtime handles into `tui::run(...)`
-- TUI-local long-lived tasks such as input, tick, frame scheduling, and Stylos bridge forwarding now spawn on the TUI domain
+- TUI-local long-lived tasks such as tick, frame scheduling, event-forwarding bridges, and other domain-sensitive helper tasks now spawn through explicit TUI/core/background domain handles instead of ambient `tokio::spawn(...)`
+- terminal input handling now has explicit shutdown signaling before TUI teardown, which improves cross-domain lifecycle behavior even though the low-level blocking read still runs on a dedicated OS thread
 - Stylos long-lived tasks now spawn on the networking domain
-- current thread naming is applied to multi-thread runtime workers as `themion-core`, `themion-network`, and `themion-background`
-- the TUI current-thread runtime is explicitly owned, though Tokio current-thread runtimes do not expose worker thread naming the same way as multi-thread runtimes
+- current thread naming is applied to multi-thread runtime workers as `themion-tui`, `themion-core`, `themion-network`, and `themion-background`
 
 Phase-1 limitation that remains intentional:
 
-- some shorter-lived or lower-level async work in `tui.rs` still uses ambient `tokio::spawn`, and provider-internal transport work remains largely on the core execution path for now
+- terminal input is still sourced from `std::thread::spawn` + blocking `event::read()` in `tui.rs`, so the input path is not yet fully owned by the TUI Tokio domain in the strict architectural sense
+- some shorter-lived or lower-level async work in `tui.rs` may still use ambient spawning patterns, and provider-internal transport work remains largely on the core execution path for now
 - `/debug runtime` docs are updated to describe active runtime domains, but the runtime debug output itself was not expanded into per-domain counters in this slice
+- the background domain now serves as an explicit home for domain-routed helper work, but this slice still does not demonstrate a dedicated maintenance workload placed there
 
 Validation run for the implemented slice:
 
 - `cargo check -p themion-cli` → passed
 - `cargo check -p themion-cli --features stylos` → passed
 - `cargo check -p themion-core -p themion-cli` → passed
+- `cargo test -p themion-cli` → passed
+- `cargo test -p themion-cli --features stylos` → passed
 
 Follow-up analysis gaps still open after the first implementation slice:
 
 - the TUI runtime described above is not yet implemented literally: `runtime_domains.rs` currently constructs `tui` as a multi-thread runtime with one worker, so docs and code still need reconciliation
 - terminal input is still read from `std::thread::spawn` + blocking `event::read()` in `tui.rs`, so the input path is not yet fully owned by the TUI Tokio domain in the strict architectural sense
-- several `tokio::spawn` sites remain in `tui.rs`; some are short-lived relays, but the remaining ambient-spawn set still needs an explicit domain audit
+- several `tokio::spawn` / `std::thread::spawn` / blocking paths in `tui.rs` still need an explicit domain audit even after the latest TUI-domain routing pass
 - `block_in_place` remains in TUI/Stylos-sensitive paths and should be treated as an intentional review target rather than “done enough”
 - the background domain exists structurally, but this slice does not yet demonstrate a concrete maintenance workload placed there
 - `/debug runtime` exposes useful activity counters, but it does not yet report the active runtime-domain topology precisely enough to prove docs/code parity on its own
-- shutdown and cross-domain lifecycle behavior were not exhaustively validated in this slice; they remain explicit follow-up work
+- shutdown and cross-domain lifecycle behavior improved in the latest TUI task-routing slice, but they still are not exhaustively validated end-to-end
