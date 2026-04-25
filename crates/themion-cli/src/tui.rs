@@ -21,8 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use themion_core::agent::{Agent, AgentEvent, TurnCancellation, TurnStats};
-use themion_core::client::ChatClient;
-use themion_core::client_codex::{ApiCallRateLimitReport, CodexClient};
+use themion_core::client_codex::ApiCallRateLimitReport;
 use themion_core::db::DbHandle;
 use themion_core::workflow::WorkflowState;
 use themion_core::ModelInfo;
@@ -539,7 +538,7 @@ impl<'a> App<'a> {
             StylosRuntimeState::Active { instance, .. } => Some(instance.clone()),
             _ => Some(crate::stylos::derive_local_instance_id()),
         });
-        let agent = build_agent(
+        let agent = crate::app_runtime::build_agent(
             &session,
             session_id,
             project_dir.clone(),
@@ -1430,7 +1429,7 @@ impl<'a> App<'a> {
                             out.push(format!("warning: {}", e));
                         }
                         let new_session_id = Uuid::new_v4();
-                        match build_agent(
+                        match crate::app_runtime::build_agent(
                             &self.session,
                             new_session_id,
                             self.project_dir.clone(),
@@ -2083,7 +2082,7 @@ Result:
                     )));
                 }
                 let new_session_id = Uuid::new_v4();
-                match build_agent(
+                match crate::app_runtime::build_agent(
                     &self.session,
                     new_session_id,
                     self.project_dir.clone(),
@@ -2542,7 +2541,7 @@ fn build_rate_limit_statusline(report: Option<&ApiCallRateLimitReport>) -> Strin
 }
 
 #[cfg(feature = "stylos")]
-fn stylos_tool_invoker(
+pub(crate) fn stylos_tool_invoker(
     bridge: Option<StylosToolBridge>,
 ) -> Option<themion_core::tools::StylosToolInvoker> {
     bridge.map(|bridge| {
@@ -2560,72 +2559,6 @@ fn stylos_tool_invoker(
             fut
         }) as themion_core::tools::StylosToolInvoker
     })
-}
-
-fn build_agent(
-    session: &Session,
-    session_id: Uuid,
-    project_dir: PathBuf,
-    db: Arc<DbHandle>,
-    #[cfg(feature = "stylos")] stylos_tool_bridge: Option<StylosToolBridge>,
-    #[cfg(feature = "stylos")] local_instance_id: Option<&str>,
-    #[cfg(feature = "stylos")] local_agent_id: &str,
-) -> anyhow::Result<Agent> {
-    use themion_core::ChatBackend;
-    let client: Box<dyn ChatBackend + Send + Sync> = match session.provider.as_str() {
-        "openai-codex" => {
-            let auth = crate::auth_store::load()?
-                .ok_or_else(|| anyhow::anyhow!("no codex auth; run /login codex first"))?;
-            Box::new(CodexClient::new(
-                session.base_url.clone(),
-                auth,
-                Box::new(|a: &themion_core::CodexAuth| crate::auth_store::save(a)),
-            ))
-        }
-        _ => {
-            let mut c = ChatClient::new(session.base_url.clone(), session.api_key.clone());
-            if session.provider == "openrouter" {
-                c = c.with_headers([
-                    (
-                        "HTTP-Referer".to_string(),
-                        "https://github.com/tasanakorn".to_string(),
-                    ),
-                    ("X-Title".to_string(), "themion".to_string()),
-                    ("X-OpenRouter-Title".to_string(), "themion".to_string()),
-                    (
-                        "X-OpenRouter-Categories".to_string(),
-                        "developer-tools".to_string(),
-                    ),
-                ]);
-            }
-            Box::new(c)
-        }
-    };
-    #[cfg(feature = "stylos")]
-    let mut agent = Agent::new_with_db(
-        client,
-        session.model.clone(),
-        session.system_prompt.clone(),
-        session_id,
-        project_dir,
-        db,
-    );
-    #[cfg(not(feature = "stylos"))]
-    let agent = Agent::new_with_db(
-        client,
-        session.model.clone(),
-        session.system_prompt.clone(),
-        session_id,
-        project_dir,
-        db,
-    );
-    #[cfg(feature = "stylos")]
-    agent.set_local_agent_id(Some(local_agent_id.to_string()));
-    #[cfg(feature = "stylos")]
-    agent.set_local_instance_id(local_instance_id.map(str::to_string));
-    #[cfg(feature = "stylos")]
-    agent.set_stylos_tool_invoker(stylos_tool_invoker(stylos_tool_bridge));
-    Ok(agent)
 }
 
 fn set_input_text(input: &mut TextArea, text: &str) {

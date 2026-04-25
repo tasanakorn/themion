@@ -1,7 +1,6 @@
-use crate::config::Config;
+use crate::app_runtime::CliAppRuntime;
 use crate::runtime_domains::{DomainHandle, RuntimeDomains};
 use crate::tui::{dispatch_terminal_event, draw, App, AppEvent, FrameRequester};
-use crate::Session;
 use crossterm::{
     event::{DisableBracketedPaste, EnableBracketedPaste, PushKeyboardEnhancementFlags},
     execute,
@@ -14,6 +13,8 @@ use std::sync::Arc;
 use themion_core::db::DbHandle;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
+
+use crate::Session;
 
 type TerminalBackend = CrosstermBackend<std::io::Stdout>;
 type TuiTerminal = Terminal<TerminalBackend>;
@@ -139,64 +140,6 @@ fn install_panic_cleanup_hook() {
     }));
 }
 
-fn resolve_project_dir(dir_override: Option<PathBuf>) -> PathBuf {
-    dir_override
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .canonicalize()
-        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-}
-
-fn open_history_db() -> Arc<DbHandle> {
-    match dirs::data_dir() {
-        Some(d) => themion_core::db::open_default_in_data_dir(&d).unwrap_or_else(|e| {
-            eprintln!("warning: history persistence disabled: {}", e);
-            DbHandle::open_in_memory().expect("in-memory db")
-        }),
-        None => {
-            eprintln!("warning: history persistence disabled (no data dir)");
-            DbHandle::open_in_memory().expect("in-memory db")
-        }
-    }
-}
-
-fn prepare_session(
-    cfg: Config,
-    project_dir: &std::path::Path,
-    db: &Arc<DbHandle>,
-) -> (Session, Uuid) {
-    let session_id = Uuid::new_v4();
-    let _ = db.insert_session(session_id, project_dir, true);
-    (Session::from_config(cfg), session_id)
-}
-
-
-#[cfg(feature = "stylos")]
-async fn start_stylos(
-    runtime_domains: &Arc<RuntimeDomains>,
-    cfg: &crate::config::StylosConfig,
-    session: &Session,
-    project_dir: &std::path::Path,
-    db: &Arc<DbHandle>,
-) -> anyhow::Result<crate::stylos::StylosHandle> {
-    match runtime_domains
-        .network()
-        .spawn({
-            let stylos_cfg = cfg.clone();
-            let session = session.clone();
-            let project_dir = project_dir.to_path_buf();
-            let db = db.clone();
-            let network_domain = runtime_domains.network();
-            async move {
-                crate::stylos::start(&stylos_cfg, &session, &project_dir, db, network_domain).await
-            }
-        })
-        .await
-    {
-        Ok(handle) => Ok(handle),
-        Err(err) => Err(anyhow::anyhow!("failed to start stylos runtime: {}", err)),
-    }
-}
-
 #[cfg(feature = "stylos")]
 fn wire_stylos_app(
     app: &mut App,
@@ -319,36 +262,21 @@ impl RunnerContext {
     }
 }
 
-pub async fn run(
-    cfg: Config,
-    dir_override: Option<PathBuf>,
-    runtime_domains: Arc<RuntimeDomains>,
-) -> anyhow::Result<()> {
+pub async fn run(app_runtime: CliAppRuntime) -> anyhow::Result<()> {
     let mut terminal = TerminalGuard::enter()?;
     install_panic_cleanup_hook();
 
-    let project_dir = resolve_project_dir(dir_override);
-    let db = open_history_db();
-    #[cfg(feature = "stylos")]
-    let stylos_cfg = cfg.stylos.clone();
-    let (session, session_id) = prepare_session(cfg, &project_dir, &db);
+    let runtime_domains = app_runtime.runtime_domains.clone();
     let mut ctx = RunnerContext::build(&runtime_domains);
 
     #[cfg(feature = "stylos")]
-    let stylos_handle = Some(start_stylos(
-        &runtime_domains,
-        &stylos_cfg,
-        &session,
-        &project_dir,
-        &db,
-    )
-    .await?);
+    let stylos_handle = Some(crate::app_runtime::start_stylos(&app_runtime).await?);
 
     let mut app = build_app(
-        session,
-        db,
-        session_id,
-        project_dir,
+        app_runtime.session,
+        app_runtime.db,
+        app_runtime.session_id,
+        app_runtime.project_dir,
         &runtime_domains,
         #[cfg(feature = "stylos")]
         stylos_handle,
