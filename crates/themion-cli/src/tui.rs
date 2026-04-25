@@ -1,18 +1,12 @@
-use crate::config::{save_profiles, Config, ProfileConfig};
-use crate::runtime_domains::{DomainHandle, RuntimeDomains};
+use crate::config::{save_profiles, ProfileConfig};
+use crate::runtime_domains::DomainHandle;
 #[cfg(feature = "stylos")]
 use crate::stylos::{
     tool_bridge, IncomingPromptRequest, StylosHandle, StylosRuntimeState, StylosToolBridge,
 };
 use crate::{format_stats, Session};
 use crossterm::{
-    event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode,
-        KeyModifiers, MouseEventKind,
-    },
-    event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    event::{self, Event, KeyCode, KeyModifiers, MouseEventKind},
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -23,7 +17,6 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::collections::VecDeque;
-use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -35,7 +28,6 @@ use themion_core::workflow::WorkflowState;
 use themion_core::ModelInfo;
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc};
-use tokio_stream::StreamExt;
 use tui_textarea::CursorMove;
 use tui_textarea::TextArea;
 use unicode_width::UnicodeWidthChar;
@@ -43,7 +35,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::paste_burst::{CharDecision, FlushResult, PasteBurst};
 use uuid::Uuid;
 
-enum AppEvent {
+pub(crate) enum AppEvent {
     Key(event::KeyEvent),
     Mouse(event::MouseEvent),
     Paste(String),
@@ -97,13 +89,13 @@ enum ReviewMode {
 }
 
 pub struct AgentHandle {
-    pub agent: Option<Agent>,
-    pub session_id: Uuid,
+    pub(crate) agent: Option<Agent>,
+    pub(crate) session_id: Uuid,
     #[allow(dead_code)]
     pub agent_id: String,
     #[allow(dead_code)]
     pub label: String,
-    pub roles: Vec<String>,
+    pub(crate) roles: Vec<String>,
 }
 
 #[cfg(feature = "stylos")]
@@ -229,18 +221,18 @@ impl UiDirty {
         self.overlay = true;
     }
 
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         *self = Self::default();
     }
 }
 
 #[derive(Clone)]
-struct FrameRequester {
+pub(crate) struct FrameRequester {
     tx: mpsc::UnboundedSender<Instant>,
 }
 
 impl FrameRequester {
-    fn new(draw_tx: broadcast::Sender<()>, domain: &DomainHandle) -> Self {
+    pub(crate) fn new(draw_tx: broadcast::Sender<()>, domain: &DomainHandle) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         domain.spawn(FrameScheduler::new(rx, draw_tx).run());
         Self { tx }
@@ -479,7 +471,7 @@ impl AgentActivity {
 
 pub struct App<'a> {
     #[cfg(feature = "stylos")]
-    stylos: Option<StylosHandle>,
+    pub(crate) stylos: Option<StylosHandle>,
     #[cfg(feature = "stylos")]
     local_stylos_instance: Option<String>,
     session: Session,
@@ -487,7 +479,7 @@ pub struct App<'a> {
     pending: Option<String>,
     input: TextArea<'a>,
     paste_burst: PasteBurst,
-    running: bool,
+    pub(crate) running: bool,
     agent_busy: bool,
     scroll_offset: usize,
     navigation_mode: NavigationMode,
@@ -836,9 +828,27 @@ impl<'a> App<'a> {
         self.dirty.mark_all();
     }
 
-    fn request_draw(&mut self, frame_requester: &FrameRequester) {
+    pub(crate) fn request_draw(&mut self, frame_requester: &FrameRequester) {
         self.activity_counters.draw_request_count += 1;
         frame_requester.schedule_frame();
+    }
+
+    pub(crate) fn clear_dirty(&mut self) {
+        self.dirty.clear();
+    }
+
+    pub(crate) fn is_running(&self) -> bool {
+        self.running
+    }
+
+    pub(crate) fn finish_initial_draw(&mut self, frame_requester: &FrameRequester) {
+        self.clear_dirty();
+        self.request_draw(frame_requester);
+    }
+
+    #[cfg(feature = "stylos")]
+    pub(crate) fn shutdown_stylos(&mut self) -> Option<StylosHandle> {
+        self.stylos.take()
     }
 
     fn push(&mut self, entry: Entry) {
@@ -859,7 +869,41 @@ impl<'a> App<'a> {
         }
     }
 
-    fn refresh_stylos_status(&self) {
+    #[cfg(feature = "stylos")]
+    pub(crate) fn wire_stylos_event_streams(
+        &mut self,
+        tui_domain: &DomainHandle,
+        app_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
+        if let Some(handle) = self.stylos.as_mut() {
+            if let Some(mut cmd_rx) = handle.take_cmd_rx() {
+                let app_tx_cmd = app_tx.clone();
+                tui_domain.spawn(async move {
+                    while let Some(cmd) = cmd_rx.recv().await {
+                        let _ = app_tx_cmd.send(AppEvent::StylosCmd(cmd));
+                    }
+                });
+            }
+            if let Some(mut prompt_rx) = handle.take_prompt_rx() {
+                let app_tx_prompt = app_tx.clone();
+                tui_domain.spawn(async move {
+                    while let Some(request) = prompt_rx.recv().await {
+                        let _ = app_tx_prompt.send(AppEvent::IncomingPrompt(request));
+                    }
+                });
+            }
+            if let Some(mut event_rx) = handle.take_event_rx() {
+                let app_tx_event = app_tx.clone();
+                tui_domain.spawn(async move {
+                    while let Some(event) = event_rx.recv().await {
+                        let _ = app_tx_event.send(AppEvent::StylosEvent(event));
+                    }
+                });
+            }
+        }
+    }
+
+    pub(crate) fn refresh_stylos_status(&self) {
         #[cfg(feature = "stylos")]
         if self.stylos.is_some() {
             if validate_agent_roles(&self.agents).is_err() {
@@ -962,7 +1006,7 @@ impl<'a> App<'a> {
         }
     }
 
-    fn handle_agent_event(
+    fn process_agent_event(
         &mut self,
         ev: AgentEvent,
         #[cfg(feature = "stylos")] app_tx: &mpsc::UnboundedSender<AppEvent>,
@@ -1895,6 +1939,512 @@ Result:
         self.submit_text(text, app_tx);
         self.dirty.any() && !was_dirty
     }
+
+    pub(crate) fn handle_mouse_event(&mut self, mouse: event::MouseEvent, frame_requester: &FrameRequester) {
+        self.activity_counters.input_mouse_count += 1;
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.scroll_up();
+                self.mark_dirty_conversation();
+                self.request_draw(frame_requester);
+            }
+            MouseEventKind::ScrollDown => {
+                self.scroll_down();
+                self.mark_dirty_conversation();
+                self.request_draw(frame_requester);
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn handle_paste_event(&mut self, text: String, frame_requester: &FrameRequester) {
+        self.activity_counters.input_paste_count += 1;
+        handle_paste(self, text);
+        self.mark_dirty_input();
+        self.request_draw(frame_requester);
+    }
+
+    pub(crate) fn handle_tick_event(
+        &mut self,
+        frame_requester: &FrameRequester,
+        #[cfg(feature = "stylos")] app_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
+        let was_dirty = self.dirty.any();
+        self.on_tick();
+        if self.dirty.any() && !was_dirty {
+            self.request_draw(frame_requester);
+        }
+        #[cfg(feature = "stylos")]
+        self.maybe_inject_pending_board_note(app_tx);
+    }
+
+    pub(crate) fn handle_agent_ready_event(
+        &mut self,
+        agent: Box<Agent>,
+        sid: Uuid,
+        frame_requester: &FrameRequester,
+    ) {
+        let agent = *agent;
+        self.status_model_info = agent.model_info().cloned();
+        self.workflow_state = agent.workflow_state().clone();
+        if let Some(h) = self.agents.iter_mut().find(|h| h.session_id == sid) {
+            h.agent = Some(agent);
+        }
+        self.agent_busy = false;
+        self.active_turn_cancellation = None;
+        self.mark_dirty_status();
+        self.request_draw(frame_requester);
+    }
+
+    pub(crate) fn handle_login_prompt_event(
+        &mut self,
+        user_code: String,
+        verification_uri: String,
+        frame_requester: &FrameRequester,
+    ) {
+        self.set_agent_activity(AgentActivity::WaitingForLoginBrowser);
+        self.push(Entry::Assistant(format!(
+            "open {} and enter code {}",
+            verification_uri, user_code
+        )));
+        self.request_draw(frame_requester);
+    }
+
+    pub(crate) async fn handle_app_event(
+        &mut self,
+        event: AppEvent,
+        frame_requester: &FrameRequester,
+        app_tx: &mpsc::UnboundedSender<AppEvent>,
+        terminal: &Terminal<CrosstermBackend<std::io::Stdout>>,
+    ) {
+        match event {
+            AppEvent::Mouse(m) => self.handle_mouse_event(m, frame_requester),
+            AppEvent::Paste(text) => self.handle_paste_event(text, frame_requester),
+            AppEvent::Key(key) => self.handle_key_event(key, frame_requester, app_tx, terminal),
+            AppEvent::Tick => {
+                #[cfg(feature = "stylos")]
+                self.handle_tick_event(frame_requester, app_tx);
+                #[cfg(not(feature = "stylos"))]
+                self.handle_tick_event(frame_requester);
+            }
+            #[cfg(feature = "stylos")]
+            AppEvent::StylosCmd(cmd) => self.handle_stylos_cmd_event(cmd, app_tx),
+            #[cfg(feature = "stylos")]
+            AppEvent::StylosEvent(text) => self.handle_stylos_event_text(text),
+            #[cfg(feature = "stylos")]
+            AppEvent::IncomingPrompt(request) => self.handle_incoming_prompt_event(request, app_tx),
+            #[cfg(feature = "stylos")]
+            AppEvent::Agent(ev) => self.handle_agent_event_for_run(ev, frame_requester, app_tx),
+            #[cfg(not(feature = "stylos"))]
+            AppEvent::Agent(ev) => self.handle_agent_event_for_run(ev, frame_requester),
+            AppEvent::AgentReady(agent, sid) => {
+                self.handle_agent_ready_event(agent, sid, frame_requester);
+            }
+            AppEvent::LoginPrompt { user_code, verification_uri } => {
+                self.handle_login_prompt_event(user_code, verification_uri, frame_requester);
+            }
+            AppEvent::LoginComplete(auth_result) => {
+                self.handle_login_complete_event(auth_result, frame_requester).await;
+            }
+            AppEvent::ShellComplete { output, exit_code } => {
+                self.handle_shell_complete_event(output, exit_code, frame_requester);
+            }
+        }
+    }
+
+    pub(crate) async fn handle_login_complete_event(
+        &mut self,
+        auth_result: anyhow::Result<themion_core::CodexAuth>,
+        frame_requester: &FrameRequester,
+    ) {
+        match auth_result {
+            Ok(auth) => {
+                self.clear_agent_activity();
+                if let Err(e) = crate::auth_store::save(&auth) {
+                    self.push(Entry::Assistant(format!(
+                        "warning: failed to save auth: {}",
+                        e
+                    )));
+                }
+                self.session.profiles.insert(
+                    "codex".to_string(),
+                    ProfileConfig {
+                        provider: Some("openai-codex".to_string()),
+                        model: Some("gpt-5.4".to_string()),
+                        base_url: None,
+                        api_key: None,
+                    },
+                );
+                self.session.switch_profile("codex");
+                if let Err(e) = save_profiles(&self.session.active_profile, &self.session.profiles) {
+                    self.push(Entry::Assistant(format!(
+                        "warning: failed to save config: {}",
+                        e
+                    )));
+                }
+                let new_session_id = Uuid::new_v4();
+                match build_agent(
+                    &self.session,
+                    new_session_id,
+                    self.project_dir.clone(),
+                    self.db.clone(),
+                    #[cfg(feature = "stylos")]
+                    self.stylos_tool_bridge.clone(),
+                    #[cfg(feature = "stylos")]
+                    self.local_stylos_instance.as_deref(),
+                    #[cfg(feature = "stylos")]
+                    "main",
+                ) {
+                    Ok(mut new_agent) => {
+                        new_agent.refresh_model_info().await;
+                        let _ = self
+                            .db
+                            .insert_session(new_session_id, &self.project_dir, true);
+                        self.status_model_info = new_agent.model_info().cloned();
+                        self.workflow_state = new_agent.workflow_state().clone();
+                        self.agents = vec![AgentHandle {
+                            agent: Some(new_agent),
+                            session_id: new_session_id,
+                            agent_id: "main".to_string(),
+                            label: "main".to_string(),
+                            roles: vec!["main".to_string(), "interactive".to_string()],
+                        }];
+                        self.push(Entry::Assistant(format!(
+                            "logged in as {} — switched to codex profile (gpt-5.4)",
+                            auth.account_id
+                        )));
+                        self.push(Entry::Blank);
+                        self.agent_busy = false;
+                        self.mark_dirty_all();
+                        self.request_draw(frame_requester);
+                    }
+                    Err(e) => {
+                        self.push(Entry::Assistant(format!(
+                            "login succeeded but agent build failed: {}",
+                            e
+                        )));
+                        self.agent_busy = false;
+                        self.mark_dirty_all();
+                        self.request_draw(frame_requester);
+                    }
+                }
+            }
+            Err(e) => {
+                self.clear_agent_activity();
+                self.push(Entry::Assistant(format!("login failed: {}", e)));
+                self.agent_busy = false;
+                self.mark_dirty_all();
+                self.request_draw(frame_requester);
+            }
+        }
+    }
+
+    pub(crate) fn handle_agent_event_for_run(
+        &mut self,
+        ev: AgentEvent,
+        frame_requester: &FrameRequester,
+        #[cfg(feature = "stylos")] app_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
+        self.activity_counters.agent_event_count += 1;
+        self.process_agent_event(ev, #[cfg(feature = "stylos")] app_tx);
+        if self.dirty.any() {
+            self.request_draw(frame_requester);
+        }
+    }
+
+    pub(crate) fn handle_draw_event(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    ) -> anyhow::Result<()> {
+        if self.dirty.any() {
+            let draw_started = Instant::now();
+            terminal.draw(|f| draw(f, self))?;
+            let draw_us = draw_started.elapsed().as_micros() as u64;
+            self.activity_counters.draw_count += 1;
+            self.activity_counters.draw_total_us += draw_us;
+            self.activity_counters.draw_max_us = self.activity_counters.draw_max_us.max(draw_us);
+            self.dirty.clear();
+        } else {
+            self.activity_counters.draw_skip_clean_count += 1;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn handle_shell_complete_event(
+        &mut self,
+        output: String,
+        exit_code: Option<i32>,
+        frame_requester: &FrameRequester,
+    ) {
+        self.activity_counters.shell_complete_count += 1;
+        self.clear_agent_activity();
+        self.push(Entry::Assistant(output));
+        if let Some(code) = exit_code {
+            if code != 0 {
+                self.push(Entry::Assistant(format!("exit code: {}", code)));
+            }
+        }
+        self.push(Entry::Blank);
+        self.agent_busy = false;
+        self.mark_dirty_all();
+        self.request_draw(frame_requester);
+    }
+
+    #[cfg(feature = "stylos")]
+    pub(crate) fn handle_stylos_cmd_event(
+        &mut self,
+        cmd: crate::stylos::StylosCmdRequest,
+        app_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
+        self.push(Entry::RemoteEvent(format!(
+            "Stylos cmd scope=local preview={}",
+            cmd.prompt.lines().next().unwrap_or("")
+        )));
+        self.active_incoming_prompt = None;
+        self.submit_text(cmd.prompt, app_tx);
+    }
+
+    #[cfg(feature = "stylos")]
+    pub(crate) fn handle_stylos_event_text(&mut self, text: String) {
+        self.push(Entry::RemoteEvent(text));
+    }
+
+    #[cfg(feature = "stylos")]
+    pub(crate) fn handle_incoming_prompt_event(
+        &mut self,
+        request: IncomingPromptRequest,
+        app_tx: &mpsc::UnboundedSender<AppEvent>,
+    ) {
+        self.activity_counters.incoming_prompt_count += 1;
+        let target = request
+            .agent_id
+            .clone()
+            .unwrap_or_else(|| "interactive".to_string());
+        if self.agent_busy {
+            let sender = request.from.as_deref().unwrap_or("unknown sender");
+            let sender_agent = request.from_agent_id.as_deref().unwrap_or("unknown");
+            let target_instance = request.to.as_deref().unwrap_or("unknown target");
+            let target_agent = request.to_agent_id.as_deref().unwrap_or(target.as_str());
+            if request.prompt.starts_with("type=stylos_note ") {
+                let note_identifier = stylos_note_display_identifier(&request.prompt);
+                self.push(Entry::RemoteEvent(format!(
+                    "Board note intake {} from={} from_agent_id={} to={} to_agent_id={} deferred: local agent busy",
+                    note_identifier, sender, sender_agent, target_instance, target_agent
+                )));
+            } else {
+                self.push(Entry::RemoteEvent(format!(
+                    "Stylos hear from={} from_agent_id={} to={} to_agent_id={} rejected: local agent busy",
+                    sender, sender_agent, target_instance, target_agent
+                )));
+            }
+            if let (Some(handle), Some(task_id)) =
+                (self.stylos.as_ref(), request.task_id.clone())
+            {
+                let query_context = handle.query_context();
+                self.background_domain().spawn(async move {
+                    query_context
+                        .task_registry()
+                        .set_failed(&task_id, "agent_busy".to_string())
+                        .await;
+                });
+            }
+        } else {
+            let sender = request.from.as_deref().unwrap_or("unknown sender");
+            let sender_agent = request.from_agent_id.as_deref().unwrap_or("unknown");
+            let target_instance = request.to.as_deref().unwrap_or("unknown target");
+            let target_agent = request.to_agent_id.as_deref().unwrap_or(target.as_str());
+            if request.prompt.starts_with("type=stylos_note ") {
+                let note_identifier = stylos_note_display_identifier(&request.prompt);
+                let column = stylos_note_header_value(&request.prompt, "column")
+                    .unwrap_or("unknown");
+                self.push(Entry::RemoteEvent(format!(
+                    "Board note intake {} from={} from_agent_id={} to={} to_agent_id={} column={}",
+                    note_identifier, sender, sender_agent, target_instance, target_agent, column
+                )));
+            } else {
+                self.push(Entry::RemoteEvent(format!(
+                    "Stylos hear from={} from_agent_id={} to={} to_agent_id={}",
+                    sender, sender_agent, target_instance, target_agent
+                )));
+            }
+            self.active_incoming_prompt = Some(request.clone());
+            self.submit_text(request.prompt, app_tx);
+        }
+    }
+
+    pub(crate) fn handle_key_event(
+        &mut self,
+        key: event::KeyEvent,
+        frame_requester: &FrameRequester,
+        app_tx: &mpsc::UnboundedSender<AppEvent>,
+        terminal: &Terminal<CrosstermBackend<std::io::Stdout>>,
+    ) {
+        self.activity_counters.input_key_count += 1;
+
+        let now = Instant::now();
+        match self.paste_burst.flush_if_due(now) {
+            FlushResult::Paste(text) => handle_paste(self, text),
+            FlushResult::Typed(ch) => self.input.insert_char(ch),
+            FlushResult::None => {}
+        }
+
+        if matches!(key.code, KeyCode::Enter)
+            && self.paste_burst.is_active()
+            && self.paste_burst.append_newline_if_active(now)
+        {
+            return;
+        }
+
+        if let KeyCode::Char(ch) = key.code {
+            let has_ctrl_or_alt = key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::ALT);
+            if !has_ctrl_or_alt {
+                if !ch.is_ascii() {
+                    let _ = handle_non_ascii_char(self, key, now);
+                    return;
+                }
+
+                if let Some(decision) = self.paste_burst.on_plain_char_no_hold(now) {
+                    match decision {
+                        CharDecision::BufferAppend => {
+                            self.paste_burst.append_char_to_buffer(ch, now);
+                            return;
+                        }
+                        CharDecision::BeginBuffer { retro_chars } => {
+                            let (text, byte_pos) = input_text_and_cursor_byte(&self.input);
+                            let safe_cursor = clamp_to_char_boundary(&text, byte_pos);
+                            let before = &text[..safe_cursor];
+                            if let Some(grab) = self.paste_burst.decide_begin_buffer(
+                                now,
+                                before,
+                                retro_chars as usize,
+                            ) {
+                                let kept = format!(
+                                    "{}{}",
+                                    &text[..grab.start_byte],
+                                    &text[safe_cursor..]
+                                );
+                                set_input_text_and_cursor(
+                                    &mut self.input,
+                                    &kept,
+                                    grab.start_byte,
+                                );
+                                self.paste_burst.append_char_to_buffer(ch, now);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
+                handle_paste(self, pasted);
+            }
+        }
+
+        if !matches!(key.code, KeyCode::Char(_) | KeyCode::Enter) {
+            if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
+                handle_paste(self, pasted);
+            }
+        }
+
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.running = false,
+            (KeyCode::Esc, _) if self.review_mode == ReviewMode::Transcript => {
+                self.close_transcript_review();
+                self.mark_dirty_overlay();
+                self.request_draw(frame_requester);
+            }
+            (KeyCode::Esc, _) if self.agent_busy => self.request_interrupt(),
+            (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
+                let tx = app_tx.clone();
+                if self.submit_input(&tx) {
+                    self.request_draw(frame_requester);
+                }
+            }
+            (KeyCode::Enter, KeyModifiers::NONE) => {
+                if self.review_mode != ReviewMode::Closed {
+                    self.close_transcript_review();
+                } else if self.paste_burst.newline_should_insert_instead_of_submit(now) {
+                    self.input.insert_newline();
+                    self.mark_dirty_input();
+                    self.request_draw(frame_requester);
+                    self.paste_burst.extend_window(now);
+                } else {
+                    let tx = app_tx.clone();
+                    if self.submit_input(&tx) {
+                        self.request_draw(frame_requester);
+                    }
+                }
+            }
+            (KeyCode::Enter, KeyModifiers::SHIFT)
+            | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+                if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
+                    handle_paste(self, pasted);
+                }
+                self.input.insert_newline();
+                self.mark_dirty_input();
+                self.request_draw(frame_requester);
+            }
+            (KeyCode::PageUp, _) => {
+                let page = area_page_height(terminal, self);
+                self.page_up(page);
+            }
+            (KeyCode::PageDown, _) => {
+                let page = area_page_height(terminal, self);
+                self.page_down(page);
+            }
+            (KeyCode::Up, KeyModifiers::ALT) => self.scroll_up(),
+            (KeyCode::Down, KeyModifiers::ALT) => self.scroll_down(),
+            (KeyCode::Char('g'), KeyModifiers::ALT) => {
+                self.return_to_latest();
+                self.mark_dirty_conversation();
+                self.request_draw(frame_requester);
+            }
+            (KeyCode::Char('t'), KeyModifiers::ALT) => {
+                if self.review_mode == ReviewMode::Transcript {
+                    self.close_transcript_review();
+                } else {
+                    self.open_transcript_review();
+                    self.mark_dirty_overlay();
+                    self.request_draw(frame_requester);
+                }
+            }
+            (KeyCode::Home, KeyModifiers::ALT) => {
+                let (total, height) = current_total_and_height(terminal, self);
+                self.jump_to_top(total, height);
+            }
+            (KeyCode::Up, KeyModifiers::NONE) if self.review_mode == ReviewMode::Closed => {
+                self.history_up();
+                self.mark_dirty_input();
+                self.request_draw(frame_requester)
+            }
+            (KeyCode::Down, KeyModifiers::NONE) if self.review_mode == ReviewMode::Closed => {
+                self.history_down();
+                self.mark_dirty_input();
+                self.request_draw(frame_requester)
+            }
+            _ => {
+                if self.review_mode == ReviewMode::Closed {
+                    self.input.input(key);
+                    self.mark_dirty_input();
+                    self.request_draw(frame_requester);
+                    match key.code {
+                        KeyCode::Char(_) => {
+                            let has_ctrl_or_alt =
+                                key.modifiers.contains(KeyModifiers::CONTROL)
+                                    || key.modifiers.contains(KeyModifiers::ALT);
+                            if has_ctrl_or_alt {
+                                self.paste_burst.clear_window_after_non_char();
+                            }
+                        }
+                        KeyCode::Enter => {}
+                        _ => self.paste_burst.clear_window_after_non_char(),
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(feature = "stylos")]
@@ -2127,7 +2677,7 @@ fn handle_paste(app: &mut App<'_>, pasted: String) {
     app.paste_burst.clear_after_explicit_paste();
 }
 
-fn dispatch_terminal_event(app_tx: &mpsc::UnboundedSender<AppEvent>, event: Event) -> bool {
+pub(crate) fn dispatch_terminal_event(app_tx: &mpsc::UnboundedSender<AppEvent>, event: Event) -> bool {
     let app_event = match event {
         Event::Key(key) => AppEvent::Key(key),
         Event::Mouse(mouse) => AppEvent::Mouse(mouse),
@@ -2135,32 +2685,6 @@ fn dispatch_terminal_event(app_tx: &mpsc::UnboundedSender<AppEvent>, event: Even
         _ => return true,
     };
     app_tx.send(app_event).is_ok()
-}
-
-async fn run_terminal_input_loop(
-    app_tx: mpsc::UnboundedSender<AppEvent>,
-    mut shutdown_rx: broadcast::Receiver<()>,
-) {
-    let mut events = EventStream::new();
-    loop {
-        tokio::select! {
-            _ = shutdown_rx.recv() => break,
-            maybe_event = events.next() => match maybe_event {
-                Some(Ok(event)) => {
-                    if !dispatch_terminal_event(&app_tx, event) {
-                        break;
-                    }
-                }
-                Some(Err(err)) => {
-                    if matches!(err.kind(), io::ErrorKind::Interrupted) {
-                        break;
-                    }
-                    continue;
-                }
-                None => break,
-            }
-        }
-    }
 }
 
 fn handle_non_ascii_char(app: &mut App<'_>, key: event::KeyEvent, _now: Instant) -> bool {
@@ -2408,7 +2932,7 @@ fn review_area(area: Rect) -> Rect {
     }
 }
 
-fn draw(f: &mut Frame, app: &App) {
+pub(crate) fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
     let input_text = app.input.lines().join("\n");
 
@@ -2550,586 +3074,9 @@ fn draw(f: &mut Frame, app: &App) {
     }
 }
 
-pub async fn run(
-    cfg: Config,
-    dir_override: Option<std::path::PathBuf>,
-    runtime_domains: Arc<RuntimeDomains>,
-) -> anyhow::Result<()> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture,
-        EnableBracketedPaste
-    )?;
-    let _ = execute!(
-        io::stdout(),
-        PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-        )
-    );
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
 
-    let original_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let _ = disable_raw_mode();
-        let _ = execute!(
-            io::stdout(),
-            crossterm::event::DisableMouseCapture,
-            DisableBracketedPaste,
-            PopKeyboardEnhancementFlags,
-            LeaveAlternateScreen
-        );
-        original_hook(info);
-    }));
 
-    let project_dir = dir_override
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .canonicalize()
-        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-    let db = match dirs::data_dir() {
-        Some(d) => themion_core::db::open_default_in_data_dir(&d).unwrap_or_else(|e| {
-            eprintln!("warning: history persistence disabled: {}", e);
-            DbHandle::open_in_memory().expect("in-memory db")
-        }),
-        None => {
-            eprintln!("warning: history persistence disabled (no data dir)");
-            DbHandle::open_in_memory().expect("in-memory db")
-        }
-    };
-
-    let session_id = Uuid::new_v4();
-    let _ = db.insert_session(session_id, &project_dir, true);
-
-    #[cfg(feature = "stylos")]
-    let stylos_cfg = cfg.stylos.clone();
-    let session = Session::from_config(cfg);
-    let (app_tx, mut app_rx) = mpsc::unbounded_channel::<AppEvent>();
-
-    let tui_domain = runtime_domains
-        .tui()
-        .expect("tui runtime available in TUI mode");
-    #[cfg(feature = "stylos")]
-    let network_domain = runtime_domains.network();
-
-    let (input_shutdown_tx, input_shutdown_rx) = broadcast::channel::<()>(1);
-    tui_domain.spawn(run_terminal_input_loop(app_tx.clone(), input_shutdown_rx));
-
-    let app_tx_tick = app_tx.clone();
-    let tui_domain_for_tick = tui_domain.clone();
-    tui_domain_for_tick.spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(150));
-        loop {
-            interval.tick().await;
-            if app_tx_tick.send(AppEvent::Tick).is_err() {
-                break;
-            }
-        }
-    });
-
-    #[cfg(feature = "stylos")]
-    let stylos_handle = Some(
-        match network_domain
-            .spawn({
-                let stylos_cfg = stylos_cfg.clone();
-                let session = session.clone();
-                let project_dir = project_dir.clone();
-                let db = db.clone();
-                let network_domain = network_domain.clone();
-                async move {
-                    crate::stylos::start(&stylos_cfg, &session, &project_dir, db, network_domain)
-                        .await
-                }
-            })
-            .await
-        {
-            Ok(handle) => handle,
-            Err(err) => return Err(anyhow::anyhow!("failed to start stylos runtime: {}", err)),
-        },
-    );
-
-    let mut app = App::new(
-        session,
-        db,
-        session_id,
-        project_dir,
-        runtime_domains
-            .background()
-            .expect("background runtime available in TUI mode"),
-        runtime_domains.core(),
-        #[cfg(feature = "stylos")]
-        stylos_handle,
-    );
-
-    #[cfg(feature = "stylos")]
-    app.refresh_stylos_status();
-
-    #[cfg(feature = "stylos")]
-    if let Some(handle) = app.stylos.as_mut() {
-        if let Some(mut cmd_rx) = handle.take_cmd_rx() {
-            let app_tx_cmd = app_tx.clone();
-            tui_domain.spawn(async move {
-                while let Some(cmd) = cmd_rx.recv().await {
-                    let _ = app_tx_cmd.send(AppEvent::StylosCmd(cmd));
-                }
-            });
-        }
-        if let Some(mut prompt_rx) = handle.take_prompt_rx() {
-            let app_tx_prompt = app_tx.clone();
-            tui_domain.spawn(async move {
-                while let Some(request) = prompt_rx.recv().await {
-                    let _ = app_tx_prompt.send(AppEvent::IncomingPrompt(request));
-                }
-            });
-        }
-        if let Some(mut event_rx) = handle.take_event_rx() {
-            let app_tx_event = app_tx.clone();
-            tui_domain.spawn(async move {
-                while let Some(event) = event_rx.recv().await {
-                    let _ = app_tx_event.send(AppEvent::StylosEvent(event));
-                }
-            });
-        }
-    }
-
-    let (draw_tx, mut draw_rx) = broadcast::channel::<()>(8);
-    let frame_requester = FrameRequester::new(draw_tx, &tui_domain);
-    terminal.draw(|f| draw(f, &app))?;
-    app.dirty.clear();
-    app.request_draw(&frame_requester);
-
-    while app.running {
-        tokio::select! {
-            maybe_draw = draw_rx.recv() => {
-                if maybe_draw.is_ok() {
-                    if app.dirty.any() {
-                        let draw_started = Instant::now();
-                        terminal.draw(|f| draw(f, &app))?;
-                        let draw_us = draw_started.elapsed().as_micros() as u64;
-                        app.activity_counters.draw_count += 1;
-                        app.activity_counters.draw_total_us += draw_us;
-                        app.activity_counters.draw_max_us = app.activity_counters.draw_max_us.max(draw_us);
-                        app.dirty.clear();
-                    } else {
-                        app.activity_counters.draw_skip_clean_count += 1;
-                    }
-                }
-            }
-            event = app_rx.recv() => match event {
-            Some(AppEvent::Mouse(m)) => {
-                app.activity_counters.input_mouse_count += 1;
-                match m.kind {
-                    MouseEventKind::ScrollUp => { app.scroll_up(); app.mark_dirty_conversation(); app.request_draw(&frame_requester); }
-                    MouseEventKind::ScrollDown => { app.scroll_down(); app.mark_dirty_conversation(); app.request_draw(&frame_requester); }
-                    _ => {}
-                }
-            }
-            Some(AppEvent::Paste(text)) => {
-                app.activity_counters.input_paste_count += 1;
-                handle_paste(&mut app, text);
-                app.mark_dirty_input();
-                app.request_draw(&frame_requester);
-            }
-            Some(AppEvent::Key(key)) => {
-                app.activity_counters.input_key_count += 1;
-
-                let now = Instant::now();
-                match app.paste_burst.flush_if_due(now) {
-                    FlushResult::Paste(text) => handle_paste(&mut app, text),
-                    FlushResult::Typed(ch) => app.input.insert_char(ch),
-                    FlushResult::None => {}
-                }
-
-                if matches!(key.code, KeyCode::Enter)
-                    && app.paste_burst.is_active()
-                    && app.paste_burst.append_newline_if_active(now)
-                {
-                    continue;
-                }
-
-                if let KeyCode::Char(ch) = key.code {
-                    let has_ctrl_or_alt = key.modifiers.contains(KeyModifiers::CONTROL)
-                        || key.modifiers.contains(KeyModifiers::ALT);
-                    if !has_ctrl_or_alt {
-                        if !ch.is_ascii() {
-                            let _ = handle_non_ascii_char(&mut app, key, now);
-                            continue;
-                        }
-
-                        if let Some(decision) = app.paste_burst.on_plain_char_no_hold(now) {
-                            match decision {
-                                CharDecision::BufferAppend => {
-                                    app.paste_burst.append_char_to_buffer(ch, now);
-                                    continue;
-                                }
-                                CharDecision::BeginBuffer { retro_chars } => {
-                                    let (text, byte_pos) = input_text_and_cursor_byte(&app.input);
-                                    let safe_cursor = clamp_to_char_boundary(&text, byte_pos);
-                                    let before = &text[..safe_cursor];
-                                    if let Some(grab) = app.paste_burst.decide_begin_buffer(
-                                        now,
-                                        before,
-                                        retro_chars as usize,
-                                    ) {
-                                        let kept = format!(
-                                            "{}{}",
-                                            &text[..grab.start_byte],
-                                            &text[safe_cursor..]
-                                        );
-                                        set_input_text_and_cursor(
-                                            &mut app.input,
-                                            &kept,
-                                            grab.start_byte,
-                                        );
-                                        app.paste_burst.append_char_to_buffer(ch, now);
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if let Some(pasted) = app.paste_burst.flush_before_modified_input() {
-                        handle_paste(&mut app, pasted);
-                    }
-                }
-
-                if !matches!(key.code, KeyCode::Char(_) | KeyCode::Enter) {
-                    if let Some(pasted) = app.paste_burst.flush_before_modified_input() {
-                        handle_paste(&mut app, pasted);
-                    }
-                }
-
-                match (key.code, key.modifiers) {
-                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.running = false,
-                    (KeyCode::Esc, _) if app.review_mode == ReviewMode::Transcript => {
-                        app.close_transcript_review();
-                        app.mark_dirty_overlay();
-                        app.request_draw(&frame_requester);
-                    }
-                    (KeyCode::Esc, _) if app.agent_busy => app.request_interrupt(),
-                    (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
-                        let tx = app_tx.clone();
-                        if app.submit_input(&tx) {
-                            app.request_draw(&frame_requester);
-                        }
-                    }
-                    (KeyCode::Enter, KeyModifiers::NONE) => {
-                        if app.review_mode != ReviewMode::Closed {
-                            app.close_transcript_review();
-                        } else if app.paste_burst.newline_should_insert_instead_of_submit(now) {
-                            app.input.insert_newline();
-                            app.mark_dirty_input();
-                            app.request_draw(&frame_requester);
-                            app.paste_burst.extend_window(now);
-                        } else {
-                            let tx = app_tx.clone();
-                            if app.submit_input(&tx) {
-                                app.request_draw(&frame_requester);
-                            }
-                        }
-                    }
-                    (KeyCode::Enter, KeyModifiers::SHIFT)
-                    | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
-                        if let Some(pasted) = app.paste_burst.flush_before_modified_input() {
-                            handle_paste(&mut app, pasted);
-                        }
-                        app.input.insert_newline();
-                        app.mark_dirty_input();
-                        app.request_draw(&frame_requester);
-                    }
-                    (KeyCode::PageUp, _) => {
-                        let page = area_page_height(&terminal, &app);
-                        app.page_up(page);
-                    }
-                    (KeyCode::PageDown, _) => {
-                        let page = area_page_height(&terminal, &app);
-                        app.page_down(page);
-                    }
-                    (KeyCode::Up, KeyModifiers::ALT) => app.scroll_up(),
-                    (KeyCode::Down, KeyModifiers::ALT) => app.scroll_down(),
-                    (KeyCode::Char('g'), KeyModifiers::ALT) => { app.return_to_latest(); app.mark_dirty_conversation(); app.request_draw(&frame_requester); },
-                    (KeyCode::Char('t'), KeyModifiers::ALT) => {
-                        if app.review_mode == ReviewMode::Transcript {
-                            app.close_transcript_review();
-                        } else {
-                            app.open_transcript_review();
-                            app.mark_dirty_overlay();
-                            app.request_draw(&frame_requester);
-                        }
-                    }
-                    (KeyCode::Home, KeyModifiers::ALT) => {
-                        let (total, height) = current_total_and_height(&terminal, &app);
-                        app.jump_to_top(total, height);
-                    }
-                    (KeyCode::Up, KeyModifiers::NONE) if app.review_mode == ReviewMode::Closed => {
-                        app.history_up(); app.mark_dirty_input(); app.request_draw(&frame_requester)
-                    }
-                    (KeyCode::Down, KeyModifiers::NONE)
-                        if app.review_mode == ReviewMode::Closed =>
-                    {
-                        app.history_down(); app.mark_dirty_input(); app.request_draw(&frame_requester)
-                    }
-                    _ => {
-                        if app.review_mode == ReviewMode::Closed {
-                            app.input.input(key);
-                            app.mark_dirty_input();
-                            app.request_draw(&frame_requester);
-                            match key.code {
-                                KeyCode::Char(_) => {
-                                    let has_ctrl_or_alt =
-                                        key.modifiers.contains(KeyModifiers::CONTROL)
-                                            || key.modifiers.contains(KeyModifiers::ALT);
-                                    if has_ctrl_or_alt {
-                                        app.paste_burst.clear_window_after_non_char();
-                                    }
-                                }
-                                KeyCode::Enter => {}
-                                _ => app.paste_burst.clear_window_after_non_char(),
-                            }
-                        }
-                    }
-                }
-            }
-            Some(AppEvent::Tick) => {
-                let was_dirty = app.dirty.any();
-                app.on_tick();
-                if app.dirty.any() && !was_dirty {
-                    app.request_draw(&frame_requester);
-                }
-                #[cfg(feature = "stylos")]
-                app.maybe_inject_pending_board_note(&app_tx);
-            }
-            #[cfg(feature = "stylos")]
-            Some(AppEvent::StylosCmd(cmd)) => {
-                #[cfg(feature = "stylos")]
-                app.push(Entry::RemoteEvent(format!(
-                    "Stylos cmd scope=local preview={}",
-                    cmd.prompt.lines().next().unwrap_or("")
-                )));
-                app.active_incoming_prompt = None;
-                app.submit_text(cmd.prompt, &app_tx);
-            }
-            #[cfg(feature = "stylos")]
-            Some(AppEvent::StylosEvent(text)) => {
-                app.push(Entry::RemoteEvent(text));
-            }
-            #[cfg(feature = "stylos")]
-            Some(AppEvent::IncomingPrompt(request)) => {
-                app.activity_counters.incoming_prompt_count += 1;
-                let target = request
-                    .agent_id
-                    .clone()
-                    .unwrap_or_else(|| "interactive".to_string());
-                if app.agent_busy {
-                    let sender = request.from.as_deref().unwrap_or("unknown sender");
-                    let sender_agent = request.from_agent_id.as_deref().unwrap_or("unknown");
-                    let target_instance = request.to.as_deref().unwrap_or("unknown target");
-                    let target_agent = request.to_agent_id.as_deref().unwrap_or(target.as_str());
-                    if request.prompt.starts_with("type=stylos_note ") {
-                        let note_identifier = stylos_note_display_identifier(&request.prompt);
-                        app.push(Entry::RemoteEvent(format!(
-                            "Board note intake {} from={} from_agent_id={} to={} to_agent_id={} deferred: local agent busy",
-                            note_identifier, sender, sender_agent, target_instance, target_agent
-                        )));
-                    } else {
-                        app.push(Entry::RemoteEvent(format!(
-                            "Stylos hear from={} from_agent_id={} to={} to_agent_id={} rejected: local agent busy",
-                            sender, sender_agent, target_instance, target_agent
-                        )));
-                    }
-                    if let (Some(handle), Some(task_id)) =
-                        (app.stylos.as_ref(), request.task_id.clone())
-                    {
-                        let query_context = handle.query_context();
-                        app.background_domain().spawn(async move {
-                            query_context
-                                .task_registry()
-                                .set_failed(&task_id, "agent_busy".to_string())
-                                .await;
-                        });
-                    }
-                } else {
-                    let sender = request.from.as_deref().unwrap_or("unknown sender");
-                    let sender_agent = request.from_agent_id.as_deref().unwrap_or("unknown");
-                    let target_instance = request.to.as_deref().unwrap_or("unknown target");
-                    let target_agent = request.to_agent_id.as_deref().unwrap_or(target.as_str());
-                    if request.prompt.starts_with("type=stylos_note ") {
-                        let note_identifier = stylos_note_display_identifier(&request.prompt);
-                        let column = stylos_note_header_value(&request.prompt, "column")
-                            .unwrap_or("unknown");
-                        app.push(Entry::RemoteEvent(format!(
-                            "Board note intake {} from={} from_agent_id={} to={} to_agent_id={} column={}",
-                            note_identifier, sender, sender_agent, target_instance, target_agent, column
-                        )));
-                    } else {
-                        app.push(Entry::RemoteEvent(format!(
-                            "Stylos hear from={} from_agent_id={} to={} to_agent_id={}",
-                            sender, sender_agent, target_instance, target_agent
-                        )));
-                    }
-                    app.active_incoming_prompt = Some(request.clone());
-                    app.submit_text(request.prompt, &app_tx);
-                }
-            }
-            #[cfg(feature = "stylos")]
-            Some(AppEvent::Agent(ev)) => {
-                app.activity_counters.agent_event_count += 1;
-                app.handle_agent_event(ev, &app_tx);
-                if app.dirty.any() { app.request_draw(&frame_requester); }
-            }
-            #[cfg(not(feature = "stylos"))]
-            Some(AppEvent::Agent(ev)) => {
-                app.activity_counters.agent_event_count += 1;
-                app.handle_agent_event(ev);
-                if app.dirty.any() { app.request_draw(&frame_requester); }
-            }
-            Some(AppEvent::AgentReady(agent, sid)) => {
-                let agent = *agent;
-                app.status_model_info = agent.model_info().cloned();
-                app.workflow_state = agent.workflow_state().clone();
-                if let Some(h) = app.agents.iter_mut().find(|h| h.session_id == sid) {
-                    h.agent = Some(agent);
-                }
-                app.agent_busy = false;
-                app.active_turn_cancellation = None;
-                app.mark_dirty_status();
-                app.request_draw(&frame_requester);
-            }
-            Some(AppEvent::LoginPrompt {
-                user_code,
-                verification_uri,
-            }) => {
-                app.set_agent_activity(AgentActivity::WaitingForLoginBrowser);
-                app.push(Entry::Assistant(format!(
-                    "open {} and enter code {}",
-                    verification_uri, user_code
-                )));
-                app.request_draw(&frame_requester);
-            }
-            Some(AppEvent::LoginComplete(Ok(auth))) => {
-                app.clear_agent_activity();
-                if let Err(e) = crate::auth_store::save(&auth) {
-                    app.push(Entry::Assistant(format!(
-                        "warning: failed to save auth: {}",
-                        e
-                    )));
-                }
-                use crate::config::ProfileConfig;
-                app.session.profiles.insert(
-                    "codex".to_string(),
-                    ProfileConfig {
-                        provider: Some("openai-codex".to_string()),
-                        model: Some("gpt-5.4".to_string()),
-                        base_url: None,
-                        api_key: None,
-                    },
-                );
-                app.session.switch_profile("codex");
-                if let Err(e) = save_profiles(&app.session.active_profile, &app.session.profiles) {
-                    app.push(Entry::Assistant(format!(
-                        "warning: failed to save config: {}",
-                        e
-                    )));
-                }
-                let new_session_id = Uuid::new_v4();
-                match build_agent(
-                    &app.session,
-                    new_session_id,
-                    app.project_dir.clone(),
-                    app.db.clone(),
-                    #[cfg(feature = "stylos")]
-                    app.stylos_tool_bridge.clone(),
-                    #[cfg(feature = "stylos")]
-                    app.local_stylos_instance.as_deref(),
-                    #[cfg(feature = "stylos")]
-                    "main",
-                ) {
-                    Ok(mut new_agent) => {
-                        new_agent.refresh_model_info().await;
-                        let _ = app
-                            .db
-                            .insert_session(new_session_id, &app.project_dir, true);
-                        app.status_model_info = new_agent.model_info().cloned();
-                        app.workflow_state = new_agent.workflow_state().clone();
-                        app.agents = vec![AgentHandle {
-                            agent: Some(new_agent),
-                            session_id: new_session_id,
-                            agent_id: "main".to_string(),
-                            label: "main".to_string(),
-                            roles: vec!["main".to_string(), "interactive".to_string()],
-                        }];
-                        app.push(Entry::Assistant(format!(
-                            "logged in as {} — switched to codex profile (gpt-5.4)",
-                            auth.account_id
-                        )));
-                        app.push(Entry::Blank);
-                        app.agent_busy = false;
-                        app.mark_dirty_all();
-                        app.request_draw(&frame_requester);
-                    }
-                    Err(e) => {
-                        app.push(Entry::Assistant(format!(
-                            "login succeeded but agent build failed: {}",
-                            e
-                        )));
-                        app.agent_busy = false;
-                        app.mark_dirty_all();
-                        app.request_draw(&frame_requester);
-                    }
-                }
-            }
-            Some(AppEvent::LoginComplete(Err(e))) => {
-                app.clear_agent_activity();
-                app.push(Entry::Assistant(format!("login failed: {}", e)));
-                app.agent_busy = false;
-                app.mark_dirty_all();
-                app.request_draw(&frame_requester);
-            }
-            Some(AppEvent::ShellComplete { output, exit_code }) => {
-                app.activity_counters.shell_complete_count += 1;
-                app.clear_agent_activity();
-                app.push(Entry::Assistant(output));
-                if let Some(code) = exit_code {
-                    if code != 0 {
-                        app.push(Entry::Assistant(format!("exit code: {}", code)));
-                    }
-                }
-                app.push(Entry::Blank);
-                app.agent_busy = false;
-                app.mark_dirty_all();
-                app.request_draw(&frame_requester);
-            }
-            None => {}
-        }
-        }
-    }
-
-    let _ = input_shutdown_tx.send(());
-    drop(app_tx);
-
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        crossterm::event::DisableMouseCapture,
-        DisableBracketedPaste,
-        PopKeyboardEnhancementFlags,
-        LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
-    #[cfg(feature = "stylos")]
-    if let Some(stylos) = app.stylos.take() {
-        stylos.shutdown().await;
-    }
-    Ok(())
-}
-
-fn area_page_height(
+pub(crate) fn area_page_height(
     terminal: &Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &App<'_>,
 ) -> usize {
@@ -3146,7 +3093,7 @@ fn area_page_height(
     }
 }
 
-fn current_total_and_height(
+pub(crate) fn current_total_and_height(
     terminal: &Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &App<'_>,
 ) -> (usize, usize) {

@@ -45,7 +45,7 @@ impl DomainHandle {
     }
 
     pub fn block_on<F: Future>(&self, fut: F) -> F::Output {
-        self.handle.block_on(fut)
+        tokio::task::block_in_place(|| self.handle.block_on(fut))
     }
 }
 
@@ -83,7 +83,7 @@ impl RuntimeDomains {
 
     fn build(include_tui: bool, include_background: bool) -> Result<Self> {
         let tui_runtime = if include_tui {
-            Some(build_current_thread_runtime(RuntimeDomain::Tui)?)
+            Some(build_multi_thread_runtime(RuntimeDomain::Tui, 1)?)
         } else {
             None
         };
@@ -147,10 +147,3 @@ fn build_multi_thread_runtime(
     })
 }
 
-fn build_current_thread_runtime(domain: RuntimeDomain) -> Result<OwnedRuntime> {
-    let runtime = Builder::new_current_thread().enable_all().build()?;
-    Ok(OwnedRuntime {
-        name: domain,
-        runtime,
-    })
-}

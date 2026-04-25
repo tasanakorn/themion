@@ -2,14 +2,14 @@ mod auth_store;
 mod config;
 mod login_codex;
 mod paste_burst;
+mod app_runtime;
 mod runtime_domains;
 #[cfg(feature = "stylos")]
 mod stylos;
 mod tui;
+mod tui_runner;
 use config::{Config, ProfileConfig};
-use runtime_domains::RuntimeDomains;
 use std::collections::HashMap;
-use std::sync::Arc;
 use themion_core::agent::TurnStats;
 use themion_core::ModelInfo;
 
@@ -115,7 +115,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     if !remaining_args.is_empty() {
-        let runtime_domains = Arc::new(RuntimeDomains::for_print_mode()?);
+        let runtime_domains = std::sync::Arc::new(crate::runtime_domains::RuntimeDomains::for_print_mode()?);
         runtime_domains.core().block_on(run_print_mode(
             cfg,
             project_dir_override,
@@ -123,13 +123,13 @@ fn main() -> anyhow::Result<()> {
             runtime_domains,
         ))
     } else {
-        let runtime_domains = Arc::new(RuntimeDomains::for_tui_mode()?);
+        let runtime_domains = std::sync::Arc::new(crate::runtime_domains::RuntimeDomains::for_tui_mode()?);
         let tui_runtime = runtime_domains
             .tui()
             .expect("tui runtime available in TUI mode");
         let runtime_domains_for_run = runtime_domains.clone();
         let result = tui_runtime.block_on(async move {
-            tui::run(cfg, project_dir_override, runtime_domains_for_run).await
+            tui_runner::run(cfg, project_dir_override, runtime_domains_for_run).await
         });
         drop(tui_runtime);
         drop(runtime_domains);
@@ -141,7 +141,7 @@ async fn run_print_mode(
     cfg: Config,
     project_dir_override: Option<std::path::PathBuf>,
     remaining_args: Vec<String>,
-    _runtime_domains: Arc<RuntimeDomains>,
+    _runtime_domains: std::sync::Arc<crate::runtime_domains::RuntimeDomains>,
 ) -> anyhow::Result<()> {
     let prompt = remaining_args.join(" ");
 
@@ -161,29 +161,31 @@ async fn run_print_mode(
         None => themion_core::db::DbHandle::open_in_memory().expect("in-memory db"),
     };
 
+    let session = Session::from_config(cfg);
+
     let session_id = uuid::Uuid::new_v4();
     let _ = db.insert_session(session_id, &project_dir, false);
 
-    let client: Box<dyn themion_core::ChatBackend + Send + Sync> = if cfg.provider == "openai-codex"
+    let client: Box<dyn themion_core::ChatBackend + Send + Sync> = if session.provider == "openai-codex"
     {
         let auth = auth_store::load()
             .unwrap_or(None)
             .ok_or_else(|| anyhow::anyhow!("no codex auth; run /login codex first"))?;
         Box::new(themion_core::client_codex::CodexClient::new(
-            cfg.base_url,
+            session.base_url.clone(),
             auth,
             Box::new(|a: &themion_core::CodexAuth| auth_store::save(a)),
         ))
     } else {
         Box::new(themion_core::client::ChatClient::new(
-            cfg.base_url,
-            cfg.api_key,
+            session.base_url.clone(),
+            session.api_key.clone(),
         ))
     };
     let mut agent = themion_core::agent::Agent::new_with_db(
         client,
-        cfg.model,
-        cfg.system_prompt,
+        session.model.clone(),
+        session.system_prompt.clone(),
         session_id,
         project_dir,
         db,
