@@ -143,6 +143,7 @@ When implementing an existing PRD, do not consider the task complete until you h
 
 ## Git discipline
 
+- Do not create commits automatically; only commit when the user explicitly asks you to commit.
 - Stage and commit only files relevant to the requested change.
 - Use clear commit messages.
 - Do not include unrelated modifications in a commit.
