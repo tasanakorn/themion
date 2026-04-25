@@ -1,5 +1,5 @@
-use std::future::Future;
 use anyhow::Result;
+use std::future::Future;
 use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::task::JoinHandle;
 
@@ -30,7 +30,10 @@ pub struct DomainHandle {
 
 impl DomainHandle {
     fn new(name: RuntimeDomain, handle: Handle) -> Self {
-        Self { _name: name, handle }
+        Self {
+            _name: name,
+            handle,
+        }
     }
 
     pub fn spawn<F>(&self, fut: F) -> JoinHandle<F::Output>
@@ -80,7 +83,7 @@ impl RuntimeDomains {
 
     fn build(include_tui: bool, include_background: bool) -> Result<Self> {
         let tui_runtime = if include_tui {
-            Some(build_multi_thread_runtime(RuntimeDomain::Tui, 1)?)
+            Some(build_current_thread_runtime(RuntimeDomain::Tui)?)
         } else {
             None
         };
@@ -124,13 +127,15 @@ impl RuntimeDomains {
         self.network.clone()
     }
 
-
     pub fn background(&self) -> Option<DomainHandle> {
         self.background.clone()
     }
 }
 
-fn build_multi_thread_runtime(domain: RuntimeDomain, worker_threads: usize) -> Result<OwnedRuntime> {
+fn build_multi_thread_runtime(
+    domain: RuntimeDomain,
+    worker_threads: usize,
+) -> Result<OwnedRuntime> {
     let runtime = Builder::new_multi_thread()
         .enable_all()
         .worker_threads(worker_threads)
@@ -142,3 +147,10 @@ fn build_multi_thread_runtime(domain: RuntimeDomain, worker_threads: usize) -> R
     })
 }
 
+fn build_current_thread_runtime(domain: RuntimeDomain) -> Result<OwnedRuntime> {
+    let runtime = Builder::new_current_thread().enable_all().build()?;
+    Ok(OwnedRuntime {
+        name: domain,
+        runtime,
+    })
+}

@@ -63,7 +63,7 @@ Mode differences:
 - TUI mode constructs `tui`, `core`, `network`, and `background`
 - print mode constructs only the currently needed reduced set, which in phase 1 is `core` and `network`
 
-This preserves the single-process architecture while making runtime ownership explicit in startup code.
+This preserves the single-process architecture while making runtime ownership explicit in startup code. In the current implementation, the `tui` domain is now a literal Tokio `current_thread` runtime, while `core`, `network`, and `background` remain multi-thread runtimes.
 
 ## Stylos remote-request bridge
 
