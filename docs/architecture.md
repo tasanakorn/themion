@@ -40,7 +40,7 @@ main.rs
        ├─ --headless               ──► headless_runner::run(app_runtime)
        └─ TUI mode                 ──► tui_runner::run(app_runtime)
 
-CliAppRuntime  (app_runtime.rs)
+AppState  (app_state.rs)
   ├─ resolves project_dir and opens DbHandle
   ├─ inserts agent_sessions row and builds Session
   ├─ owns shared CLI-local runtime/bootstrap state
@@ -101,12 +101,12 @@ Use this hierarchy when reasoning about the implementation:
 themion process
 ├─ bootstrap / entrypoint
 │  └─ crates/themion-cli/src/main.rs
-│     └─ builds shared CliAppRuntime
+│     └─ builds shared AppState
 │        ├─ non-interactive prompt mode → headless_runner::run_non_interactive(...)
 │        ├─ --headless mode            → headless_runner::run(...)
 │        └─ TUI mode                   → tui_runner::run(...)
 ├─ shared CLI app runtime
-│  └─ crates/themion-cli/src/app_runtime.rs
+│  └─ crates/themion-cli/src/app_state.rs
 │     ├─ resolves project_dir
 │     ├─ opens DbHandle
 │     ├─ creates Session / agent session row
@@ -176,7 +176,7 @@ For debugging, the practical thread model is now:
 
 ### TUI mode structure
 
-In the current CLI architecture, `crates/themion-cli/src/app_runtime.rs` owns shared non-UI bootstrap for TUI mode, explicit `--headless` mode, and the non-interactive one-shot prompt path. `crates/themion-cli/src/tui_runner.rs` owns terminal-mode orchestration, `crates/themion-cli/src/headless_runner.rs` owns both the long-running headless NDJSON-log entrypoint and the non-interactive one-shot path, and `crates/themion-cli/src/tui.rs` remains the terminal presentation and event-handling layer.
+In the current CLI architecture, `crates/themion-cli/src/app_state.rs` owns shared non-UI bootstrap for TUI mode, explicit `--headless` mode, and the non-interactive one-shot prompt path. `crates/themion-cli/src/tui_runner.rs` owns terminal-mode orchestration, `crates/themion-cli/src/headless_runner.rs` owns both the long-running headless NDJSON-log entrypoint and the non-interactive one-shot path, and `crates/themion-cli/src/tui.rs` remains the terminal presentation and event-handling layer.
 
 In `crates/themion-cli/src/tui.rs`, the app creates a central `AppEvent` channel and then spawns a few long-lived background tasks around one main UI loop.
 

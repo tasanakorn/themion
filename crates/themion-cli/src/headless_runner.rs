@@ -1,4 +1,4 @@
-use crate::app_runtime::CliAppRuntime;
+use crate::app_state::AppState;
 use crate::format_stats;
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -79,9 +79,9 @@ fn stylos_state_data(state: &crate::stylos::StylosRuntimeState) -> StylosStateDa
     }
 }
 
-pub async fn run(app_runtime: CliAppRuntime) -> anyhow::Result<()> {
+pub async fn run(app_runtime: AppState) -> anyhow::Result<()> {
     #[cfg(feature = "stylos")]
-    let stylos = crate::app_runtime::start_stylos(&app_runtime).await?;
+    let stylos = crate::app_state::start_stylos(&app_runtime).await?;
 
     let project_dir = app_runtime.project_dir.display().to_string();
     emit_event(
@@ -117,7 +117,7 @@ pub async fn run(app_runtime: CliAppRuntime) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn run_non_interactive(app_runtime: CliAppRuntime, prompt: String) -> anyhow::Result<()> {
+pub async fn run_non_interactive(app_runtime: AppState, prompt: String) -> anyhow::Result<()> {
     let mut agent = app_runtime.build_agent()?;
     agent.refresh_model_info().await;
     let (result, stats) = agent.run_loop(&prompt).await?;

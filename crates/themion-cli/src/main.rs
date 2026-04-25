@@ -1,4 +1,4 @@
-mod app_runtime;
+mod app_state;
 mod auth_store;
 mod config;
 mod headless_runner;
@@ -9,7 +9,7 @@ mod runtime_domains;
 mod stylos;
 mod tui;
 mod tui_runner;
-use app_runtime::CliAppRuntime;
+use app_state::AppState;
 use config::{Config, ProfileConfig};
 use std::collections::HashMap;
 use themion_core::agent::TurnStats;
@@ -150,13 +150,13 @@ fn main() -> anyhow::Result<()> {
         if !remaining_args.is_empty() {
             anyhow::bail!("--headless does not accept prompt arguments; use prompt args for non-interactive mode");
         }
-        let app_runtime = CliAppRuntime::for_headless(cfg, project_dir_override)?;
+        let app_runtime = AppState::for_headless(cfg, project_dir_override)?;
         let runtime_domains = app_runtime.runtime_domains.clone();
         runtime_domains
             .core()
             .block_on(headless_runner::run(app_runtime))
     } else if !remaining_args.is_empty() {
-        let app_runtime = CliAppRuntime::for_headless(cfg, project_dir_override)?;
+        let app_runtime = AppState::for_headless(cfg, project_dir_override)?;
         let runtime_domains = app_runtime.runtime_domains.clone();
         runtime_domains
             .core()
@@ -165,7 +165,7 @@ fn main() -> anyhow::Result<()> {
                 remaining_args.join(" "),
             ))
     } else {
-        let app_runtime = CliAppRuntime::for_tui(cfg, project_dir_override)?;
+        let app_runtime = AppState::for_tui(cfg, project_dir_override)?;
         let runtime_domains = app_runtime.runtime_domains.clone();
         let tui_runtime = runtime_domains
             .tui()

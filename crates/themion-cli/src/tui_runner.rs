@@ -1,4 +1,4 @@
-use crate::app_runtime::CliAppRuntime;
+use crate::app_state::AppState;
 use crate::runtime_domains::{DomainHandle, RuntimeDomains};
 use crate::tui::{dispatch_terminal_event, draw, App, AppEvent, FrameRequester};
 use crossterm::{
@@ -262,7 +262,7 @@ impl RunnerContext {
     }
 }
 
-pub async fn run(app_runtime: CliAppRuntime) -> anyhow::Result<()> {
+pub async fn run(app_runtime: AppState) -> anyhow::Result<()> {
     let mut terminal = TerminalGuard::enter()?;
     install_panic_cleanup_hook();
 
@@ -270,7 +270,7 @@ pub async fn run(app_runtime: CliAppRuntime) -> anyhow::Result<()> {
     let mut ctx = RunnerContext::build(&runtime_domains);
 
     #[cfg(feature = "stylos")]
-    let stylos_handle = Some(crate::app_runtime::start_stylos(&app_runtime).await?);
+    let stylos_handle = Some(crate::app_state::start_stylos(&app_runtime).await?);
 
     let mut app = build_app(
         app_runtime.session,

@@ -74,12 +74,12 @@ Use this hierarchy when reasoning about the implementation:
 themion process
 ├─ bootstrap / entrypoint
 │  └─ crates/themion-cli/src/main.rs
-│     └─ builds shared CliAppRuntime
+│     └─ builds shared AppState
 │        ├─ non-interactive prompt mode → headless_runner::run_non_interactive(...)
 │        ├─ --headless mode            → headless_runner::run(...)
 │        └─ TUI mode                   → tui_runner::run(...)
 ├─ shared CLI app runtime
-│  └─ crates/themion-cli/src/app_runtime.rs
+│  └─ crates/themion-cli/src/app_state.rs
 │     ├─ resolves project_dir
 │     ├─ opens DbHandle
 │     ├─ creates Session / agent session row
@@ -138,7 +138,7 @@ process
 
 ## Stylos remote-request bridge
 
-Shared CLI bootstrap now lives in `crates/themion-cli/src/app_runtime.rs`, which resolves the project directory, opens the local DB, inserts the session row, builds `Session`, and exposes shared agent-construction helpers used by TUI mode, explicit `--headless` mode, and non-interactive prompt execution. `main.rs` stays thin and only selects which runner to invoke.
+Shared CLI bootstrap now lives in `crates/themion-cli/src/app_state.rs`, which resolves the project directory, opens the local DB, inserts the session row, builds `Session`, and exposes shared agent-construction helpers used by TUI mode, explicit `--headless` mode, and non-interactive prompt execution. `main.rs` stays thin and only selects which runner to invoke.
 
 Stylos request handling stays CLI-local even when it ultimately causes an agent turn.
 

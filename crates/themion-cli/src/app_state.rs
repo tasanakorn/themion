@@ -16,7 +16,7 @@ use themion_core::tools::{
 use themion_core::ChatBackend;
 use uuid::Uuid;
 
-pub struct CliAppRuntime {
+pub struct AppState {
     pub runtime_domains: Arc<RuntimeDomains>,
     pub session: Session,
     pub db: Arc<DbHandle>,
@@ -37,7 +37,7 @@ pub struct DoneMentionRequest {
     pub result_summary: String,
 }
 
-impl CliAppRuntime {
+impl AppState {
     pub fn for_tui(cfg: Config, project_dir_override: Option<PathBuf>) -> anyhow::Result<Self> {
         Self::build(cfg, project_dir_override, true)
     }
@@ -216,17 +216,17 @@ pub fn open_history_db(interactive: bool) -> Arc<DbHandle> {
 
 #[cfg(feature = "stylos")]
 pub async fn start_stylos(
-    app_runtime: &CliAppRuntime,
+    app_state: &AppState,
 ) -> anyhow::Result<crate::stylos::StylosHandle> {
-    match app_runtime
+    match app_state
         .runtime_domains
         .network()
         .spawn({
-            let stylos_cfg = app_runtime.stylos_config.clone();
-            let session = app_runtime.session.clone();
-            let project_dir = app_runtime.project_dir.clone();
-            let db = app_runtime.db.clone();
-            let network_domain = app_runtime.runtime_domains.network();
+            let stylos_cfg = app_state.stylos_config.clone();
+            let session = app_state.session.clone();
+            let project_dir = app_state.project_dir.clone();
+            let db = app_state.db.clone();
+            let network_domain = app_state.runtime_domains.network();
             async move {
                 crate::stylos::start(&stylos_cfg, &session, &project_dir, db, network_domain).await
             }

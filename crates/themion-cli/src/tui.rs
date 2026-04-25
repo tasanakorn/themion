@@ -536,7 +536,7 @@ impl<'a> App<'a> {
             StylosRuntimeState::Active { instance, .. } => Some(instance.clone()),
             _ => Some(crate::stylos::derive_local_instance_id()),
         });
-        let agent = crate::app_runtime::build_agent(
+        let agent = crate::app_state::build_agent(
             &session,
             session_id,
             project_dir.clone(),
@@ -1537,7 +1537,7 @@ impl<'a> App<'a> {
                             out.push(format!("warning: {}", e));
                         }
                         let new_session_id = Uuid::new_v4();
-                        match crate::app_runtime::build_agent(
+                        match crate::app_state::build_agent(
                             &self.session,
                             new_session_id,
                             self.project_dir.clone(),
@@ -1964,7 +1964,7 @@ impl<'a> App<'a> {
             .result_text
             .clone()
             .unwrap_or_else(|| "completed with no explicit stored result".to_string());
-        let request = crate::app_runtime::DoneMentionRequest {
+        let request = crate::app_state::DoneMentionRequest {
             note_id: note.note_id.clone(),
             note_slug: note.note_slug.clone(),
             from_instance: to_instance.clone(),
@@ -1978,7 +1978,7 @@ impl<'a> App<'a> {
             let app_tx_done = app_tx.clone();
             let from_agent_id = note.to_agent_id.clone();
             self.background_domain().spawn(async move {
-                let result = crate::app_runtime::create_done_mention_via_bridge(
+                let result = crate::app_state::create_done_mention_via_bridge(
                     &bridge,
                     &from_agent_id,
                     &request,
@@ -1992,7 +1992,7 @@ impl<'a> App<'a> {
             });
             return;
         } else {
-            crate::app_runtime::create_done_mention_locally(&self.db, &request)
+            crate::app_state::create_done_mention_locally(&self.db, &request)
         };
 
         match create_reply {
@@ -2181,7 +2181,7 @@ impl<'a> App<'a> {
                     )));
                 }
                 let new_session_id = Uuid::new_v4();
-                match crate::app_runtime::build_agent(
+                match crate::app_state::build_agent(
                     &self.session,
                     new_session_id,
                     self.project_dir.clone(),
