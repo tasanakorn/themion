@@ -53,7 +53,7 @@ This keeps reusable harness behavior in core while allowing the CLI to publish p
 
 Current phase-1 runtime domains:
 
-- `tui` — current-thread runtime for TUI event intake, tick scheduling, frame scheduling, and TUI-side bridge tasks
+- `tui` — one-worker multi-thread runtime for TUI event intake, tick scheduling, frame scheduling, and TUI-side bridge tasks
 - `core` — multi-thread runtime for startup coordination, print-mode execution, and core harness orchestration paths
 - `network` — multi-thread runtime for long-lived Stylos networking tasks
 - `background` — reserved multi-thread runtime domain for lower-priority maintenance work in this phase
@@ -64,7 +64,77 @@ Mode differences:
 - explicit `--headless` mode constructs the reduced non-TUI runtime set currently needed by that path, which is `core` and `network`, runs through the same shared CLI app-runtime plus `headless_runner`, and emits structured NDJSON lifecycle logs on stdout
 - non-interactive prompt-argument mode also reuses that shared CLI app-runtime, but remains a one-shot stdout/stderr execution path rather than the long-running headless NDJSON-log mode
 
-This preserves the single-process architecture while making runtime ownership explicit in startup code. In the current implementation, the `tui` domain is now a literal Tokio `current_thread` runtime, while `core`, `network`, and `background` remain multi-thread runtimes.
+This preserves the single-process architecture while making runtime ownership explicit in startup code. In the current implementation, the `tui` domain remains a Tokio multi-thread runtime configured with one worker thread, while `core`, `network`, and `background` remain multi-thread runtimes. The full thread model is slightly broader than the domain list alone: TUI mode also uses one dedicated terminal-input OS thread for Crossterm polling, and `themion-core` uses `spawn_blocking` for DB-sensitive work.
+
+### Runtime hierarchy
+
+Use this hierarchy when reasoning about the implementation:
+
+```text
+themion process
+├─ bootstrap / entrypoint
+│  └─ crates/themion-cli/src/main.rs
+│     └─ builds shared CliAppRuntime
+│        ├─ non-interactive prompt mode → headless_runner::run_non_interactive(...)
+│        ├─ --headless mode            → headless_runner::run(...)
+│        └─ TUI mode                   → tui_runner::run(...)
+├─ shared CLI app runtime
+│  └─ crates/themion-cli/src/app_runtime.rs
+│     ├─ resolves project_dir
+│     ├─ opens DbHandle
+│     ├─ creates Session / agent session row
+│     └─ builds core Agent instances
+├─ Tokio runtime domain: tui          (TUI mode only, one-worker multi-thread)
+│  ├─ Tokio tasks
+│  │  ├─ TUI event intake / bridge tasks
+│  │  ├─ periodic tick task
+│  │  └─ frame / redraw scheduling tasks
+│  └─ non-Tokio OS thread
+│     └─ dedicated terminal-input thread for Crossterm polling
+├─ Tokio runtime domain: core         (multi-thread)
+│  └─ Tokio tasks
+│     ├─ startup coordination
+│     ├─ headless / non-interactive execution paths
+│     ├─ agent-turn execution
+│     └─ core harness orchestration
+├─ Tokio runtime domain: network      (multi-thread)
+│  └─ Tokio tasks
+│     ├─ Stylos status publisher
+│     ├─ Stylos query handlers
+│     ├─ Stylos command subscriber
+│     └─ Stylos bridge tasks into the local app flow
+├─ Tokio runtime domain: background   (multi-thread, reserved in phase 1)
+│  └─ Tokio tasks
+│     └─ lower-priority maintenance work
+└─ supporting worker threads
+   └─ spawn_blocking worker threads for DB-sensitive work in themion-core
+```
+
+Important nesting:
+
+- process contains bootstrap and runtime domains
+- each Tokio runtime domain contains Tokio tasks
+- dedicated terminal-input polling is an OS thread, not a Tokio task
+- `spawn_blocking` work uses worker threads alongside the runtime domains
+
+A strict Tokio-centric view is:
+
+```text
+process
+├─ bootstrap
+├─ Tokio runtimes
+│  ├─ tui runtime
+│  │  └─ Tokio tasks
+│  ├─ core runtime
+│  │  └─ Tokio tasks
+│  ├─ network runtime
+│  │  └─ Tokio tasks
+│  └─ background runtime
+│     └─ Tokio tasks
+└─ non-Tokio threads
+   ├─ terminal input thread
+   └─ spawn_blocking worker threads
+```
 
 ## Stylos remote-request bridge
 
@@ -75,7 +145,7 @@ Stylos request handling stays CLI-local even when it ultimately causes an agent 
 In the current implementation:
 
 - Stylos queryables are registered in `crates/themion-cli/src/stylos.rs` and their long-lived serving/publishing/subscription tasks now run on the CLI-owned `network` runtime domain
-- query handlers read the current exported process snapshot from a snapshot provider set by the TUI runtime
+- query handlers read the current exported process snapshot from a snapshot provider published from the CLI-local app/TUI state path
 - accepted `talk`, durable `notes/request`, and `tasks/request` queries are converted into `IncomingPromptRequest` values or persisted note records and sent over an in-process/local-runtime path
 - the TUI event loop receives those requests as `AppEvent::IncomingPrompt`
 - the TUI either rejects the request immediately if the current local execution path is already busy, or submits the prompt through the same local turn path used for normal input
@@ -192,9 +262,9 @@ Model-facing guidance: use these tools for durable reusable knowledge that shoul
 
 Current tool contracts:
 
-- `memory_create_node` accepts `title`, optional `project_dir`, optional `node_type` (default `observation`), optional `content`, optional `hashtags`, optional `metadata`, and optional UUID `node_id`. Omitted `project_dir` uses the current session project directory; exact `[GLOBAL]` uses Global Knowledge. It stores timestamps in milliseconds as `created_at_ms` and `updated_at_ms`.
-- `memory_update_node` accepts `node_id` plus any mutable node fields. When `hashtags` is supplied, it replaces the node's hashtag set. `content` and `metadata` may be set to `null`.
-- `memory_link_nodes` accepts `from_node_id`, `to_node_id`, `relation_type`, optional `metadata`, and optional UUID `edge_id`. Both endpoint nodes must already exist.
+- `memory_create_node` accepts `title`, optional `project_dir`, optional `node_type` (default `observation`), optional `content`, optional `hashtags`, optional UUID `node_id`. Omitted `project_dir` uses the current session project directory; exact `[GLOBAL]` uses Global Knowledge. It stores timestamps in milliseconds as `created_at_ms` and `updated_at_ms`.
+- `memory_update_node` accepts `node_id` plus any mutable node fields. When `hashtags` is supplied, it replaces the node's hashtag set. `content` may be set to `null`.
+- `memory_link_nodes` accepts `from_node_id`, `to_node_id`, `relation_type`, and optional UUID `edge_id`. Both endpoint nodes must already exist.
 - `memory_unlink_nodes` removes an edge by `edge_id`, or by the exact `from_node_id`/`to_node_id`/`relation_type` tuple.
 - `memory_get_node` returns the node, including its `project_dir`, plus immediate `outgoing` and `incoming` edge arrays.
 - `memory_search` supports FTS5 keyword queries over title/content when FTS5 is available, project context filtering, hashtag filtering with `hashtag_match` of `any` or `all`, node type filtering, and optional relation filters. Omitted `project_dir` searches only the current session project; `[GLOBAL]` searches only Global Knowledge. If FTS5 is unavailable, non-keyword filters still work.
@@ -231,8 +301,6 @@ That means:
 - these history tools are always scoped to the current project directory; omitted `session_id` means the active session, `session_id="*"` means all sessions in the current project, and explicit UUIDs only match sessions within that current project
 
 This feature improves user-facing review behavior without changing runtime semantics in `themion-core`.
-
-
 
 ## CLI redraw scheduling
 
@@ -276,7 +344,6 @@ Current behavior:
 - auto-created done mentions are classified so later marking them `done` does not recursively emit another automatic completion notification
 
 This keeps persistence and board state durable while still reusing the normal harness turn path for actual agent work.
-
 
 ## Runtime debug command
 

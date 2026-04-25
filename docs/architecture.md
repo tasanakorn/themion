@@ -82,47 +82,96 @@ tools.rs
   │    ├─ history_search  ──► ctx.db.search(SearchArgs)
   │    ├─ system_inspect_local ──► local runtime/tool/provider readiness snapshot
   │    ├─ board_*  ──► local durable notes board operations
-│    ├─ memory_* ──► SQLite Project Memory KB nodes, hashtags, and edges
+  │    ├─ memory_* ──► SQLite Project Memory KB nodes, hashtags, and edges
   │    └─ workflow_*  ──► workflow state inspection / transitions
   └─ ToolCtx { db: Arc<DbHandle>, session_id, project_dir, workflow_state, system_inspection }
 
 History tools are always scoped to the caller's current project directory. Callers cannot pass a `project_dir` override; omitted `session_id` means the active session, `session_id="*"` means all sessions in the current project, and explicit UUIDs only match sessions within that same current project.
 ```
 
-## Process and thread model
+## Process, runtime, task, and thread hierarchy
 
 Themion normally runs as a single OS process.
 
-In both print mode and TUI mode, `crates/themion-cli/src/main.rs` uses `#[tokio::main]`, and the repository does not currently override that with a custom Tokio runtime builder. In practice, this means the app uses Tokio's default runtime setup for that macro rather than a repository-specific thread layout.
+`crates/themion-cli/src/main.rs` constructs explicit Tokio runtime domains through a CLI-local runtime-topology helper rather than relying on `#[tokio::main]`.
 
-A useful mental model is now:
+Use this hierarchy when reasoning about the implementation:
 
 ```text
 themion process
-├─ Tokio runtime domain: tui         (TUI mode only, current-thread)
-│  ├─ TUI event loop
-│  ├─ input event task
-│  ├─ periodic tick task
-│  ├─ frame scheduler
-│  └─ TUI-side bridge tasks
-├─ Tokio runtime domain: core        (multi-thread)
-│  ├─ main startup coordination
-│  ├─ print-mode agent turns
-│  └─ core harness/orchestration work
-├─ Tokio runtime domain: network     (multi-thread)
-│  └─ Stylos long-lived networking tasks
-└─ Tokio runtime domain: background  (multi-thread, reserved in phase 1)
+├─ bootstrap / entrypoint
+│  └─ crates/themion-cli/src/main.rs
+│     └─ builds shared CliAppRuntime
+│        ├─ non-interactive prompt mode → headless_runner::run_non_interactive(...)
+│        ├─ --headless mode            → headless_runner::run(...)
+│        └─ TUI mode                   → tui_runner::run(...)
+├─ shared CLI app runtime
+│  └─ crates/themion-cli/src/app_runtime.rs
+│     ├─ resolves project_dir
+│     ├─ opens DbHandle
+│     ├─ creates Session / agent session row
+│     └─ builds core Agent instances
+├─ Tokio runtime domain: tui          (TUI mode only, one-worker multi-thread)
+│  ├─ Tokio tasks
+│  │  ├─ TUI event intake / bridge tasks
+│  │  ├─ periodic tick task
+│  │  └─ frame / redraw scheduling tasks
+│  └─ non-Tokio OS thread
+│     └─ dedicated terminal-input thread for Crossterm polling
+├─ Tokio runtime domain: core         (multi-thread)
+│  └─ Tokio tasks
+│     ├─ startup coordination
+│     ├─ headless / non-interactive execution paths
+│     ├─ agent-turn execution
+│     └─ core harness orchestration
+├─ Tokio runtime domain: network      (multi-thread)
+│  └─ Tokio tasks
+│     ├─ Stylos status publisher
+│     ├─ Stylos query handlers
+│     ├─ Stylos command subscriber
+│     └─ Stylos bridge tasks into the local app flow
+├─ Tokio runtime domain: background   (multi-thread, reserved in phase 1)
+│  └─ Tokio tasks
+│     └─ lower-priority maintenance work
+└─ supporting worker threads
+   └─ spawn_blocking worker threads for DB-sensitive work in themion-core
 ```
 
-`crates/themion-cli/src/main.rs` now constructs these runtime domains explicitly through a CLI-local runtime-topology helper instead of relying on `#[tokio::main]`. The most important concurrency boundary is still the task/event model, but the repository now also has explicit executor-domain ownership for major workload classes.
+Important nesting:
+
+- process contains bootstrap and runtime domains
+- each Tokio runtime domain contains Tokio tasks
+- dedicated terminal-input polling is an OS thread, not a Tokio task
+- `spawn_blocking` work uses worker threads alongside the runtime domains
+
+A strict Tokio-centric view is:
+
+```text
+process
+├─ bootstrap
+├─ Tokio runtimes
+│  ├─ tui runtime
+│  │  └─ Tokio tasks
+│  ├─ core runtime
+│  │  └─ Tokio tasks
+│  ├─ network runtime
+│  │  └─ Tokio tasks
+│  └─ background runtime
+│     └─ Tokio tasks
+└─ non-Tokio threads
+   ├─ terminal input thread
+   └─ spawn_blocking worker threads
+```
 
 For debugging, the practical thread model is now:
 
 - one Themion process
 - explicit Tokio runtime domains owned by `themion-cli`
-- one current-thread TUI runtime in TUI mode
+- one one-worker multi-thread TUI runtime in TUI mode
 - separate multi-thread core and network runtimes
 - a reserved background runtime domain for lower-priority work
+- one dedicated terminal-input OS thread for Crossterm polling in TUI mode
+- `spawn_blocking` worker usage in `themion-core` for DB-sensitive work
 - multiple async tasks communicating through unbounded `mpsc` channels
 
 ### TUI mode structure
@@ -142,7 +191,7 @@ The CLI keeps redraw requests separate from draw execution. Internal event paths
 
 Around that loop, the current implementation starts these long-lived tasks:
 
-- an input task using `EventStream::new()` to forward keyboard, mouse, and paste events into the app channel on the TUI runtime domain
+- a dedicated terminal-input OS thread using Crossterm polling to forward keyboard, mouse, and paste events into the app channel
 - a periodic tick task using `tokio::time::interval(Duration::from_millis(150))` to send `AppEvent::Tick` on the TUI runtime domain
 - bridge tasks that forward agent events or Stylos events into the same app event channel on the TUI runtime domain
 
