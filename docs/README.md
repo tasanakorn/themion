@@ -64,6 +64,7 @@
 | PRD-052 | [Local System Inspection Tool for Runtime, Tooling, and Provider Readiness](prd/prd-052-tool-and-model-self-healthcheck.md) | Implemented | v0.33.0 | `themion-core`, `themion-cli`, docs |
 | PRD-053 | [Tighten Tokio Runtime Topology Semantics and Remove Remaining TUI-Orchestration Leakage](prd/prd-053-tighten-tokio-runtime-topology-and-tui-layering.md) | Implemented | v0.34.0 | `themion-cli`, docs |
 | PRD-054 | [Rename Shared CLI Application Runtime Type to `AppState`](prd/prd-054-rename-shared-cli-app-runtime-to-app-state.md) | Implemented | v0.34.1 | `themion-cli`, docs |
+| PRD-055 | [Fix TUI Input Dirty Detection for Non-ASCII Typing and Paste-Burst Flushes](prd/prd-055-fix-tui-input-dirty-detection-for-non-ascii-and-paste-burst.md) | Proposed | v0.34.2 | `themion-cli`, docs |
 
 ## Roadmap note
 

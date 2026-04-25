@@ -196,6 +196,20 @@ pub struct SystemInspectionProvider {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SystemInspectionTaskRuntime {
+    pub status: String,
+    pub current_activity: Option<String>,
+    pub current_activity_detail: Option<String>,
+    pub busy: Option<bool>,
+    pub activity_status: Option<String>,
+    pub activity_status_changed_at_ms: Option<u64>,
+    pub process_started_at_ms: Option<u64>,
+    pub uptime_ms: Option<u64>,
+    pub recent_window_ms: Option<u64>,
+    pub runtime_notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SystemInspectionRuntime {
     pub status: String,
     pub pid: Option<u32>,
@@ -206,6 +220,7 @@ pub struct SystemInspectionRuntime {
     pub phase_name: Option<String>,
     pub workflow_status: Option<String>,
     pub debug_runtime_lines: Vec<String>,
+    pub task_runtime: Option<SystemInspectionTaskRuntime>,
     pub warnings: Vec<String>,
     pub issues: Vec<String>,
 }
@@ -1196,6 +1211,21 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                         "debug runtime snapshot unavailable in fallback inspection path"
                             .to_string(),
                     ],
+                    task_runtime: Some(SystemInspectionTaskRuntime {
+                        status: "partial".to_string(),
+                        current_activity: None,
+                        current_activity_detail: None,
+                        busy: None,
+                        activity_status: None,
+                        activity_status_changed_at_ms: None,
+                        process_started_at_ms: None,
+                        uptime_ms: None,
+                        recent_window_ms: None,
+                        runtime_notes: vec![
+                            "task runtime inspection unavailable in fallback inspection path"
+                                .to_string(),
+                        ],
+                    }),
                     warnings: Vec::new(),
                     issues: Vec::new(),
                 };

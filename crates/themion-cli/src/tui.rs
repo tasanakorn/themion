@@ -1228,6 +1228,55 @@ impl<'a> App<'a> {
         })
     }
 
+    fn task_runtime_snapshot(&self) -> themion_core::tools::SystemInspectionTaskRuntime {
+        let current_activity = self.agent_activity.as_ref().map(|activity| match activity {
+            AgentActivity::PreparingRequest => "preparing_request".to_string(),
+            AgentActivity::WaitingForModel => "waiting_for_model".to_string(),
+            AgentActivity::StreamingResponse => "streaming_response".to_string(),
+            AgentActivity::RunningTool(_) => "running_tool".to_string(),
+            AgentActivity::WaitingAfterTool => "waiting_after_tool".to_string(),
+            AgentActivity::LoginStarting => "login_starting".to_string(),
+            AgentActivity::WaitingForLoginBrowser => "waiting_for_login_browser".to_string(),
+            AgentActivity::RunningShellCommand => "running_shell_command".to_string(),
+            AgentActivity::Finishing => "finishing".to_string(),
+        });
+        let current_activity_detail = self
+            .agent_activity
+            .as_ref()
+            .map(|activity| activity.label(self.stream_chunks, self.stream_chars));
+        let mut runtime_notes = vec![
+            "task metrics are Themion activity counters and approximate handler timing, not exact Tokio task CPU percentages".to_string(),
+        ];
+        let recent_window_ms = self
+            .recent_runtime_delta()
+            .map(|recent| recent.wall_elapsed_ms);
+        if recent_window_ms.is_none() {
+            runtime_notes.push(
+                "recent task runtime window unavailable until more than one snapshot is recorded"
+                    .to_string(),
+            );
+        }
+        themion_core::tools::SystemInspectionTaskRuntime {
+            status: if recent_window_ms.is_some() {
+                "ok"
+            } else {
+                "partial"
+            }
+            .to_string(),
+            current_activity,
+            current_activity_detail,
+            busy: Some(self.agent_busy),
+            activity_status: Some(self.activity_status_value()),
+            activity_status_changed_at_ms: self
+                .agent_activity_changed_at
+                .or(self.idle_status_changed_at),
+            process_started_at_ms: Some(self.process_started_at_ms),
+            uptime_ms: Some(self.process_started_at.elapsed().as_millis() as u64),
+            recent_window_ms,
+            runtime_notes,
+        }
+    }
+
     fn system_inspection_snapshot(&self) -> themion_core::tools::SystemInspectionResult {
         let runtime_lines = self.debug_runtime_lines();
         let rate_limits = self.status_rate_limits.as_ref().map(|report| {
@@ -1299,6 +1348,7 @@ impl<'a> App<'a> {
             phase_name: Some(self.workflow_state.phase_name.clone()),
             workflow_status: Some(format!("{:?}", self.workflow_state.status)),
             debug_runtime_lines: runtime_lines,
+            task_runtime: Some(self.task_runtime_snapshot()),
             warnings: Vec::new(),
             issues: Vec::new(),
         };
@@ -2052,7 +2102,7 @@ impl<'a> App<'a> {
 
     pub(crate) fn handle_paste_event(&mut self, text: String, frame_requester: &FrameRequester) {
         self.activity_counters.input_paste_count += 1;
-        handle_paste(self, text);
+        self.commit_pasted_input(text, frame_requester);
         self.mark_dirty_input();
         self.request_draw(frame_requester);
     }
@@ -2273,6 +2323,36 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    fn commit_input_change<F>(&mut self, frame_requester: &FrameRequester, apply: F)
+    where
+        F: FnOnce(&mut TextArea<'a>),
+    {
+        apply(&mut self.input);
+        self.mark_dirty_input();
+        self.request_draw(frame_requester);
+    }
+
+    fn commit_pasted_input(&mut self, pasted: String, frame_requester: &FrameRequester) {
+        self.commit_input_change(frame_requester, |input| {
+            insert_pasted_text(input, &pasted);
+        });
+        self.paste_burst.clear_after_explicit_paste();
+    }
+
+    fn handle_non_ascii_char(
+        &mut self,
+        key: event::KeyEvent,
+        _now: Instant,
+        frame_requester: &FrameRequester,
+    ) {
+        if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
+            self.commit_pasted_input(pasted, frame_requester);
+        }
+        self.commit_input_change(frame_requester, |input| {
+            input.input(key);
+        });
+    }
+
     pub(crate) fn handle_shell_complete_event(
         &mut self,
         output: String,
@@ -2384,8 +2464,10 @@ impl<'a> App<'a> {
 
         let now = Instant::now();
         match self.paste_burst.flush_if_due(now) {
-            FlushResult::Paste(text) => handle_paste(self, text),
-            FlushResult::Typed(ch) => self.input.insert_char(ch),
+            FlushResult::Paste(text) => self.commit_pasted_input(text, frame_requester),
+            FlushResult::Typed(ch) => self.commit_input_change(frame_requester, |input| {
+                input.insert_char(ch);
+            }),
             FlushResult::None => {}
         }
 
@@ -2401,7 +2483,7 @@ impl<'a> App<'a> {
                 || key.modifiers.contains(KeyModifiers::ALT);
             if !has_ctrl_or_alt {
                 if !ch.is_ascii() {
-                    let _ = handle_non_ascii_char(self, key, now);
+                    self.handle_non_ascii_char(key, now, frame_requester);
                     return;
                 }
 
@@ -2432,13 +2514,13 @@ impl<'a> App<'a> {
             }
 
             if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-                handle_paste(self, pasted);
+                self.commit_pasted_input(pasted, frame_requester);
             }
         }
 
         if !matches!(key.code, KeyCode::Char(_) | KeyCode::Enter) {
             if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-                handle_paste(self, pasted);
+                self.commit_pasted_input(pasted, frame_requester);
             }
         }
 
@@ -2476,7 +2558,7 @@ impl<'a> App<'a> {
             }
             (KeyCode::Enter, KeyModifiers::SHIFT) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
                 if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-                    handle_paste(self, pasted);
+                    self.commit_pasted_input(pasted, frame_requester);
                 }
                 self.input.insert_newline();
                 self.mark_dirty_input();
@@ -2701,11 +2783,6 @@ fn input_text_and_cursor_byte(input: &TextArea) -> (String, usize) {
     (text, byte_pos)
 }
 
-fn handle_paste(app: &mut App<'_>, pasted: String) {
-    insert_pasted_text(&mut app.input, &pasted);
-    app.paste_burst.clear_after_explicit_paste();
-}
-
 pub(crate) fn dispatch_terminal_event(
     app_tx: &mpsc::UnboundedSender<AppEvent>,
     event: Event,
@@ -2718,14 +2795,6 @@ pub(crate) fn dispatch_terminal_event(
         _ => return true,
     };
     app_tx.send(app_event).is_ok()
-}
-
-fn handle_non_ascii_char(app: &mut App<'_>, key: event::KeyEvent, _now: Instant) -> bool {
-    if let Some(pasted) = app.paste_burst.flush_before_modified_input() {
-        handle_paste(app, pasted);
-    }
-    app.input.input(key);
-    true
 }
 
 fn insert_pasted_text(input: &mut TextArea, text: &str) {

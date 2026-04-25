@@ -11,7 +11,7 @@ use themion_core::db::DbHandle;
 use themion_core::db::{CreateNoteArgs, NoteColumn, NoteKind};
 use themion_core::tools::{
     SystemInspectionProvider, SystemInspectionResult, SystemInspectionRuntime,
-    SystemInspectionTools,
+    SystemInspectionTaskRuntime, SystemInspectionTools,
 };
 use themion_core::ChatBackend;
 use uuid::Uuid;
@@ -145,6 +145,20 @@ impl AppState {
             debug_runtime_lines: vec![
                 "debug runtime snapshot unavailable outside the TUI app loop".to_string(),
             ],
+            task_runtime: Some(SystemInspectionTaskRuntime {
+                status: "partial".to_string(),
+                current_activity: None,
+                current_activity_detail: None,
+                busy: None,
+                activity_status: None,
+                activity_status_changed_at_ms: None,
+                process_started_at_ms: None,
+                uptime_ms: None,
+                recent_window_ms: None,
+                runtime_notes: vec![
+                    "task runtime inspection is unavailable outside the TUI app loop".to_string(),
+                ],
+            }),
             warnings: vec!["runtime inspection is partial outside the TUI app loop".to_string()],
             issues: Vec::new(),
         };
@@ -215,9 +229,7 @@ pub fn open_history_db(interactive: bool) -> Arc<DbHandle> {
 }
 
 #[cfg(feature = "stylos")]
-pub async fn start_stylos(
-    app_state: &AppState,
-) -> anyhow::Result<crate::stylos::StylosHandle> {
+pub async fn start_stylos(app_state: &AppState) -> anyhow::Result<crate::stylos::StylosHandle> {
     match app_state
         .runtime_domains
         .network()
