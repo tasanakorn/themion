@@ -25,7 +25,10 @@ use ratatui::{
 use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use themion_core::agent::{Agent, AgentEvent, TurnCancellation, TurnStats};
 use themion_core::client::ChatClient;
@@ -515,6 +518,8 @@ pub struct App<'a> {
     status_model_info: Option<ModelInfo>,
     process_started_at: Instant,
     process_started_at_ms: u64,
+    background_domain: DomainHandle,
+    core_domain: DomainHandle,
     recent_runtime_snapshots: VecDeque<RuntimeMetricsSnapshot>,
     activity_counters: ActivityCounters,
     workflow_state: WorkflowState,
@@ -533,6 +538,8 @@ impl<'a> App<'a> {
         db: Arc<DbHandle>,
         session_id: Uuid,
         project_dir: PathBuf,
+        background_domain: DomainHandle,
+        core_domain: DomainHandle,
         #[cfg(feature = "stylos")] stylos: Option<StylosHandle>,
     ) -> Self {
         #[cfg(feature = "stylos")]
@@ -662,6 +669,8 @@ impl<'a> App<'a> {
             status_model_info: initial_model_info,
             process_started_at: Instant::now(),
             process_started_at_ms: unix_epoch_now_ms(),
+            background_domain,
+            core_domain,
             recent_runtime_snapshots: VecDeque::new(),
             activity_counters: ActivityCounters::default(),
             workflow_state: WorkflowState::default(),
@@ -685,6 +694,10 @@ impl<'a> App<'a> {
     #[allow(dead_code)]
     fn main_agent_mut(&mut self) -> Option<&mut AgentHandle> {
         self.agents.iter_mut().find(|h| has_role(h, "main"))
+    }
+
+    fn background_domain(&self) -> DomainHandle {
+        self.background_domain.clone()
     }
 
     fn enter_browsed_history(&mut self) {
@@ -966,7 +979,7 @@ impl<'a> App<'a> {
                 {
                     if let Some(task_id) = remote.task_id.clone() {
                         let query_context = handle.query_context();
-                        tokio::spawn(async move {
+                        self.background_domain.spawn(async move {
                             query_context.task_registry().set_running(&task_id).await;
                         });
                     }
@@ -1055,7 +1068,7 @@ impl<'a> App<'a> {
                     if let Some(task_id) = remote.task_id {
                         let result_text = self.last_assistant_text.clone();
                         let query_context = handle.query_context();
-                        tokio::spawn(async move {
+                        self.background_domain().spawn(async move {
                             query_context
                                 .task_registry()
                                 .set_completed(&task_id, result_text, None)
@@ -1280,7 +1293,7 @@ impl<'a> App<'a> {
             self.set_agent_activity(AgentActivity::LoginStarting);
             self.push(Entry::Assistant("logging in to OpenAI Codex…".to_string()));
             let tx = app_tx.clone();
-            tokio::spawn(async move {
+            self.background_domain().spawn(async move {
                 match crate::login_codex::start_device_flow().await {
                     Err(e) => {
                         tx.send(AppEvent::LoginComplete(Err(e))).ok();
@@ -1570,7 +1583,7 @@ impl<'a> App<'a> {
 
         let tx = app_tx.clone();
         let project_dir = self.project_dir.clone();
-        tokio::spawn(async move {
+        self.background_domain().spawn(async move {
             let result = Command::new("sh")
                 .arg("-c")
                 .arg(&command)
@@ -1614,7 +1627,7 @@ impl<'a> App<'a> {
 
         let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let app_tx_relay = app_tx.clone();
-        tokio::spawn(async move {
+        self.background_domain().spawn(async move {
             let mut rx = event_rx;
             while let Some(ev) = rx.recv().await {
                 let _ = app_tx_relay.send(AppEvent::Agent(ev));
@@ -1627,7 +1640,7 @@ impl<'a> App<'a> {
         agent.set_event_tx(event_tx);
 
         let app_tx_done = app_tx.clone();
-        tokio::spawn(async move {
+        self.core_domain.spawn(async move {
             if let Err(e) = agent
                 .run_loop_with_cancellation(&text, Some(cancellation))
                 .await
@@ -2120,6 +2133,71 @@ fn handle_paste(app: &mut App<'_>, pasted: String) {
     app.paste_burst.clear_after_explicit_paste();
 }
 
+fn dispatch_terminal_event(app_tx: &mpsc::UnboundedSender<AppEvent>, event: Event) -> bool {
+    let app_event = match event {
+        Event::Key(key) => AppEvent::Key(key),
+        Event::Mouse(mouse) => AppEvent::Mouse(mouse),
+        Event::Paste(text) => AppEvent::Paste(text),
+        _ => return true,
+    };
+    app_tx.send(app_event).is_ok()
+}
+
+fn run_terminal_input_loop(app_tx: mpsc::UnboundedSender<AppEvent>, shutdown: Arc<AtomicBool>) {
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+        match event::read() {
+            Ok(event) => {
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+                if !dispatch_terminal_event(&app_tx, event) {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+struct TerminalInputThread {
+    shutdown: Arc<AtomicBool>,
+    join_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl TerminalInputThread {
+    fn spawn(app_tx: mpsc::UnboundedSender<AppEvent>) -> Self {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let join_handle = std::thread::spawn({
+            let shutdown = Arc::clone(&shutdown);
+            move || run_terminal_input_loop(app_tx, shutdown)
+        });
+        Self {
+            shutdown,
+            join_handle: Some(join_handle),
+        }
+    }
+
+    fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for TerminalInputThread {
+    fn drop(&mut self) {
+        self.request_shutdown();
+        let Some(join_handle) = self.join_handle.take() else {
+            return;
+        };
+        if !join_handle.is_finished() {
+            return;
+        }
+        let _ = join_handle.join();
+    }
+}
+
 fn handle_non_ascii_char(app: &mut App<'_>, key: event::KeyEvent, _now: Instant) -> bool {
     if let Some(pasted) = app.paste_burst.flush_before_modified_input() {
         handle_paste(app, pasted);
@@ -2573,30 +2651,7 @@ pub async fn run(
     #[cfg(feature = "stylos")]
     let network_domain = runtime_domains.network();
 
-    let app_tx_input = app_tx.clone();
-    std::thread::spawn(move || {
-        loop {
-            match event::read() {
-                Ok(Event::Key(key)) => {
-                    if app_tx_input.send(AppEvent::Key(key)).is_err() {
-                        break;
-                    }
-                }
-                Ok(Event::Mouse(m)) => {
-                    if app_tx_input.send(AppEvent::Mouse(m)).is_err() {
-                        break;
-                    }
-                }
-                Ok(Event::Paste(text)) => {
-                    if app_tx_input.send(AppEvent::Paste(text)).is_err() {
-                        break;
-                    }
-                }
-                Ok(_) => {}
-                Err(_) => break,
-            }
-        }
-    });
+    let input_thread = TerminalInputThread::spawn(app_tx.clone());
 
     let app_tx_tick = app_tx.clone();
     let tui_domain_for_tick = tui_domain.clone();
@@ -2642,6 +2697,10 @@ pub async fn run(
         db,
         session_id,
         project_dir,
+        runtime_domains
+            .background()
+            .expect("background runtime available in TUI mode"),
+        runtime_domains.core(),
         #[cfg(feature = "stylos")]
         stylos_handle,
     );
@@ -2928,7 +2987,7 @@ pub async fn run(
                         (app.stylos.as_ref(), request.task_id.clone())
                     {
                         let query_context = handle.query_context();
-                        tokio::spawn(async move {
+                        app.background_domain().spawn(async move {
                             query_context
                                 .task_registry()
                                 .set_failed(&task_id, "agent_busy".to_string())
@@ -3090,6 +3149,9 @@ pub async fn run(
         }
         }
     }
+
+    input_thread.request_shutdown();
+    drop(app_tx);
 
     disable_raw_mode()?;
     execute!(

@@ -64,8 +64,9 @@ pub struct RuntimeDomains {
     _background_runtime: Option<OwnedRuntime>,
     tui: Option<DomainHandle>,
     core: DomainHandle,
-_network: DomainHandle,
-_background: Option<DomainHandle>,
+    #[cfg(feature = "stylos")]
+    network: DomainHandle,
+    background: Option<DomainHandle>,
 }
 
 impl RuntimeDomains {
@@ -93,6 +94,7 @@ impl RuntimeDomains {
 
         let tui = tui_runtime.as_ref().map(OwnedRuntime::handle);
         let core = core_runtime.handle();
+        #[cfg(feature = "stylos")]
         let network = network_runtime.handle();
         let background = background_runtime.as_ref().map(OwnedRuntime::handle);
 
@@ -103,8 +105,9 @@ impl RuntimeDomains {
             _background_runtime: background_runtime,
             tui,
             core,
-_network: network,
-_background: background,
+            #[cfg(feature = "stylos")]
+            network,
+            background,
         })
     }
 
@@ -118,11 +121,14 @@ _background: background,
 
     #[cfg(feature = "stylos")]
     pub fn network(&self) -> DomainHandle {
-        self._network.clone()
+        self.network.clone()
     }
 
-}
 
+    pub fn background(&self) -> Option<DomainHandle> {
+        self.background.clone()
+    }
+}
 
 fn build_multi_thread_runtime(domain: RuntimeDomain, worker_threads: usize) -> Result<OwnedRuntime> {
     let runtime = Builder::new_multi_thread()
