@@ -60,12 +60,15 @@ Current phase-1 runtime domains:
 
 Mode differences:
 
-- TUI mode constructs `tui`, `core`, `network`, and `background`
-- print mode constructs only the currently needed reduced set, which in phase 1 is `core` and `network`
+- TUI mode constructs `tui`, `core`, `network`, and `background` and runs through a shared CLI app-runtime plus `tui_runner`
+- explicit `--headless` mode constructs the reduced non-TUI runtime set currently needed by that path, which is `core` and `network`, runs through the same shared CLI app-runtime plus `headless_runner`, and emits structured NDJSON lifecycle logs on stdout
+- non-interactive prompt-argument mode also reuses that shared CLI app-runtime, but remains a one-shot stdout/stderr execution path rather than the long-running headless NDJSON-log mode
 
 This preserves the single-process architecture while making runtime ownership explicit in startup code. In the current implementation, the `tui` domain is now a literal Tokio `current_thread` runtime, while `core`, `network`, and `background` remain multi-thread runtimes.
 
 ## Stylos remote-request bridge
+
+Shared CLI bootstrap now lives in `crates/themion-cli/src/app_runtime.rs`, which resolves the project directory, opens the local DB, inserts the session row, builds `Session`, and exposes shared agent-construction helpers used by TUI mode, explicit `--headless` mode, and non-interactive prompt execution. `main.rs` stays thin and only selects which runner to invoke.
 
 Stylos request handling stays CLI-local even when it ultimately causes an agent turn.
 

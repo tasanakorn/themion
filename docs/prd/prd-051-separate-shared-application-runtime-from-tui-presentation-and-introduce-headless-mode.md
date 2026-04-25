@@ -1,6 +1,6 @@
 # PRD-051: Separate Shared Application Runtime from TUI Presentation and Introduce Headless Mode
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Version:** v0.32.0
 - **Scope:** `themion-cli`, docs
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
@@ -13,13 +13,13 @@
 - Introduce one shared non-UI CLI application-runtime layer that both TUI mode and headless mode use.
 - Keep `main.rs` thin, keep `tui_runner.rs` as the terminal-mode orchestrator, add a headless runner, and move non-UI session/agent/bootstrap logic out of `tui.rs` and duplicated mode-specific paths.
 - Treat the current `app_runtime.rs` as overlapping scaffolding to remove or rewrite into the actual shared architecture layer.
-- Use a minimal real headless mode as the architectural proof that TUI presentation is optional rather than foundational.
+- Use a minimal real explicit `--headless` mode as the architectural proof that TUI presentation is optional rather than foundational, distinct from the non-interactive one-shot prompt path.
 - This PRD succeeds PRD-050 for app-layer architecture; PRD-050 remains focused on Tokio runtime-domain ownership.
 
 ## Goals
 
 - Make `tui.rs` responsible only for terminal input/output and presentation concerns.
-- Introduce a minimal real headless mode as part of this PRD so the shared application-runtime boundary is proven in practice.
+- Introduce a minimal real explicit `--headless` mode as part of this PRD so the shared application-runtime boundary is proven in practice.
 - Ensure TUI mode and headless mode both use the same shared CLI-local application-runtime layer for project resolution, session setup, agent construction, and turn orchestration.
 - Keep `main.rs` thin and mode-selecting rather than mode-implementing.
 - Keep `tui_runner.rs` as the terminal-mode bridge between shared app/runtime logic and TUI presentation.
@@ -191,26 +191,28 @@ Normative direction:
 Acceptable first-slice headless behavior may be limited to:
 
 - starting a session
-- constructing the agent through the shared layer
-- running prompt/turn execution without TUI state
-- exposing output through a simple non-TUI interface such as stdout/stderr or another existing non-interactive path
+- constructing shared runtime state without TUI state
+- starting shared networking/runtime services such as Stylos
+- remaining available as a long-running non-TUI process
+
+The existing prompt-argument path may remain as a separate non-interactive one-shot compatibility path routed through the same shared runtime layer.
 
 This is the core reason for the split: the shared layer should define the app, while runners and adapters define how users interact with it.
 
 **Alternative considered:** continue using the current print mode as an ad hoc special case and postpone headless architecture entirely. Rejected: this PRD exists to make the non-TUI path a real architectural peer instead of an accident.
 
-### Current print mode should become the first headless path or a thin compatibility wrapper
+### Current print mode should remain a separate non-interactive path, while headless mode is explicit
 
-The existing print mode should not remain a separate bootstrap island.
+The existing print mode should not remain a separate bootstrap island, but it is distinct from explicit headless mode.
 
 Normative direction:
 
-- either evolve the existing print mode into the initial supported headless runner
-- or keep the current CLI surface but route it through the new headless runner internally
-- move its project-dir, DB, session, and agent setup toward the same shared CLI app-runtime layer used by TUI mode
+- keep an explicit `--headless` mode for long-running non-TUI operation
+- keep the current prompt-argument CLI surface as a separate non-interactive compatibility path
+- route both through the same shared CLI app-runtime layer used by TUI mode
 - do not require headless mode to depend on terminal-specific state or APIs
 
-This turns the shared layer into a real architecture boundary rather than a TUI convenience wrapper.
+This turns the shared layer into a real architecture boundary rather than a TUI convenience wrapper, while keeping non-interactive scripting behavior distinct from long-running headless operation.
 
 **Alternative considered:** leave print mode as a separate special case indefinitely. Rejected: that preserves exactly the duplication this PRD is meant to reduce.
 
@@ -303,15 +305,15 @@ This phasing keeps the architectural direction concrete without forcing a risky 
 ## Edge Cases
 
 - TUI mode starts after the split → verify: terminal setup and rendering still work while shared app/runtime logic remains outside `tui.rs`.
-- headless mode starts after the split → verify: it can initialize sessions and run prompt execution without depending on TUI-only state.
-- current print-mode behavior is preserved through the new headless path → verify: the user-facing non-TUI path still works while bootstrap is no longer duplicated.
+- explicit `--headless` mode starts after the split → verify: it can initialize shared runtime state and long-lived network services without depending on TUI-only state, and it emits structured NDJSON lifecycle logs suitable for machine consumption.
+- current print-mode behavior is preserved as a separate non-interactive path through the shared runtime layer → verify: the user-facing non-TUI path still works while bootstrap is no longer duplicated.
 - Stylos startup is needed in both TUI and headless flows → verify: shared runtime wiring does not depend on Ratatui-only types.
 - extraction moves agent/bootstrap helpers out of `tui.rs` and `main.rs` → verify: behavior stays the same and no duplicated setup path remains for the moved slice.
 - overlapping scaffolding is removed or rewritten → verify: the repository no longer has two competing bootstrap concepts for the same CLI runtime layer.
 
 ## Migration
 
-This is an internal CLI architecture migration with one externally meaningful result: a real minimal headless mode exists alongside TUI mode.
+This is an internal CLI architecture migration with one externally meaningful result: a real explicit `--headless` mode exists alongside TUI mode and the separate non-interactive prompt path, with NDJSON lifecycle logging for headless operation.
 
 Expected rollout shape:
 
@@ -319,6 +321,7 @@ Expected rollout shape:
 - introduce a shared non-UI CLI application-runtime layer
 - route TUI mode through `tui_runner.rs` over that shared layer
 - route headless mode through `headless_runner.rs` over that same shared layer
+- make explicit `--headless` a long-running machine-oriented path with NDJSON lifecycle logging, while keeping prompt arguments as the separate one-shot non-interactive path
 - move TUI-specific presentation concerns into `tui.rs`
 - remove or rewrite overlapping bootstrap scaffolding once the shared layer is real
 
@@ -327,7 +330,8 @@ No database or wire-protocol migration is expected from this architectural split
 ## Testing
 
 - start Themion in TUI mode after the first extraction slice → verify: TUI behavior still works and terminal rendering remains intact.
-- start Themion in headless mode after the first runnable slice → verify: project resolution, session setup, agent construction, and prompt execution work without TUI-specific state.
+- start Themion with `--headless` after the first runnable slice → verify: project resolution, session setup, and long-running non-TUI runtime services work without TUI-specific state, with NDJSON lifecycle events written one per line.
+- start Themion with prompt args after the first runnable slice → verify: the separate non-interactive path still executes one prompt through the shared runtime layer.
 - inspect `tui.rs` after the refactor slice → verify: it mainly contains input/output and presentation-related logic rather than shared bootstrap/orchestration helpers.
 - inspect `main.rs` after the refactor slice → verify: it remains thin and does not keep duplicated mode-specific bootstrap logic that belongs in the shared layer.
 - inspect startup wiring after the refactor slice → verify: `tui_runner.rs` and `headless_runner.rs` both rely on the same shared app/runtime logic.
@@ -337,18 +341,18 @@ No database or wire-protocol migration is expected from this architectural split
 
 ## Implementation checklist
 
-- [ ] define the shared non-UI CLI application-runtime boundary in `themion-cli`
-- [ ] choose the real shared module name and remove or rewrite overlapping scaffolding accordingly
-- [ ] extract project-dir, DB, session, and agent/bootstrap helpers out of `tui.rs` and duplicated mode-specific paths in `main.rs` where they are not presentation-specific
-- [ ] keep `tui.rs` focused on terminal I/O, rendering, and view-specific state
-- [ ] keep `tui_runner.rs` as the terminal-mode orchestrator over the shared layer
-- [ ] add a minimal real `headless_runner.rs` or equivalent headless runner over the same shared layer
-- [ ] route the current non-TUI path through the shared bootstrap/runtime logic, either directly as headless mode or through a thin compatibility wrapper
-- [ ] move shared Stylos startup/setup behind the shared CLI app-runtime boundary where practical
-- [ ] remove or rewrite `app_runtime.rs` once the shared layer is established
-- [ ] update `docs/architecture.md` and `docs/engine-runtime.md`
-- [ ] update `docs/README.md` with this PRD entry
-- [ ] decide and apply the repository version bump if this PRD is implemented
-- [ ] check `Cargo.lock` after any version change
-- [ ] run `cargo check -p themion-cli`
-- [ ] run `cargo check -p themion-cli --features stylos`
+- [x] define the shared non-UI CLI application-runtime boundary in `themion-cli`
+- [x] choose the real shared module name and remove or rewrite overlapping scaffolding accordingly
+- [x] extract project-dir, DB, session, and agent/bootstrap helpers out of `tui.rs` and duplicated mode-specific paths in `main.rs` where they are not presentation-specific
+- [x] keep `tui.rs` focused on terminal I/O, rendering, and view-specific state
+- [x] keep `tui_runner.rs` as the terminal-mode orchestrator over the shared layer
+- [x] add a minimal real `headless_runner.rs` or equivalent headless runner over the same shared layer
+- [x] route the current non-TUI path through the shared bootstrap/runtime logic, either directly as headless mode or through a thin compatibility wrapper
+- [x] move shared Stylos startup/setup behind the shared CLI app-runtime boundary where practical
+- [x] remove or rewrite `app_runtime.rs` once the shared layer is established
+- [x] update `docs/architecture.md` and `docs/engine-runtime.md`
+- [x] update `docs/README.md` with this PRD entry
+- [x] decide and apply the repository version bump if this PRD is implemented
+- [x] check `Cargo.lock` after any version change
+- [x] run `cargo check -p themion-cli`
+- [x] run `cargo check -p themion-cli --features stylos`

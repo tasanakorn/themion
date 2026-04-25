@@ -35,9 +35,16 @@ This separation is intentional: reusable harness/runtime and provider behavior b
 
 ```text
 main.rs
-  └─ loads Config, resolves project_dir, opens DbHandle
-       ├─ print mode  ──► Agent::new_with_db → run_loop(prompt) → print → exit
-       └─ TUI mode    ──► tui::run(cfg, dir_override)
+  └─ loads Config, parses mode/args, and builds shared CLI app runtime
+       ├─ non-interactive prompt args ──► headless_runner::run_non_interactive(app_runtime, prompt)
+       ├─ --headless               ──► headless_runner::run(app_runtime)
+       └─ TUI mode                 ──► tui_runner::run(app_runtime)
+
+CliAppRuntime  (app_runtime.rs)
+  ├─ resolves project_dir and opens DbHandle
+  ├─ inserts agent_sessions row and builds Session
+  ├─ owns shared CLI-local runtime/bootstrap state
+  └─ builds core Agent instances for TUI, headless, and non-interactive runners
 
 tui::run  (tui.rs)
   ├─ opens DbHandle at $XDG_DATA_HOME/themion/system.db
@@ -118,6 +125,8 @@ For debugging, the practical thread model is now:
 - multiple async tasks communicating through unbounded `mpsc` channels
 
 ### TUI mode structure
+
+In the current CLI architecture, `crates/themion-cli/src/app_runtime.rs` owns shared non-UI bootstrap for TUI mode, explicit `--headless` mode, and the non-interactive one-shot prompt path. `crates/themion-cli/src/tui_runner.rs` owns terminal-mode orchestration, `crates/themion-cli/src/headless_runner.rs` owns both the long-running headless NDJSON-log entrypoint and the non-interactive one-shot path, and `crates/themion-cli/src/tui.rs` remains the terminal presentation and event-handling layer.
 
 In `crates/themion-cli/src/tui.rs`, the app creates a central `AppEvent` channel and then spawns a few long-lived background tasks around one main UI loop.
 
