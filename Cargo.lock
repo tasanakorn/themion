@@ -2991,7 +2991,7 @@ dependencies = [
 
 [[package]]
 name = "themion-cli"
-version = "0.32.0"
+version = "0.34.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -3019,7 +3019,7 @@ dependencies = [
 
 [[package]]
 name = "themion-core"
-version = "0.32.0"
+version = "0.34.0"
 dependencies = [
  "anyhow",
  "async-trait",

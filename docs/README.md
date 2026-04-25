@@ -62,6 +62,8 @@
 | PRD-050 | [Reorganize Tokio Runtime Execution into Domain-Specific Pools](prd/prd-050-reorganize-tokio-runtime-pools.md) | Partially implemented | v0.31.0 | `themion-cli`, `themion-core`, docs |
 | PRD-051 | [Separate Shared Application Runtime from TUI Presentation and Introduce Headless Mode](prd/prd-051-separate-shared-application-runtime-from-tui-presentation-and-introduce-headless-mode.md) | Implemented | v0.32.0 | `themion-cli`, docs |
 | PRD-052 | [Local System Inspection Tool for Runtime, Tooling, and Provider Readiness](prd/prd-052-tool-and-model-self-healthcheck.md) | Implemented | v0.33.0 | `themion-core`, `themion-cli`, docs |
+| PRD-053 | [Tighten Tokio Runtime Topology Semantics and Remove Remaining TUI-Orchestration Leakage](prd/prd-053-tighten-tokio-runtime-topology-and-tui-layering.md) | Implemented | v0.34.0 | `themion-cli`, docs |
+| PRD-054 | [Rename Shared CLI Application Runtime Type to `AppState`](prd/prd-054-rename-shared-cli-app-runtime-to-app-state.md) | Proposed | v0.34.1 | `themion-cli`, docs |
 
 ## Roadmap note
 

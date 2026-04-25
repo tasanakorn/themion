@@ -7,6 +7,8 @@ use themion_core::agent::Agent;
 use themion_core::client::ChatClient;
 use themion_core::client_codex::CodexClient;
 use themion_core::db::DbHandle;
+#[cfg(feature = "stylos")]
+use themion_core::db::{CreateNoteArgs, NoteColumn, NoteKind};
 use themion_core::tools::{
     SystemInspectionProvider, SystemInspectionResult, SystemInspectionRuntime,
     SystemInspectionTools,
@@ -22,6 +24,17 @@ pub struct CliAppRuntime {
     pub session_id: Uuid,
     #[cfg(feature = "stylos")]
     pub stylos_config: crate::config::StylosConfig,
+}
+
+#[cfg(feature = "stylos")]
+pub struct DoneMentionRequest {
+    pub note_id: String,
+    pub note_slug: String,
+    pub from_instance: String,
+    pub from_agent_id: String,
+    pub completed_by_instance: String,
+    pub completed_by_agent_id: String,
+    pub result_summary: String,
 }
 
 impl CliAppRuntime {
@@ -225,6 +238,74 @@ pub async fn start_stylos(
     }
 }
 
+#[cfg(feature = "stylos")]
+#[cfg(feature = "stylos")]
+#[cfg(feature = "stylos")]
+pub async fn create_done_mention_via_bridge(
+    bridge: &crate::stylos::StylosToolBridge,
+    from_agent_id: &str,
+    request: &DoneMentionRequest,
+) -> anyhow::Result<String> {
+    let body = format!(
+        "Done: delegated note completed.\n\nOriginal note: {} ({})\nCompleted by: {} / {}\nResult:\n{}",
+        request.note_id,
+        request.note_slug,
+        request.completed_by_instance,
+        request.completed_by_agent_id,
+        request.result_summary,
+    );
+    bridge
+        .invoke(
+            Some(from_agent_id),
+            "board_create_note",
+            serde_json::json!({
+                "to_instance": request.from_instance,
+                "to_agent_id": request.from_agent_id,
+                "body": body,
+                "note_kind": "done_mention",
+                "origin_note_id": request.note_id,
+            }),
+        )
+        .await
+}
+
+#[cfg(feature = "stylos")]
+pub fn create_done_mention_locally(
+    db: &DbHandle,
+    request: &DoneMentionRequest,
+) -> anyhow::Result<String> {
+    let body = format!(
+        "Done: delegated note completed.\n\nOriginal note: {} ({})\nCompleted by: {} / {}\nResult:\n{}",
+        request.note_id,
+        request.note_slug,
+        request.completed_by_instance,
+        request.completed_by_agent_id,
+        request.result_summary,
+    );
+    db.create_board_note(CreateNoteArgs {
+        note_id: uuid::Uuid::new_v4().to_string(),
+        note_kind: NoteKind::DoneMention,
+        column: NoteColumn::Todo,
+        origin_note_id: Some(request.note_id.clone()),
+        from_instance: Some(request.completed_by_instance.clone()),
+        from_agent_id: Some(request.completed_by_agent_id.clone()),
+        to_instance: request.from_instance.clone(),
+        to_agent_id: request.from_agent_id.clone(),
+        body,
+        meta_json: None,
+    })
+    .map(|done_note| {
+        serde_json::json!({
+            "accepted": true,
+            "note_id": done_note.note_id,
+            "note_slug": done_note.note_slug,
+            "agent_id": done_note.to_agent_id,
+        })
+        .to_string()
+    })
+    .map_err(anyhow::Error::from)
+}
+
 pub fn build_agent(
     session: &Session,
     session_id: Uuid,
@@ -264,16 +345,7 @@ pub fn build_agent(
             Box::new(c)
         }
     };
-    #[cfg(feature = "stylos")]
-    let mut agent = Agent::new_with_db(
-        client,
-        session.model.clone(),
-        session.system_prompt.clone(),
-        session_id,
-        project_dir,
-        db,
-    );
-    #[cfg(not(feature = "stylos"))]
+
     let mut agent = Agent::new_with_db(
         client,
         session.model.clone(),
@@ -283,11 +355,13 @@ pub fn build_agent(
         db,
     );
     agent.set_system_inspection(system_inspection);
+
     #[cfg(feature = "stylos")]
-    agent.set_local_agent_id(Some(local_agent_id.to_string()));
-    #[cfg(feature = "stylos")]
-    agent.set_local_instance_id(local_instance_id.map(str::to_string));
-    #[cfg(feature = "stylos")]
-    agent.set_stylos_tool_invoker(crate::tui::stylos_tool_invoker(stylos_tool_bridge));
+    {
+        agent.set_stylos_tool_invoker(crate::tui::stylos_tool_invoker(stylos_tool_bridge));
+        agent.set_local_instance_id(local_instance_id.map(str::to_string));
+        agent.set_local_agent_id(Some(local_agent_id.to_string()));
+    }
+
     Ok(agent)
 }

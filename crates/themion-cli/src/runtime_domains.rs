@@ -49,14 +49,35 @@ impl DomainHandle {
     }
 }
 
+enum RuntimeKind {
+    MultiThread(Runtime),
+}
+
 struct OwnedRuntime {
     name: RuntimeDomain,
-    runtime: Runtime,
+    kind: RuntimeKind,
 }
 
 impl OwnedRuntime {
+    fn multi_thread(name: RuntimeDomain, worker_threads: usize) -> Result<Self> {
+        let runtime = Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(worker_threads)
+            .thread_name(format!("themion-{}", name.as_str()))
+            .build()?;
+        Ok(Self {
+            name,
+            kind: RuntimeKind::MultiThread(runtime),
+        })
+    }
+
     fn handle(&self) -> DomainHandle {
-        DomainHandle::new(self.name, self.runtime.handle().clone())
+        DomainHandle::new(
+            self.name,
+            match &self.kind {
+                RuntimeKind::MultiThread(runtime) => runtime.handle().clone(),
+            },
+        )
     }
 }
 
@@ -83,14 +104,14 @@ impl RuntimeDomains {
 
     fn build(include_tui: bool, include_background: bool) -> Result<Self> {
         let tui_runtime = if include_tui {
-            Some(build_multi_thread_runtime(RuntimeDomain::Tui, 1)?)
+            Some(OwnedRuntime::multi_thread(RuntimeDomain::Tui, 1)?)
         } else {
             None
         };
-        let core_runtime = build_multi_thread_runtime(RuntimeDomain::Core, 2)?;
-        let network_runtime = build_multi_thread_runtime(RuntimeDomain::Network, 2)?;
+        let core_runtime = OwnedRuntime::multi_thread(RuntimeDomain::Core, 2)?;
+        let network_runtime = OwnedRuntime::multi_thread(RuntimeDomain::Network, 2)?;
         let background_runtime = if include_background {
-            Some(build_multi_thread_runtime(RuntimeDomain::Background, 1)?)
+            Some(OwnedRuntime::multi_thread(RuntimeDomain::Background, 1)?)
         } else {
             None
         };
@@ -130,19 +151,4 @@ impl RuntimeDomains {
     pub fn background(&self) -> Option<DomainHandle> {
         self.background.clone()
     }
-}
-
-fn build_multi_thread_runtime(
-    domain: RuntimeDomain,
-    worker_threads: usize,
-) -> Result<OwnedRuntime> {
-    let runtime = Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(worker_threads)
-        .thread_name(format!("themion-{}", domain.as_str()))
-        .build()?;
-    Ok(OwnedRuntime {
-        name: domain,
-        runtime,
-    })
 }

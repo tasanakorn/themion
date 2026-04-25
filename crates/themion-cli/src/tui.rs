@@ -1964,54 +1964,35 @@ impl<'a> App<'a> {
             .result_text
             .clone()
             .unwrap_or_else(|| "completed with no explicit stored result".to_string());
-        let body = format!(
-            "Done: delegated note completed.
+        let request = crate::app_runtime::DoneMentionRequest {
+            note_id: note.note_id.clone(),
+            note_slug: note.note_slug.clone(),
+            from_instance: to_instance.clone(),
+            from_agent_id: to_agent_id.clone(),
+            completed_by_instance: note.to_instance.clone(),
+            completed_by_agent_id: note.to_agent_id.clone(),
+            result_summary,
+        };
 
-Original note: {} ({})
-Completed by: {} / {}
-Result:
-{}",
-            note.note_id, note.note_slug, note.to_instance, note.to_agent_id, result_summary,
-        );
-
-        let create_reply = if let Some(bridge) = self.stylos_tool_bridge.as_ref() {
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(bridge.invoke(
-                    Some(&note.to_agent_id),
-                    "board_create_note",
-                    serde_json::json!({
-                        "to_instance": to_instance,
-                        "to_agent_id": to_agent_id,
-                        "body": body,
-                        "note_kind": "done_mention",
-                        "origin_note_id": note.note_id,
-                    }),
-                ))
-            })
+        let create_reply = if let Some(bridge) = self.stylos_tool_bridge.as_ref().cloned() {
+            let app_tx_done = app_tx.clone();
+            let from_agent_id = note.to_agent_id.clone();
+            self.background_domain().spawn(async move {
+                let result = crate::app_runtime::create_done_mention_via_bridge(
+                    &bridge,
+                    &from_agent_id,
+                    &request,
+                )
+                .await;
+                let output = match result {
+                    Ok(output) => output,
+                    Err(err) => format!("error: {}", err),
+                };
+                let _ = app_tx_done.send(AppEvent::Agent(AgentEvent::Status(output)));
+            });
+            return;
         } else {
-            self.db
-                .create_board_note(themion_core::db::CreateNoteArgs {
-                    note_id: uuid::Uuid::new_v4().to_string(),
-                    note_kind: themion_core::db::NoteKind::DoneMention,
-                    column: themion_core::db::NoteColumn::Todo,
-                    origin_note_id: Some(note.note_id.clone()),
-                    from_instance: Some(note.to_instance.clone()),
-                    from_agent_id: Some(note.to_agent_id.clone()),
-                    to_instance: to_instance.clone(),
-                    to_agent_id: to_agent_id.clone(),
-                    body,
-                    meta_json: None,
-                })
-                .map(|done_note| {
-                    serde_json::json!({
-                        "accepted": true,
-                        "note_id": done_note.note_id,
-                        "note_slug": done_note.note_slug,
-                        "agent_id": done_note.to_agent_id,
-                    })
-                    .to_string()
-                })
-                .map_err(anyhow::Error::from)
+            crate::app_runtime::create_done_mention_locally(&self.db, &request)
         };
 
         match create_reply {
