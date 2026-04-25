@@ -1,10 +1,10 @@
+mod app_runtime;
 mod auth_store;
 mod config;
+mod headless_runner;
 mod login_codex;
 mod paste_burst;
-mod app_runtime;
 mod runtime_domains;
-mod headless_runner;
 #[cfg(feature = "stylos")]
 mod stylos;
 mod tui;
@@ -152,13 +152,18 @@ fn main() -> anyhow::Result<()> {
         }
         let app_runtime = CliAppRuntime::for_headless(cfg, project_dir_override)?;
         let runtime_domains = app_runtime.runtime_domains.clone();
-        runtime_domains.core().block_on(headless_runner::run(app_runtime))
+        runtime_domains
+            .core()
+            .block_on(headless_runner::run(app_runtime))
     } else if !remaining_args.is_empty() {
         let app_runtime = CliAppRuntime::for_headless(cfg, project_dir_override)?;
         let runtime_domains = app_runtime.runtime_domains.clone();
         runtime_domains
             .core()
-            .block_on(headless_runner::run_non_interactive(app_runtime, remaining_args.join(" ")))
+            .block_on(headless_runner::run_non_interactive(
+                app_runtime,
+                remaining_args.join(" "),
+            ))
     } else {
         let app_runtime = CliAppRuntime::for_tui(cfg, project_dir_override)?;
         let runtime_domains = app_runtime.runtime_domains.clone();

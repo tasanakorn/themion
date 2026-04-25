@@ -11,6 +11,7 @@ fn test_ctx(db: std::sync::Arc<DbHandle>) -> ToolCtx {
         project_dir: PathBuf::from("."),
         workflow_state: Some(WorkflowState::default()),
         turn_seq: None,
+        system_inspection: None,
     }
 }
 

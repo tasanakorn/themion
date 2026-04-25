@@ -7,6 +7,10 @@ use themion_core::agent::Agent;
 use themion_core::client::ChatClient;
 use themion_core::client_codex::CodexClient;
 use themion_core::db::DbHandle;
+use themion_core::tools::{
+    SystemInspectionProvider, SystemInspectionResult, SystemInspectionRuntime,
+    SystemInspectionTools,
+};
 use themion_core::ChatBackend;
 use uuid::Uuid;
 
@@ -25,7 +29,10 @@ impl CliAppRuntime {
         Self::build(cfg, project_dir_override, true)
     }
 
-    pub fn for_headless(cfg: Config, project_dir_override: Option<PathBuf>) -> anyhow::Result<Self> {
+    pub fn for_headless(
+        cfg: Config,
+        project_dir_override: Option<PathBuf>,
+    ) -> anyhow::Result<Self> {
         Self::build(cfg, project_dir_override, false)
     }
 
@@ -59,6 +66,100 @@ impl CliAppRuntime {
         })
     }
 
+    pub fn system_inspection_snapshot(&self) -> SystemInspectionResult {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let mut provider = SystemInspectionProvider {
+            status: "ok".to_string(),
+            active_profile: Some(self.session.active_profile.clone()),
+            provider: Some(self.session.provider.clone()),
+            model: Some(self.session.model.clone()),
+            auth_configured: Some(match self.session.provider.as_str() {
+                "openai-codex" => crate::auth_store::load().ok().flatten().is_some(),
+                _ => self
+                    .session
+                    .api_key
+                    .as_ref()
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false),
+            }),
+            base_url_present: Some(!self.session.base_url.trim().is_empty()),
+            rate_limits: None,
+            warnings: Vec::new(),
+            issues: Vec::new(),
+        };
+        if provider.auth_configured == Some(false) {
+            provider.status = "degraded".to_string();
+            provider
+                .issues
+                .push("provider authentication is not configured".to_string());
+        }
+        if provider.base_url_present == Some(false) {
+            provider.status = "degraded".to_string();
+            provider
+                .issues
+                .push("provider base_url is empty".to_string());
+        }
+
+        let tool_names = themion_core::tools::tool_definitions()
+            .as_array()
+            .into_iter()
+            .flat_map(|defs| defs.iter())
+            .filter_map(|entry| entry.get("function")?.get("name")?.as_str())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+
+        let tools = SystemInspectionTools {
+            status: "ok".to_string(),
+            tool_count: tool_names.len(),
+            available_names: tool_names,
+            warnings: Vec::new(),
+            issues: Vec::new(),
+        };
+
+        let runtime = SystemInspectionRuntime {
+            status: "ok".to_string(),
+            pid: Some(std::process::id()),
+            now_ms,
+            session_id: self.session_id.to_string(),
+            project_dir: self.project_dir.display().to_string(),
+            workflow_name: None,
+            phase_name: None,
+            workflow_status: None,
+            debug_runtime_lines: vec![
+                "debug runtime snapshot unavailable outside the TUI app loop".to_string(),
+            ],
+            warnings: vec!["runtime inspection is partial outside the TUI app loop".to_string()],
+            issues: Vec::new(),
+        };
+
+        let mut warnings = Vec::new();
+        let mut issues = Vec::new();
+        if provider.status != "ok" {
+            warnings.push("provider readiness is degraded".to_string());
+            issues.extend(provider.issues.clone());
+        }
+        let overall_status = if issues.is_empty() { "ok" } else { "degraded" }.to_string();
+        let summary = if overall_status == "ok" {
+            "local inspection snapshot available".to_string()
+        } else {
+            format!("local inspection found {} issue(s)", issues.len())
+        };
+
+        SystemInspectionResult {
+            overall_status,
+            summary,
+            runtime,
+            tools,
+            provider,
+            warnings,
+            issues,
+        }
+    }
+
     pub fn build_agent(&self) -> anyhow::Result<Agent> {
         build_agent(
             &self.session,
@@ -71,6 +172,7 @@ impl CliAppRuntime {
             None,
             #[cfg(feature = "stylos")]
             "main",
+            Some(self.system_inspection_snapshot()),
         )
     }
 }
@@ -100,7 +202,9 @@ pub fn open_history_db(interactive: bool) -> Arc<DbHandle> {
 }
 
 #[cfg(feature = "stylos")]
-pub async fn start_stylos(app_runtime: &CliAppRuntime) -> anyhow::Result<crate::stylos::StylosHandle> {
+pub async fn start_stylos(
+    app_runtime: &CliAppRuntime,
+) -> anyhow::Result<crate::stylos::StylosHandle> {
     match app_runtime
         .runtime_domains
         .network()
@@ -129,6 +233,7 @@ pub fn build_agent(
     #[cfg(feature = "stylos")] stylos_tool_bridge: Option<crate::stylos::StylosToolBridge>,
     #[cfg(feature = "stylos")] local_instance_id: Option<&str>,
     #[cfg(feature = "stylos")] local_agent_id: &str,
+    system_inspection: Option<SystemInspectionResult>,
 ) -> anyhow::Result<Agent> {
     let client: Box<dyn ChatBackend + Send + Sync> = match session.provider.as_str() {
         "openai-codex" => {
@@ -169,7 +274,7 @@ pub fn build_agent(
         db,
     );
     #[cfg(not(feature = "stylos"))]
-    let agent = Agent::new_with_db(
+    let mut agent = Agent::new_with_db(
         client,
         session.model.clone(),
         session.system_prompt.clone(),
@@ -177,6 +282,7 @@ pub fn build_agent(
         project_dir,
         db,
     );
+    agent.set_system_inspection(system_inspection);
     #[cfg(feature = "stylos")]
     agent.set_local_agent_id(Some(local_agent_id.to_string()));
     #[cfg(feature = "stylos")]

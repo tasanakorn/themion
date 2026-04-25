@@ -164,6 +164,7 @@ pub struct Agent {
     local_instance_id: Option<String>,
     #[cfg(feature = "stylos")]
     stylos_tool_invoker: Option<crate::tools::StylosToolInvoker>,
+    system_inspection: Option<crate::tools::SystemInspectionResult>,
 }
 
 impl Agent {
@@ -192,6 +193,7 @@ impl Agent {
             local_instance_id: None,
             #[cfg(feature = "stylos")]
             stylos_tool_invoker: None,
+            system_inspection: None,
         }
     }
 
@@ -247,11 +249,19 @@ impl Agent {
             local_instance_id: None,
             #[cfg(feature = "stylos")]
             stylos_tool_invoker: None,
+            system_inspection: None,
         }
     }
 
     pub fn set_event_tx(&mut self, tx: mpsc::UnboundedSender<AgentEvent>) {
         self.event_tx = Some(tx);
+    }
+
+    pub fn set_system_inspection(
+        &mut self,
+        inspection: Option<crate::tools::SystemInspectionResult>,
+    ) {
+        self.system_inspection = inspection;
     }
 
     #[cfg(feature = "stylos")]
@@ -1248,6 +1258,7 @@ impl Agent {
                     stylos_tool_invoker: self.stylos_tool_invoker.clone(),
                     #[cfg(feature = "stylos")]
                     stylos_enabled: self.stylos_tool_invoker.is_some(),
+                    system_inspection: self.system_inspection.clone(),
                 };
                 let result =
                     tools::call_tool(&tc.function.name, &tc.function.arguments, &tool_ctx).await;

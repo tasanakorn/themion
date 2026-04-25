@@ -149,6 +149,22 @@ This sender-side log is distinct from generic tool-call text and is intended to 
 
 Tool-call chat labels remain compact, but long tool detail values are now center-trimmed to about 60 characters with `󱑼` so the display can preserve both the beginning and the end of paths, commands, and other long identifiers.
 
+## Local system inspection tool
+
+`ToolCtx` now also carries current workflow state and an optional local system-inspection snapshot so tool execution can answer runtime-diagnostic requests without reaching back through TUI-only slash-command handling.
+
+`system_inspect_local` is the current aggregate local inspection tool. It is intentionally read-only and bounded: it reports local runtime state, available tool surface, and provider/model readiness without mutating workflow/config/history, writing board or memory data, invoking shell commands, or performing implicit expensive probes.
+
+Current behavior:
+
+- returns structured top-level sections including `overall_status`, `summary`, `runtime`, `tools`, `provider`, `warnings`, and `issues`
+- in TUI mode, the runtime section includes `runtime.debug_runtime_lines`, reusing the same `/debug runtime` snapshot text assembly path used by the human-facing command
+- in non-TUI or fallback paths, the tool still returns a bounded local snapshot but reports unavailable runtime details explicitly
+- provider readiness is based on already-known local state such as active profile/provider/model, auth presence, base URL presence, and recent rate-limit metadata when available
+- tool-surface reporting is based on the locally defined tool registry for the current build/runtime shape
+
+This keeps the model-visible diagnostic surface aligned with the human `/debug runtime` command while preserving a stable structured tool contract.
+
 ## File and shell tool bounds
 
 `themion-core` now uses more explicit and bounded contracts for the main local filesystem and shell tools.

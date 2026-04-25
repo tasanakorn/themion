@@ -146,4 +146,3 @@ fn build_multi_thread_runtime(
         runtime,
     })
 }
-

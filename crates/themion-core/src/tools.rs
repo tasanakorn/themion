@@ -12,7 +12,10 @@ use crate::workflow::{
     PhaseResult, WorkflowState, WorkflowStatus, DEFAULT_AGENT,
 };
 use anyhow::{Context, Result};
+
 use base64::Engine;
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
 #[cfg(feature = "stylos")]
@@ -170,6 +173,63 @@ const MAX_READ_LIMIT: usize = 2 * 1024 * 1024;
 const DEFAULT_SHELL_RESULT_LIMIT: usize = 16 * 1024;
 const DEFAULT_SHELL_TIMEOUT_MS: u64 = 5 * 60 * 1000;
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SystemInspectionRateLimits {
+    pub api_call: String,
+    pub source: String,
+    pub http_status: Option<u16>,
+    pub active_limit: Option<String>,
+    pub snapshot_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SystemInspectionProvider {
+    pub status: String,
+    pub active_profile: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub auth_configured: Option<bool>,
+    pub base_url_present: Option<bool>,
+    pub rate_limits: Option<SystemInspectionRateLimits>,
+    pub warnings: Vec<String>,
+    pub issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SystemInspectionRuntime {
+    pub status: String,
+    pub pid: Option<u32>,
+    pub now_ms: u64,
+    pub session_id: String,
+    pub project_dir: String,
+    pub workflow_name: Option<String>,
+    pub phase_name: Option<String>,
+    pub workflow_status: Option<String>,
+    pub debug_runtime_lines: Vec<String>,
+    pub warnings: Vec<String>,
+    pub issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SystemInspectionTools {
+    pub status: String,
+    pub tool_count: usize,
+    pub available_names: Vec<String>,
+    pub warnings: Vec<String>,
+    pub issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SystemInspectionResult {
+    pub overall_status: String,
+    pub summary: String,
+    pub runtime: SystemInspectionRuntime,
+    pub tools: SystemInspectionTools,
+    pub provider: SystemInspectionProvider,
+    pub warnings: Vec<String>,
+    pub issues: Vec<String>,
+}
+
 pub struct ToolCtx {
     pub db: Arc<DbHandle>,
     pub session_id: Uuid,
@@ -184,6 +244,7 @@ pub struct ToolCtx {
     pub stylos_tool_invoker: Option<StylosToolInvoker>,
     #[cfg(feature = "stylos")]
     pub stylos_enabled: bool,
+    pub system_inspection: Option<SystemInspectionResult>,
 }
 
 fn resolve_board_target(
@@ -390,6 +451,18 @@ pub fn tool_definitions() -> Value {
                         "timeout_ms": { "type": "integer", "description": "Command timeout in milliseconds. Defaults to 300000." }
                     },
                     "required": ["command"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "system_inspect_local",
+                "description": "Inspect the current local Themion process and active agent context in a no-surprise, read-only way. Returns a structured snapshot of runtime state, available tools, and provider readiness using already-available local data plus bounded cheap checks. Does not mutate workflow/config/history, does not run shell commands, and does not perform expensive live probes by default.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
                 }
             }
         }),
@@ -1104,6 +1177,75 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("stylos tools unavailable"))?;
             invoker(name.to_string(), args).await
+        }
+        "system_inspect_local" => {
+            let mut result = ctx.system_inspection.clone().unwrap_or_else(|| {
+                let mut runtime = SystemInspectionRuntime {
+                    status: "ok".to_string(),
+                    pid: Some(std::process::id()),
+                    now_ms: Utc::now().timestamp_millis().max(0) as u64,
+                    session_id: ctx.session_id.to_string(),
+                    project_dir: ctx.project_dir.display().to_string(),
+                    workflow_name: ctx.workflow_state.as_ref().map(|w| w.workflow_name.clone()),
+                    phase_name: ctx.workflow_state.as_ref().map(|w| w.phase_name.clone()),
+                    workflow_status: ctx
+                        .workflow_state
+                        .as_ref()
+                        .map(|w| format!("{:?}", w.status)),
+                    debug_runtime_lines: vec![
+                        "debug runtime snapshot unavailable in fallback inspection path"
+                            .to_string(),
+                    ],
+                    warnings: Vec::new(),
+                    issues: Vec::new(),
+                };
+                let tool_names = tool_definitions()
+                    .as_array()
+                    .into_iter()
+                    .flat_map(|defs| defs.iter())
+                    .filter_map(|entry| entry.get("function")?.get("name")?.as_str())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                let tools = SystemInspectionTools {
+                    status: "ok".to_string(),
+                    tool_count: tool_names.len(),
+                    available_names: tool_names,
+                    warnings: Vec::new(),
+                    issues: Vec::new(),
+                };
+                if runtime.workflow_name.is_none() {
+                    runtime
+                        .warnings
+                        .push("workflow state unavailable".to_string());
+                }
+                SystemInspectionResult {
+                    overall_status: "ok".to_string(),
+                    summary: "local inspection snapshot available".to_string(),
+                    runtime,
+                    tools,
+                    provider: SystemInspectionProvider {
+                        status: "unknown".to_string(),
+                        active_profile: None,
+                        provider: None,
+                        model: None,
+                        auth_configured: None,
+                        base_url_present: None,
+                        rate_limits: None,
+                        warnings: vec![
+                            "provider readiness unavailable in this execution path".to_string()
+                        ],
+                        issues: Vec::new(),
+                    },
+                    warnings: vec![
+                        "using fallback local inspection without CLI runtime snapshot".to_string(),
+                    ],
+                    issues: Vec::new(),
+                }
+            });
+            result.tools.available_names.sort();
+            result.tools.available_names.dedup();
+            result.tools.tool_count = result.tools.available_names.len();
+            Ok(serde_json::to_string(&result)?)
         }
         "workflow_get_state" | "get_workflow_state" => {
             let state = ctx

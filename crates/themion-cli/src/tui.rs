@@ -5,9 +5,7 @@ use crate::stylos::{
     tool_bridge, IncomingPromptRequest, StylosHandle, StylosRuntimeState, StylosToolBridge,
 };
 use crate::{format_stats, Session};
-use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers, MouseEventKind},
-};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -549,6 +547,7 @@ impl<'a> App<'a> {
             local_stylos_instance.as_deref(),
             #[cfg(feature = "stylos")]
             "main",
+            None,
         )
         .expect("failed to build agent");
         let initial_model_info = session.model_info.clone();
@@ -609,7 +608,7 @@ impl<'a> App<'a> {
             initial_entries.push(Entry::Blank);
         }
 
-        Self {
+        let mut app = Self {
             #[cfg(feature = "stylos")]
             stylos,
             #[cfg(feature = "stylos")]
@@ -670,7 +669,10 @@ impl<'a> App<'a> {
             last_assistant_text: None,
             #[cfg(feature = "stylos")]
             stylos_tool_bridge,
-        }
+        };
+        app.record_runtime_snapshot();
+        app.refresh_main_agent_system_inspection();
+        app
     }
 
     #[cfg(feature = "stylos")]
@@ -797,6 +799,7 @@ impl<'a> App<'a> {
     fn on_tick(&mut self) {
         self.activity_counters.tick_count += 1;
         self.record_runtime_snapshot();
+        self.refresh_main_agent_system_inspection();
         let previous = self.pending.clone();
         self.anim_frame = self.anim_frame.wrapping_add(1);
         if self.agent_busy && self.pending.is_some() {
@@ -1225,6 +1228,111 @@ impl<'a> App<'a> {
         })
     }
 
+    fn system_inspection_snapshot(&self) -> themion_core::tools::SystemInspectionResult {
+        let runtime_lines = self.debug_runtime_lines();
+        let rate_limits = self.status_rate_limits.as_ref().map(|report| {
+            themion_core::tools::SystemInspectionRateLimits {
+                api_call: report.api_call.clone(),
+                source: report.source.clone(),
+                http_status: report.http_status,
+                active_limit: report.active_limit.clone(),
+                snapshot_count: report.snapshots.len(),
+            }
+        });
+        let mut provider = themion_core::tools::SystemInspectionProvider {
+            status: "ok".to_string(),
+            active_profile: Some(self.session.active_profile.clone()),
+            provider: Some(self.session.provider.clone()),
+            model: Some(self.session.model.clone()),
+            auth_configured: Some(match self.session.provider.as_str() {
+                "openai-codex" => crate::auth_store::load().ok().flatten().is_some(),
+                _ => self
+                    .session
+                    .api_key
+                    .as_ref()
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false),
+            }),
+            base_url_present: Some(!self.session.base_url.trim().is_empty()),
+            rate_limits,
+            warnings: Vec::new(),
+            issues: Vec::new(),
+        };
+        if provider.auth_configured == Some(false) {
+            provider.status = "degraded".to_string();
+            provider
+                .issues
+                .push("provider authentication is not configured".to_string());
+        }
+        if provider.base_url_present == Some(false) {
+            provider.status = "degraded".to_string();
+            provider
+                .issues
+                .push("provider base_url is empty".to_string());
+        }
+
+        let tool_names = themion_core::tools::tool_definitions()
+            .as_array()
+            .into_iter()
+            .flat_map(|defs| defs.iter())
+            .filter_map(|entry| entry.get("function")?.get("name")?.as_str())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let tools = themion_core::tools::SystemInspectionTools {
+            status: "ok".to_string(),
+            tool_count: tool_names.len(),
+            available_names: tool_names,
+            warnings: Vec::new(),
+            issues: Vec::new(),
+        };
+        let runtime = themion_core::tools::SystemInspectionRuntime {
+            status: "ok".to_string(),
+            pid: Some(std::process::id()),
+            now_ms: unix_epoch_now_ms(),
+            session_id: self
+                .agents
+                .first()
+                .map(|h| h.session_id.to_string())
+                .unwrap_or_else(|| self.session.id.to_string()),
+            project_dir: self.project_dir.display().to_string(),
+            workflow_name: Some(self.workflow_state.workflow_name.clone()),
+            phase_name: Some(self.workflow_state.phase_name.clone()),
+            workflow_status: Some(format!("{:?}", self.workflow_state.status)),
+            debug_runtime_lines: runtime_lines,
+            warnings: Vec::new(),
+            issues: Vec::new(),
+        };
+        let mut warnings = Vec::new();
+        let issues = provider.issues.clone();
+        if provider.status != "ok" {
+            warnings.push("provider readiness is degraded".to_string());
+        }
+        let overall_status = if issues.is_empty() { "ok" } else { "degraded" }.to_string();
+        let summary = if overall_status == "ok" {
+            "local inspection snapshot available, including /debug runtime coverage".to_string()
+        } else {
+            format!("local inspection found {} issue(s)", issues.len())
+        };
+        themion_core::tools::SystemInspectionResult {
+            overall_status,
+            summary,
+            runtime,
+            tools,
+            provider,
+            warnings,
+            issues,
+        }
+    }
+
+    fn refresh_main_agent_system_inspection(&mut self) {
+        let inspection = self.system_inspection_snapshot();
+        if let Some(handle) = self.agents.iter_mut().find(|h| is_interactive_handle(h)) {
+            if let Some(agent) = handle.agent.as_mut() {
+                agent.set_system_inspection(Some(inspection));
+            }
+        }
+    }
+
     fn debug_runtime_lines(&self) -> Vec<String> {
         let mut out = Vec::new();
         let now_ms = unix_epoch_now_ms();
@@ -1440,6 +1548,7 @@ impl<'a> App<'a> {
                             self.local_stylos_instance.as_deref(),
                             #[cfg(feature = "stylos")]
                             "main",
+                            None,
                         ) {
                             Ok(new_agent) => {
                                 let db = self.db.clone();
@@ -1939,7 +2048,11 @@ Result:
         self.dirty.any() && !was_dirty
     }
 
-    pub(crate) fn handle_mouse_event(&mut self, mouse: event::MouseEvent, frame_requester: &FrameRequester) {
+    pub(crate) fn handle_mouse_event(
+        &mut self,
+        mouse: event::MouseEvent,
+        frame_requester: &FrameRequester,
+    ) {
         self.activity_counters.input_mouse_count += 1;
         match mouse.kind {
             MouseEventKind::ScrollUp => {
@@ -2039,11 +2152,15 @@ Result:
             AppEvent::AgentReady(agent, sid) => {
                 self.handle_agent_ready_event(agent, sid, frame_requester);
             }
-            AppEvent::LoginPrompt { user_code, verification_uri } => {
+            AppEvent::LoginPrompt {
+                user_code,
+                verification_uri,
+            } => {
                 self.handle_login_prompt_event(user_code, verification_uri, frame_requester);
             }
             AppEvent::LoginComplete(auth_result) => {
-                self.handle_login_complete_event(auth_result, frame_requester).await;
+                self.handle_login_complete_event(auth_result, frame_requester)
+                    .await;
             }
             AppEvent::ShellComplete { output, exit_code } => {
                 self.handle_shell_complete_event(output, exit_code, frame_requester);
@@ -2075,7 +2192,8 @@ Result:
                     },
                 );
                 self.session.switch_profile("codex");
-                if let Err(e) = save_profiles(&self.session.active_profile, &self.session.profiles) {
+                if let Err(e) = save_profiles(&self.session.active_profile, &self.session.profiles)
+                {
                     self.push(Entry::Assistant(format!(
                         "warning: failed to save config: {}",
                         e
@@ -2093,6 +2211,7 @@ Result:
                     self.local_stylos_instance.as_deref(),
                     #[cfg(feature = "stylos")]
                     "main",
+                    None,
                 ) {
                     Ok(mut new_agent) => {
                         new_agent.refresh_model_info().await;
@@ -2145,7 +2264,11 @@ Result:
         #[cfg(feature = "stylos")] app_tx: &mpsc::UnboundedSender<AppEvent>,
     ) {
         self.activity_counters.agent_event_count += 1;
-        self.process_agent_event(ev, #[cfg(feature = "stylos")] app_tx);
+        self.process_agent_event(
+            ev,
+            #[cfg(feature = "stylos")]
+            app_tx,
+        );
         if self.dirty.any() {
             self.request_draw(frame_requester);
         }
@@ -2236,9 +2359,7 @@ Result:
                     sender, sender_agent, target_instance, target_agent
                 )));
             }
-            if let (Some(handle), Some(task_id)) =
-                (self.stylos.as_ref(), request.task_id.clone())
-            {
+            if let (Some(handle), Some(task_id)) = (self.stylos.as_ref(), request.task_id.clone()) {
                 let query_context = handle.query_context();
                 self.background_domain().spawn(async move {
                     query_context
@@ -2254,8 +2375,8 @@ Result:
             let target_agent = request.to_agent_id.as_deref().unwrap_or(target.as_str());
             if request.prompt.starts_with("type=stylos_note ") {
                 let note_identifier = stylos_note_display_identifier(&request.prompt);
-                let column = stylos_note_header_value(&request.prompt, "column")
-                    .unwrap_or("unknown");
+                let column =
+                    stylos_note_header_value(&request.prompt, "column").unwrap_or("unknown");
                 self.push(Entry::RemoteEvent(format!(
                     "Board note intake {} from={} from_agent_id={} to={} to_agent_id={} column={}",
                     note_identifier, sender, sender_agent, target_instance, target_agent, column
@@ -2318,16 +2439,9 @@ Result:
                                 before,
                                 retro_chars as usize,
                             ) {
-                                let kept = format!(
-                                    "{}{}",
-                                    &text[..grab.start_byte],
-                                    &text[safe_cursor..]
-                                );
-                                set_input_text_and_cursor(
-                                    &mut self.input,
-                                    &kept,
-                                    grab.start_byte,
-                                );
+                                let kept =
+                                    format!("{}{}", &text[..grab.start_byte], &text[safe_cursor..]);
+                                set_input_text_and_cursor(&mut self.input, &kept, grab.start_byte);
                                 self.paste_burst.append_char_to_buffer(ch, now);
                                 return;
                             }
@@ -2364,7 +2478,10 @@ Result:
             (KeyCode::Enter, KeyModifiers::NONE) => {
                 if self.review_mode != ReviewMode::Closed {
                     self.close_transcript_review();
-                } else if self.paste_burst.newline_should_insert_instead_of_submit(now) {
+                } else if self
+                    .paste_burst
+                    .newline_should_insert_instead_of_submit(now)
+                {
                     self.input.insert_newline();
                     self.mark_dirty_input();
                     self.request_draw(frame_requester);
@@ -2376,8 +2493,7 @@ Result:
                     }
                 }
             }
-            (KeyCode::Enter, KeyModifiers::SHIFT)
-            | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+            (KeyCode::Enter, KeyModifiers::SHIFT) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
                 if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
                     handle_paste(self, pasted);
                 }
@@ -2430,9 +2546,8 @@ Result:
                     self.request_draw(frame_requester);
                     match key.code {
                         KeyCode::Char(_) => {
-                            let has_ctrl_or_alt =
-                                key.modifiers.contains(KeyModifiers::CONTROL)
-                                    || key.modifiers.contains(KeyModifiers::ALT);
+                            let has_ctrl_or_alt = key.modifiers.contains(KeyModifiers::CONTROL)
+                                || key.modifiers.contains(KeyModifiers::ALT);
                             if has_ctrl_or_alt {
                                 self.paste_burst.clear_window_after_non_char();
                             }
@@ -2610,9 +2725,13 @@ fn handle_paste(app: &mut App<'_>, pasted: String) {
     app.paste_burst.clear_after_explicit_paste();
 }
 
-pub(crate) fn dispatch_terminal_event(app_tx: &mpsc::UnboundedSender<AppEvent>, event: Event) -> bool {
+pub(crate) fn dispatch_terminal_event(
+    app_tx: &mpsc::UnboundedSender<AppEvent>,
+    event: Event,
+) -> bool {
     let app_event = match event {
-        Event::Key(key) => AppEvent::Key(key),
+        Event::Key(key) if key.kind == KeyEventKind::Press => AppEvent::Key(key),
+        Event::Key(_) => return true,
         Event::Mouse(mouse) => AppEvent::Mouse(mouse),
         Event::Paste(text) => AppEvent::Paste(text),
         _ => return true,
@@ -3006,8 +3125,6 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
         f.render_widget(review_para.scroll((review_scroll, 0)), review);
     }
 }
-
-
 
 pub(crate) fn area_page_height(
     terminal: &Terminal<CrosstermBackend<std::io::Stdout>>,

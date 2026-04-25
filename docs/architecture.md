@@ -80,10 +80,11 @@ tools.rs
   │    ├─ time_sleep  ──► bounded non-shell wait for short sleeps
   │    ├─ history_recall  ──► ctx.db.recall(RecallArgs)
   │    ├─ history_search  ──► ctx.db.search(SearchArgs)
+  │    ├─ system_inspect_local ──► local runtime/tool/provider readiness snapshot
   │    ├─ board_*  ──► local durable notes board operations
 │    ├─ memory_* ──► SQLite Project Memory KB nodes, hashtags, and edges
   │    └─ workflow_*  ──► workflow state inspection / transitions
-  └─ ToolCtx { db: Arc<DbHandle>, session_id, project_dir }
+  └─ ToolCtx { db: Arc<DbHandle>, session_id, project_dir, workflow_state, system_inspection }
 
 History tools are always scoped to the caller's current project directory. Callers cannot pass a `project_dir` override; omitted `session_id` means the active session, `session_id="*"` means all sessions in the current project, and explicit UUIDs only match sessions within that same current project.
 ```
@@ -230,6 +231,8 @@ Codex uses the OpenAI Responses API rather than Chat Completions. Its stream con
 ## Tools (tools.rs)
 
 All tools receive a `&ToolCtx` carrying the DB handle and session identity. Filesystem tools ignore it; history tools and workflow tools use it. Tool call display labels are center-trimmed to about 60 chars with `󱑼` when needed so the TUI can preserve both the beginning and end of long values.
+
+Themion also exposes `system_inspect_local`, a read-only aggregate local inspection tool for runtime, tool-surface, and provider-readiness diagnosis. The tool is scoped to the current local Themion process and active agent context, returns structured machine-usable JSON, and is designed to be no-surprise: it does not run shell commands, mutate workflow/config/history, refresh auth, or perform hidden repair actions. In TUI mode, the runtime section includes `runtime.debug_runtime_lines`, which reuses the same local `/debug runtime` snapshot path so model-visible inspection stays aligned with the existing human-facing command. In non-TUI paths, the tool falls back to a bounded partial snapshot and marks unavailable runtime detail explicitly rather than fabricating live metrics.
 
 `time_sleep` is a built-in bounded wait helper for short pauses. It accepts `ms`, rejects values above 30,000, and lets the agent express lightweight waiting without shelling out to `sleep`.
 
