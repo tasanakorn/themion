@@ -1,0 +1,99 @@
+{
+  "nodes": [
+    {
+      "node_id": "provider-rate-limit-missing-metadata",
+      "project_dir": "/workspace/themion",
+      "node_type": "troubleshooting",
+      "title": "Responses backend drops response metadata during provider throttling",
+      "content": "When the upstream provider hits rate limits, some responses arrive without expected metadata fields. The current workaround is to preserve partial content and record the rate-limit snapshot explicitly.",
+      "hashtags": ["#provider", "#rate_limit", "#responses"]
+    },
+    {
+      "node_id": "terminal-resize-statusline-artifacts",
+      "project_dir": "/workspace/themion",
+      "node_type": "troubleshooting",
+      "title": "Partial redraw leaves stale statusline after terminal resize",
+      "content": "Terminal resize can leave stale status text behind when only a dirty region redraw happens. A full redraw path should be available after geometry changes.",
+      "hashtags": ["#tui", "#resize", "#redraw"]
+    },
+    {
+      "node_id": "stylos-board-done-mention",
+      "project_dir": "/workspace/themion",
+      "node_type": "fact",
+      "title": "Done-mention board notes are completion notifications, not fresh work requests",
+      "content": "Agents should treat done-mention notes as informational completion signals. They should not restart the original task unless a new work request is created.",
+      "hashtags": ["#board", "#stylos", "#workflow"]
+    },
+    {
+      "node_id": "project-memory-global-scope",
+      "project_dir": "[GLOBAL]",
+      "node_type": "decision",
+      "title": "Global Knowledge must stay opt-in via explicit [GLOBAL] project selection",
+      "content": "Project Memory searches default to the current project only. Cross-project reusable knowledge lives in the virtual [GLOBAL] context and must be selected explicitly.",
+      "hashtags": ["#memory", "#global", "#scoping"]
+    },
+    {
+      "node_id": "version-bump-follow-through",
+      "project_dir": "/workspace/themion",
+      "node_type": "fact",
+      "title": "Version bump work must check Cargo.lock and run post-bump validation",
+      "content": "When a PRD names a target release version, implementation should bump manifests, inspect whether Cargo.lock changed, and run validation after the bump rather than stopping at pre-bump checks.",
+      "hashtags": ["#release", "#cargo", "#validation"]
+    },
+    {
+      "node_id": "weak-text-node",
+      "project_dir": "/workspace/themion",
+      "node_type": "observation",
+      "title": "",
+      "content": null,
+      "hashtags": ["#sparse"]
+    }
+  ],
+  "queries": [
+    {
+      "query_id": "q1",
+      "text": "missing response metadata from provider when throttled",
+      "project_dir": "/workspace/themion",
+      "expected_node_ids": ["provider-rate-limit-missing-metadata"],
+      "hashtags": [],
+      "hashtag_match": "any",
+      "node_type": "troubleshooting"
+    },
+    {
+      "query_id": "q2",
+      "text": "screen artifacts after terminal resize",
+      "project_dir": "/workspace/themion",
+      "expected_node_ids": ["terminal-resize-statusline-artifacts"],
+      "hashtags": [],
+      "hashtag_match": "any",
+      "node_type": "troubleshooting"
+    },
+    {
+      "query_id": "q3",
+      "text": "completed board note should not create new task",
+      "project_dir": "/workspace/themion",
+      "expected_node_ids": ["stylos-board-done-mention"],
+      "hashtags": ["#board"],
+      "hashtag_match": "all",
+      "node_type": null
+    },
+    {
+      "query_id": "q4",
+      "text": "cross project knowledge requires explicit global selection",
+      "project_dir": "[GLOBAL]",
+      "expected_node_ids": ["project-memory-global-scope"],
+      "hashtags": [],
+      "hashtag_match": "any",
+      "node_type": null
+    },
+    {
+      "query_id": "q5",
+      "text": "after changing crate version also validate lockfile and rerun checks",
+      "project_dir": "/workspace/themion",
+      "expected_node_ids": ["version-bump-follow-through"],
+      "hashtags": ["#validation", "#cargo"],
+      "hashtag_match": "all",
+      "node_type": "fact"
+    }
+  ]
+}
