@@ -66,7 +66,7 @@
 | PRD-054 | [Rename Shared CLI Application Runtime Type to `AppState`](prd/prd-054-rename-shared-cli-app-runtime-to-app-state.md) | Implemented | v0.34.1 | `themion-cli`, docs |
 | PRD-055 | [Fix TUI Input Dirty Detection for Non-ASCII Typing and Paste-Burst Flushes](prd/prd-055-fix-tui-input-dirty-detection-for-non-ascii-and-paste-burst.md) | Proposed | v0.34.2 | `themion-cli`, docs |
 | PRD-056 | [Right-Size Tool Result Payloads and Standardize Mutation Acknowledgements](prd/prd-056-right-size-tool-result-payloads-and-standardize-mutation-acks.md) | Implemented | v0.34.3 | `themion-core`, `themion-cli`, docs |
-| PRD-058 | [Add Optional Tool Reason Guidance, Recording, and Chat Visibility](prd/prd-058-optional-tool-reason-guidance-recording-and-chat-visibility.md) | Proposed | v0.36.0 | `themion-core`, `themion-cli`, docs |
+| PRD-058 | [Add Optional Tool Reason Guidance, Recording, and Chat Visibility](prd/prd-058-optional-tool-reason-guidance-recording-and-chat-visibility.md) | Implemented | v0.36.0 | `themion-core`, `themion-cli`, docs |
 | PRD-059 | [Add Vector Embedding and Semantic Search for Project Memory](prd/prd-059-add-vector-embedding-and-semantic-search-for-project-memory.md) | Draft | >v0.36.0 +minor | `themion-core`, `themion-cli`, docs |
 | PRD-070 | [Reduce Prompt-Build History Token Cost by Compacting Persisted Chat Turns](prd/prd-070-reduce-prompt-history-token-cost-by-compacting-persisted-chat-turns.md) | Draft | >v0.36.0 +minor | `themion-core`, `themion-cli`, docs |
 | PRD-057 | [Store Turn-Level Runtime Metadata as JSON in `agent_turns.meta`](prd/prd-057-store-turn-level-runtime-metadata-as-json-in-agent-turns-meta.md) | Implemented | v0.35.0 | `themion-core`, `themion-cli`, docs |

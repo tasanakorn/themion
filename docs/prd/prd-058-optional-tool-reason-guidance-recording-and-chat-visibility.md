@@ -204,10 +204,21 @@ If the experiment is successful, a later PRD can expand the design into broader 
 - if this experiment fails, keep the feature optional and avoid broad schema expansion
 
 
+
+## Implementation status
+
+Implemented in this slice:
+
+- optional `reason` property added to the tool schemas for `fs_read_file`, `fs_write_file`, `fs_list_directory`, and `shell_run_command`
+- prompt guidance updated in predefined guardrails and tool-schema descriptions to encourage short, concrete optional `reason` text for meaningful file and shell tool calls
+- persisted history continues to use the existing serialized tool-call payload path in `agent_messages.tool_calls_json`; no schema migration was added
+- `themion-core` now emits raw tool name plus arguments JSON, and the TUI formats tool activity locally
+- the TUI renders `reason` as a distinct secondary line under the main tool action for better scanability
+
 ## Implementation notes
 
 - Implemented by adding an optional `reason` property to the tool schemas for `fs_read_file`, `fs_write_file`, `fs_list_directory`, and `shell_run_command`.
 - Persisted history support uses the existing serialized tool-call payload path in `agent_messages.tool_calls_json`; no new database column was added.
-- Chat visibility is implemented by showing the reason as a compact secondary suffix in the emitted tool activity detail for supported tools when a non-empty `reason` is present.
+- Chat visibility is implemented in the TUI by rendering the reason as a separate secondary line under the tool activity for supported tools when a non-empty `reason` is present.
 - Prompt guidance now explicitly encourages short, concrete optional `reason` text for meaningful file and shell tool calls.
 - The tool descriptions for the initial supported tools now also strongly recommend a short, concrete optional `reason`, so the guidance is visible directly in the tool schema presented to the model.

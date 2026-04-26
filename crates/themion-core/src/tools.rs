@@ -478,7 +478,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "fs_read_file",
-                "description": "Read file contents",
+                "description": "Read file contents. Strongly prefer including a short concrete `reason` when it helps explain why this file is being read; the field remains optional.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -486,6 +486,7 @@ pub fn tool_definitions() -> Value {
                         "mode": { "type": "string", "enum": ["raw", "base64"], "description": "Response encoding mode. Defaults to base64." },
                         "offset": { "type": "integer", "description": "Byte offset to start reading from. Defaults to 0." },
                         "limit": { "type": "integer", "description": "Maximum bytes to read. Defaults to 131072 and max 2097152." }
+                        ,"reason": { "type": "string", "description": "Optional short concrete reason for reading this file." }
                     },
                     "required": ["path"]
                 }
@@ -495,13 +496,14 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "fs_write_file",
-                "description": "Write content to a file",
+                "description": "Write content to a file. Strongly prefer including a short concrete `reason` when it helps explain why this file is being written; the field remains optional.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "File path to write" },
                         "content": { "type": "string", "description": "Content to write" },
                         "mode": { "type": "string", "enum": ["raw", "base64"], "description": "Content encoding mode. Defaults to base64." }
+                        ,"reason": { "type": "string", "description": "Optional short concrete reason for writing this file." }
                     },
                     "required": ["path", "content"]
                 }
@@ -511,11 +513,12 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "fs_list_directory",
-                "description": "List directory entries",
+                "description": "List directory entries. Strongly prefer including a short concrete `reason` when it helps explain why this directory is being inspected; the field remains optional.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "Directory path to list" }
+                        ,"reason": { "type": "string", "description": "Optional short concrete reason for listing this directory." }
                     },
                     "required": ["path"]
                 }
@@ -525,13 +528,14 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "shell_run_command",
-                "description": "Run a shell command, returns stdout+stderr",
+                "description": "Run a shell command, returns stdout+stderr. Strongly prefer including a short concrete `reason` when it helps explain why this command is being run; the field remains optional.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "command": { "type": "string", "description": "Shell command to run" },
                         "result_limit": { "type": "integer", "description": "Maximum returned stdout+stderr bytes. Defaults to 16384." },
                         "timeout_ms": { "type": "integer", "description": "Command timeout in milliseconds. Defaults to 300000." }
+                        ,"reason": { "type": "string", "description": "Optional short concrete reason for running this command." }
                     },
                     "required": ["command"]
                 }
@@ -885,12 +889,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 _ => unreachable!(),
             };
             fs::write(path, &bytes)?;
-            Ok(write_file_ack(
-                args["path"].as_str().unwrap(),
-                mode,
-                bytes.len(),
-            )
-            .to_string())
+            Ok(write_file_ack(args["path"].as_str().unwrap(), mode, bytes.len()).to_string())
         }
         "fs_list_directory" | "list_directory" => {
             let path = args["path"]
