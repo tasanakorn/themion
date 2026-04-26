@@ -2,39 +2,41 @@
 
 - **Status:** Proposed
 - **Version:** v0.37.0
-- **Scope:** `themion-core`, `themion-cli`, docs
+- **Scope:** phased delivery: Phase 1 spike artifact and evaluation, Phase 2 production integration planning for `themion-core`/`themion-cli`, later optimization follow-ons if warranted
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
 - **Date:** 2026-04-26
 
 ## Summary
 
 - Project Memory currently supports keyword, hashtag, node-type, and graph-link retrieval, but it does not support vector or semantic search.
-- This makes recall weaker when the query wording differs from the stored wording even if the underlying concept is the same.
-- This PRD now proposes implementing Phase 1 only: local embeddings through `fastembed`, vectors stored in ordinary SQLite rows or blobs, and in-process similarity ranking.
-- The Phase 1 goal is to ship an additive, explicit semantic retrieval path without taking on SQLite vector-extension complexity yet.
-- Keep current search behavior and filters; semantic retrieval should be additive, inspectable, and bounded rather than replacing exact search.
-- Defer `sqlite-vec`, broader model comparisons, and asynchronous embedding lifecycle work unless Phase 1 measurements show clear pressure.
+- This makes recall weaker when query wording differs from the stored wording even when the underlying concept is the same.
+- The product outcome of this PRD is additive semantic retrieval for Project Memory: agents should be able to find semantically related knowledge without losing current exact-search behavior.
+- The product outcome is intentionally delivered in multiple phases because the feature is valuable, but the technical shape should be validated before changing shipped storage, lifecycle, and tool-surface behavior.
+- Phase 1 is a spike, not the first production integration: use a separate temporary artifact to evaluate local embeddings, storage shape, and bounded similarity ranking before wiring anything into the main codebase.
+- Phase 2 is the first production integration into `themion-core` and `themion-cli` if the Phase 1 spike shows that the local-first approach is useful and practical.
+- Later phases remain available for scale or operational follow-on work such as `sqlite-vec`, async embedding lifecycle, or broader model comparisons if earlier phases show clear pressure.
 
 ## Goals
 
-- Implement a practical Phase 1 semantic retrieval path for Project Memory using local embeddings and SQLite-friendly storage.
-- Improve recall when agent queries and stored knowledge use different wording for the same concept.
-- Keep the current keyword and graph-based search paths available and predictable.
-- Make semantic retrieval explicit enough that users and agents can understand when it is being used.
-- Preserve current project scoping and explicit `[GLOBAL]` selection semantics.
-- Keep the first implementation simple enough to ship and validate before adding indexed or extension-based vector search.
+- Deliver a shipped Project Memory feature that adds explicit semantic retrieval while preserving current exact-search behavior.
+- Keep the product requirement clear even though delivery is phased: the PRD is complete only when shipped Project Memory supports additive semantic retrieval with predictable scoping and inspectable behavior.
+- Use Phase 1 to validate whether local embeddings improve recall for paraphrased or differently worded queries on realistic Project Memory-like data.
+- Use Phase 1 to measure the practical tradeoffs of local embedding generation, vector storage shape, and in-process similarity ranking before production integration.
+- Preserve existing keyword, hashtag, node-type, and graph-link retrieval behavior in the shipped product while the spike is being evaluated.
+- Preserve current project scoping and explicit `[GLOBAL]` selection semantics as part of both the spike evaluation and the eventual shipped feature.
+- Produce a concrete recommendation for a production Phase 2 implementation that fits Themion's local-first SQLite architecture.
 
 ## Non-goals
 
-- No comparison in this PRD between remote hosted embedding providers and local embedding engines.
-- No requirement in this PRD to support multiple local embedding engines in the first implementation.
-- No replacement of existing `memory_search` keyword/hashtag filtering in the first step.
+- No production integration into `memory_search` or another shipped Project Memory tool surface in Phase 1.
+- No requirement to modify the main Project Memory storage schema in `themion-core` during the spike.
 - No requirement to introduce a remote hosted vector database or remote embedding service.
-- No requirement to adopt `sqlite-vec` in Phase 1.
-- No requirement to implement asynchronous embedding generation in Phase 1.
 - No requirement to embed every historical transcript or board note.
 - No broad retrieval-augmented generation redesign across all context sources.
 - No automatic silent cross-project retrieval changes; project scoping rules should remain explicit.
+- No requirement to adopt `sqlite-vec` in Phase 1.
+- No requirement to implement asynchronous embedding generation in Phase 1.
+- No requirement to support multiple local embedding engines in the first production implementation.
 
 ## Background & Motivation
 
@@ -58,11 +60,13 @@ Current implementation constraints also matter. Project Memory is stored in SQLi
 - `memory_edges`
 - optional FTS5 table `memory_nodes_fts`
 
-The current search path is simple and inspectable: it uses FTS when available, otherwise plain SQL filtering, then orders by `updated_at_ms`. There is no existing embedding table, vector index, or background indexing runtime in this slice.
+The current search path is simple and inspectable: it uses FTS when available, otherwise plain SQL filtering, then orders by `updated_at_ms`. There is no existing embedding table, vector index, or background indexing runtime in the current shipped design.
 
-### Why semantic retrieval is needed
+### Product outcome this PRD is targeting
 
-Project Memory is intended to store durable facts, decisions, troubleshooting notes, files, components, conventions, and reusable observations. Many of those are naturally paraphrased.
+The product requirement is not merely "add embeddings." The product requirement is that Project Memory becomes better at finding relevant knowledge when wording differs, while remaining local, predictable, and compatible with current exact retrieval.
+
+That outcome matters because Project Memory stores durable facts, decisions, troubleshooting notes, files, components, conventions, and reusable observations that are often naturally paraphrased.
 
 Examples:
 
@@ -76,26 +80,27 @@ Or:
 
 Keyword search may miss or under-rank these relationships even though they are semantically close.
 
-Local embeddings plus SQLite-friendly similarity search provide the additive path this PRD wants to validate. For a lightweight local knowledge base, that is a better fit than assuming a hosted vector service or remote embedding dependency.
+Local embeddings plus SQLite-friendly similarity search provide the additive path this PRD wants to use to reach that product outcome. For a lightweight local knowledge base, that is a better fit than assuming a hosted vector service or remote embedding dependency.
+
+This PRD is therefore structured in phases not because the final product outcome is unclear, but because the technical route should be validated before it is committed to the main codebase.
 
 **Alternative considered:** rely only on better hashtags and manual linking. Rejected: hashtags and graph edges remain valuable, but they depend on prior curation and exact labeling. Semantic retrieval helps when the wording gap itself is the problem.
 
-### Why the scope is intentionally narrowed
+### Why the work is phased
 
-The earlier draft left too many variables open at once: remote versus local embeddings, multiple engine families, and multiple storage/index strategies. That makes spike results harder to interpret.
+The feature goal is clear, but the technical shape has multiple important decisions: embedding engine choice, storage representation, ranking path, lifecycle cost, and operational complexity.
 
-This PRD now uses the spike conclusions to narrow implementation scope further:
+Trying to refine all of those directly in shipped code in one step would create unnecessary risk. This PRD therefore separates the work into phases:
 
-- embeddings must be generated locally
-- search must remain SQLite-friendly and local-first
-- Phase 1 should use ordinary SQLite storage and app-side similarity ranking
-- Phase 1 should defer SQLite vector-extension complexity unless measurements later justify it
+- Phase 1 validates the technical approach in an isolated spike artifact
+- Phase 2 uses the validated findings to implement the first shipped semantic-retrieval feature in the main codebase
+- later phases refine scale, lifecycle, or ranking strategy only if earlier phases reveal clear pressure
 
-That narrower scope better matches Themion's lightweight local architecture and makes the first implementation easier to ship, inspect, and validate.
+That phased structure keeps the product requirement stable while allowing the technical solution to be proven before production integration.
 
-**Alternative considered:** compare local and remote embedding engines in the same implementation slice. Rejected: that would mix deployment-model decisions with storage/query-shape decisions and make the implementation harder to reason about.
+**Alternative considered:** implement the simplest production path directly in Phase 1. Rejected: even a simple production integration would still commit the main codebase to product-surface, persistence, and lifecycle decisions before the team has measured whether the approach is worthwhile.
 
-### External research summary informing Phase 1
+### External research summary informing the spike
 
 Current external research points to a relatively clear shortlist for a Rust terminal app.
 
@@ -114,15 +119,15 @@ SQLite-friendly search candidates:
 - SQLite `vec1` is promising but too early for this PRD's default implementation plan.
 - `sqlite-vector` is license-sensitive and should not be the default recommendation for this repository.
 
-This research supports a concrete Phase 1 implementation path:
+This research supports a concrete Phase 1 spike path:
 
 - local ONNX-backed embeddings through `fastembed`
-- vectors stored in ordinary SQLite rows or blobs
-- app-side similarity ranking over a bounded candidate set after applying project/filter constraints
+- vectors stored in ordinary SQLite rows or blobs inside a separate evaluation artifact
+- app-side similarity ranking over a bounded candidate set after applying project/filter-like constraints in the prototype
 
-**Alternative considered:** start implementation directly with `sqlite-vec`. Rejected: the simpler baseline may already be sufficient for Project Memory scale and is easier to ship and maintain first.
+**Alternative considered:** start implementation directly with `sqlite-vec`. Rejected: the simpler baseline may already be sufficient for Project Memory scale and is easier to evaluate before deciding whether production integration needs vector-extension complexity.
 
-### Model refinement: Phase 1 should begin with `BGESmallENV15` and `BGESmallENV15Q`
+### Model refinement for Phase 1
 
 Additional model-specific research further narrows the likely Phase 1 choice.
 
@@ -130,22 +135,22 @@ What `fastembed` supports directly today:
 
 - `EmbeddingModel::BGEM3` is supported directly and maps to `BAAI/bge-m3` with 1024-dimensional dense embeddings.
 - `EmbeddingModel::BGESmallENV15` and `EmbeddingModel::BGESmallENV15Q` are supported directly and map to `BAAI/bge-small-en-v1.5` with 384-dimensional embeddings.
-- `bge-micro-v2` is not a built-in `fastembed` enum model today, so it would require a user-defined/custom-model loading path.
+- `bge-micro-v2` is not a built-in `fastembed` enum model today, so it would require a user-defined or custom-model loading path.
 - There is no built-in `bge-m3-tiny` or equivalent smaller `bge-m3` variant exposed in the `fastembed` Rust API.
 
 Implications for Phase 1:
 
-- `bge-m3` is technically attractive for multilingual retrieval, but it is substantially heavier for local-first CPU use: larger model assets, 1024-dimensional vectors, more storage per node, and more likely memory/startup pressure.
+- `bge-m3` is technically attractive for multilingual retrieval, but it is substantially heavier for local-first CPU use: larger model assets, 1024-dimensional vectors, more storage per node, and more likely memory and startup pressure.
 - `bge-micro-v2` is attractive on size, but using it immediately would add integration uncertainty because the work would be testing custom model loading at the same time as semantic-search architecture.
-- `bge-small-en-v1.5` sits in the middle and is the more practical default: directly supported, smaller than `bge-m3`, and simpler to adopt in a first Rust/`fastembed` implementation.
+- `bge-small-en-v1.5` sits in the middle and is the more practical default: directly supported, smaller than `bge-m3`, and simpler to adopt in a first Rust/`fastembed` spike.
 
 This means the Phase 1 model guidance for this PRD is:
 
 - do not use `bge-m3` as the default Phase 1 model unless multilingual retrieval is a hard requirement from the beginning
 - do not use `bge-micro-v2` as the default Phase 1 model because custom-model loading would add a second source of uncertainty
-- prioritize `BGESmallENV15` and `BGESmallENV15Q` together so the implementation and validation can measure the quality-versus-size tradeoff directly instead of assuming it
+- prioritize `BGESmallENV15` and `BGESmallENV15Q` together so the spike can measure the quality-versus-size tradeoff directly instead of assuming it
 
-**Alternative considered:** use `BGEM3` first because it is the most featureful BGE-family model supported by `fastembed`. Rejected: its size and dimensionality make it a poor default for a first local-only implementation, and the simple dense `fastembed` path would not exercise BGE-M3's broader sparse/hybrid capabilities anyway.
+**Alternative considered:** use `BGEM3` first because it is the most featureful BGE-family model supported by `fastembed`. Rejected: its size and dimensionality make it a poor default for a first local-only spike, and the simple dense `fastembed` path would not exercise BGE-M3's broader sparse or hybrid capabilities anyway.
 
 ## Design
 
@@ -157,33 +162,59 @@ This means the Phase 1 model guidance for this PRD is:
 - Respect current project scoping and explicit `[GLOBAL]` selection semantics.
 - Make retrieval observable enough that agents can see whether results came from semantic matching.
 - Bound operational complexity so the first version remains practical.
-- Prefer the simplest shippable local approach first; require stronger evidence before adding native SQLite vector-extension complexity.
+- Preserve a product-oriented multi-phase roadmap while keeping the product outcome stable across phases.
 
-### 1. Implement a bounded Phase 1 semantic retrieval slice
+### 1. Product behavior and PRD completion state
 
-Themion should implement Phase 1 directly rather than leaving this PRD at spike-only guidance.
+Themion should eventually add an explicit semantic retrieval path for Project Memory.
+
+The target shipped product behavior should be:
+
+- agents can retrieve relevant Project Memory nodes even when query wording differs from stored wording
+- existing exact-search, hashtag, node-type, and graph-link retrieval continue to work
+- semantic retrieval is opt-in or otherwise clearly signaled rather than silently changing all retrieval behavior
+- results remain scoped by the same current-project and `[GLOBAL]` rules as existing Project Memory tools
+- the retrieval mode remains inspectable enough that users and agents can understand why results were returned
+
+Acceptable eventual API and tool shapes include:
+
+- extending `memory_search` with an explicit semantic mode or ranking mode
+- adding a dedicated semantic-search tool such as `memory_semantic_search`
+- supporting hybrid retrieval that combines keyword filtering with vector ranking when explicitly requested
+
+The important product requirement is additive semantic retrieval with predictable scoping and observability, not one specific tool name.
+
+This PRD is complete only when that shipped product behavior exists in the main codebase. Completing Phase 1 alone does not complete the PRD; it only validates or rejects a technical route toward that product outcome.
+
+**Alternative considered:** make all memory search semantic by default. Rejected: that would make retrieval less predictable, harder to debug, and more difficult to validate against existing workflows.
+
+### 2. Phase 1 delivery slice: isolated spike artifact
+
+Phase 1 is a spike, not production integration.
 
 Phase 1 should include:
 
 - one local embedding engine family: `fastembed`
 - one supported starting model pair: `BGESmallENV15` and `BGESmallENV15Q`
 - local embedding generation only
-- SQLite-backed storage in ordinary rows or blobs only
+- SQLite-backed storage in ordinary rows or blobs only inside the spike artifact
 - local query execution only
-- explicit semantic retrieval surface added alongside existing exact search
+- an isolated prototype that evaluates semantic retrieval on realistic Project Memory-like data without changing shipped tool surfaces
 
-The Phase 1 goal is not to build the final highest-scale vector architecture. The goal is to ship a simple, inspectable semantic retrieval capability that proves useful within Themion's existing local Project Memory design.
+The Phase 1 goal is not to build the final highest-scale vector architecture. The Phase 1 goal is to gather evidence about quality, latency, startup cost, runtime cost, and storage shape so production integration decisions are informed rather than guessed.
 
-Expected outputs from the implementation:
+Phase 1 is successful when it produces:
 
-- a persisted embedding storage path for Project Memory nodes
-- a semantic retrieval query path that ranks bounded candidates in process
-- measured latency/resource observations documented in the PRD or follow-on docs/status notes
-- a recommendation on whether later work should remain on the simple baseline or move to `sqlite-vec`
+- a separate temporary artifact used to evaluate embedding generation and bounded similarity ranking
+- documented latency and resource observations
+- documented retrieval-quality observations on representative queries
+- a recommendation on whether Phase 2 should integrate the simple baseline into the main codebase or pivot toward another design such as `sqlite-vec`
 
-**Alternative considered:** keep this PRD at exploration-only status until every Phase 2 comparison is complete. Rejected: the narrowed design is now specific enough to support a useful first implementation.
+The spike artifact should be clearly isolated from shipped product paths. It may live in a temporary script, experiment, or other intentionally non-production location, but the artifact choice should stay lightweight and avoid unnecessary architecture churn.
 
-### 2. Fix the Phase 1 embedding engine and model pair
+**Alternative considered:** keep this PRD at exploration-only status without any concrete spike shape. Rejected: the narrowed Phase 1 design is now specific enough to support a useful experiment while still avoiding premature production commitments.
+
+### 3. Phase 1 spike constraints
 
 Phase 1 should use `fastembed`.
 
@@ -191,141 +222,142 @@ The default recommendation for Phase 1 is:
 
 - use `EmbeddingModel::BGESmallENV15` as the quality-first anchor
 - use `EmbeddingModel::BGESmallENV15Q` as the footprint-first anchor
-- keep the implementation structured so one concrete default can be configured or chosen without redesigning the storage shape
-- optionally compare against `AllMiniLML6V2` later only if Phase 1 results are ambiguous and one public-benchmark anchor is needed
+- keep the spike structured so one concrete default can be recommended for Phase 2 without redoing the whole evaluation
+- optionally compare against `AllMiniLML6V2` later only if spike results are ambiguous and one public-benchmark anchor is needed
 - do not start with `BGEM3`
 - do not start with `bge-micro-v2`
 
-This keeps the implementation variable set small while still honoring the model research captured earlier in the PRD.
+Phase 1 storage and query rules:
 
-**Alternative considered:** compare several local embedding engines immediately. Rejected: that introduces too many variables before the team knows whether the simpler local architecture is viable in production.
-
-### 3. Store embeddings in simple SQLite rows and rank in process
-
-Phase 1 should use the baseline local storage/query shape directly.
-
-Normative Phase 1 storage/query rules:
-
-- store vectors as `f32` little-endian blobs
-- L2-normalize vectors at insert/update time so cosine similarity reduces to a dot product at query time
-- keep project scoping and any explicit filters in front of vector ranking so the app-side candidate set remains bounded
+- store vectors as `f32` little-endian blobs or another simple, explicitly documented equivalent inside the spike
+- L2-normalize vectors before ranking so cosine similarity reduces to a dot product at query time
+- keep scoping and explicit filters in front of vector ranking so the candidate set remains bounded
 - rank candidates in process rather than requiring SQLite vector extension support
-- keep the implementation inspectable enough that debugging can confirm what text was embedded and how ranking was derived
+- keep the prototype inspectable enough that debugging can confirm what text was embedded and how ranking was derived
 
-If later measurements show query latency or scaling pressure, Phase 2 may introduce `sqlite-vec` against the same data model or a closely related one.
+Phase 1 spike expectations:
 
-**Alternative considered:** start directly with `sqlite-vec` and skip the plain SQLite baseline. Rejected: the simpler baseline may already be sufficient for Project Memory scale and would be easier to ship and maintain.
+- define one stable text-serialization format for embedding input and use it consistently during the experiment
+- evaluate representative create, update, and query flows without wiring them into shipped Project Memory lifecycle behavior yet
+- define how sample or exported Project Memory-like data is prepared for the experiment
+- keep missing-embedding or partial-coverage behavior explicit in evaluation results
 
-### 4. Define a stable embedding text shape
+**Alternative considered:** compare several local embedding engines or storage or index paths immediately. Rejected: that introduces too many variables before the team knows whether the simpler local architecture is viable.
 
-Phase 1 should define one stable text-serialization format for embedding input and use it consistently for create, update, backfill, and query preparation where relevant.
+### 4. Phase 2 production integration
 
-The exact serialization may still be refined during implementation, but it should be explicit and stable enough that:
+If Phase 1 shows useful retrieval quality at acceptable local cost, Phase 2 should be the first production integration into `themion-core` and `themion-cli`.
 
-- embeddings are reproducible for the same node content
-- changes to title/content/hashtags or other selected fields clearly trigger re-embedding
-- evaluation results are interpretable because the embedded text shape is not drifting silently
+Phase 2 would define and implement:
 
-The initial embedded text should prefer durable semantic content already present in Project Memory, such as:
+- the shipped Project Memory semantic retrieval surface
+- the production storage or schema changes if needed
+- lifecycle behavior for create, update, and backfill
+- inspectable result presentation
+- fallback or degraded behavior when embeddings are missing or unavailable
 
-- node title
-- node content
-- hashtags when they add meaningful retrieval context
+Phase 2 is successful when users and agents can use the shipped Project Memory semantic-retrieval path in normal product flows while exact retrieval, scoping rules, and inspectability remain intact.
 
-**Alternative considered:** embed only raw content with no stable formatting contract. Rejected: that makes later evaluation and migration harder because retrieval quality would depend on an implicit, potentially drifting text shape.
+Phase 2 should preserve the product behavior defined earlier in this PRD rather than turning the spike artifact directly into a permanent product surface without review.
 
-### 5. Keep semantic retrieval additive to exact search
+**Alternative considered:** treat the Phase 1 artifact as the production implementation with only minor cleanup. Rejected: spike code and production behavior should be reviewed separately so architecture, schema, and user-facing semantics remain intentional.
 
-Semantic retrieval should not silently replace existing `memory_search` behavior.
+### 5. Later phases and follow-on directions
 
-Acceptable Phase 1 patterns include:
+This PRD should retain later phases explicitly so the product outcome does not collapse into a single implementation tactic.
 
-- extend `memory_search` with an explicit semantic mode or ranking mode
-- add a dedicated semantic-search tool such as `memory_semantic_search`
-- support hybrid retrieval that combines keyword filtering with vector ranking when explicitly requested
+Potential later-phase directions include:
 
-The important behavior is:
+- `sqlite-vec` or another SQLite-native vector path if Phase 2 query latency or scale becomes limiting
+- asynchronous or deferred embedding lifecycle work if synchronous updates prove too expensive in production
+- broader model comparisons if Phase 1 or Phase 2 quality or resource tradeoffs remain unclear
+- more hybrid ranking strategies if exact-plus-semantic retrieval needs refinement after real usage
 
-- existing keyword/hashtag usage remains valid
-- semantic retrieval is opt-in or otherwise clearly signaled
-- results can still be filtered by `project_dir`, hashtags, node type, or linked-node constraints when that combination is practical
-- the realistic deployed shape should be treated as hybrid retrieval, not dense-only retrieval in isolation
+These later phases are follow-on scale and optimization work. They should not block Phase 1 experimentation or the first eventual production delivery.
 
-**Alternative considered:** make all memory search semantic by default. Rejected: that would make retrieval less predictable, harder to debug, and more difficult to validate against existing workflows.
-
-### 6. Preserve Project Memory scoping semantics
-
-Semantic search should obey the same context boundaries as existing Project Memory retrieval.
-
-Normative direction:
-
-- omitted `project_dir` continues to mean the current project only
-- exact `project_dir="[GLOBAL]"` searches Global Knowledge only
-- project search does not silently include Global Knowledge
-- any future combined current-project-plus-global mode should be explicit rather than implicit
-
-This keeps semantic retrieval from becoming a hidden cross-project leak path.
-
-**Alternative considered:** search all projects semantically by default because similarity benefits from a larger corpus. Rejected: wider recall is not worth surprising scope expansion.
-
-### 7. Define embedding lifecycle expectations for Phase 1
-
-Phase 1 should establish a clear consistency contract for embeddings even if later versions change the mechanics.
-
-Normative Phase 1 lifecycle expectations:
-
-- create or refresh embeddings synchronously when a node is created if the node has embed-worthy text
-- refresh embeddings synchronously when title/content/hashtags or other chosen embedded fields change
-- define explicit behavior for backfill and partially embedded corpora
-- keep semantic retrieval behavior explicit when embeddings are missing or stale
-
-If Phase 1 measurements show synchronous embedding is too expensive, later work may move the lifecycle to async or deferred generation, but that should not block the first bounded implementation.
-
-**Alternative considered:** defer all lifecycle semantics until after semantic search ships. Rejected: retrieval correctness depends on a clear sync contract from the beginning.
+**Alternative considered:** fold all future scale and optimization work into the Phase 1 proposal. Rejected: that would blur the product requirement and make the evaluation step harder to execute clearly.
 
 ## Changes by Component
 
+### Phase 1 expected changes
+
 | Component / file area | Change |
 | --- | --- |
-| `crates/themion-core/src/` Project Memory storage and query code | Add Phase 1 embedding storage, stable embedding text serialization, synchronous create/update refresh behavior, and in-process semantic ranking over filtered candidates. |
-| `crates/themion-core/src/` tool layer for Project Memory | Add or extend the explicit semantic retrieval tool surface while preserving existing exact-search behavior. |
-| `crates/themion-core/src/` provider/integration support | Add local embedding integration through `fastembed` and support the Phase 1 model pair. |
-| `crates/themion-cli/src/` user-facing wiring and presentation | Expose semantic retrieval results clearly enough that the mode is explicit and the results remain inspectable. |
-| docs and PRD notes | Document the Phase 1-only scope, lifecycle behavior, storage shape, and any measured validation notes that materially affect follow-on decisions. |
+| temporary spike artifact location (for example `scripts/`, `experiments/`, or another intentionally non-production path) | Add a lightweight isolated prototype for embedding generation, vector storage, and bounded semantic ranking over representative Project Memory-like data. |
+| sample or evaluation data preparation | Define the representative corpus shape and query set used to evaluate paraphrase recall, scoping behavior, and runtime or storage tradeoffs. |
+| docs and PRD notes | Document the spike setup, measured results, recommended production direction, and the criteria for moving to Phase 2 integration. |
+| `crates/themion-core/src/` and `crates/themion-cli/src/` | No shipped semantic-search integration in Phase 1; production integration is deferred to Phase 2 after the spike recommendation. |
+
+### Phase 2 expected changes
+
+| Component / file area | Change |
+| --- | --- |
+| `crates/themion-core/src/` Project Memory storage and query code | Add the production embedding storage and query path chosen from Phase 1 findings while preserving existing exact retrieval behavior. |
+| `crates/themion-core/src/` tool layer for Project Memory | Add or extend the explicit shipped semantic-retrieval surface while preserving current exact-search behavior. |
+| `crates/themion-core/src/` provider or integration support | Add the production local embedding integration and lifecycle support selected from the Phase 1 recommendation. |
+| `crates/themion-cli/src/` user-facing wiring and presentation | Expose semantic retrieval results clearly enough that the shipped mode is explicit and inspectable. |
+| docs and PRD notes | Document the implemented shipped behavior, lifecycle behavior, storage shape, and any measured validation notes that materially affect later-phase decisions. |
 
 ## Edge Cases
 
-- Some nodes may have little or no embed-worthy text. Phase 1 should define whether those nodes are skipped or embedded from a reduced text shape rather than silently producing meaningless vectors.
-- Older corpora may contain nodes without embeddings until backfill runs. Semantic retrieval should remain explicit about partial coverage rather than pretending all nodes are ranked semantically.
-- If local embedding initialization fails or model assets are unavailable, exact Project Memory retrieval should continue to work and the degraded semantic state should be understandable.
-- If hashtag-only or title-only edits occur, the re-embedding rule should still be consistent with the declared embedded text shape.
-- If Phase 1 uses a configurable default model inside the supported pair, stored metadata should make it possible to tell which model produced a given embedding set.
+- Sample or exported nodes may have little or no embed-worthy text. Phase 1 should define whether those items are skipped or represented with a reduced text shape rather than silently producing meaningless vectors.
+- The spike corpus may not perfectly match future production corpus scale. Phase 1 results should call out representativeness limits rather than overstating confidence.
+- If local embedding initialization fails or model assets are unavailable, the spike should record the failure mode clearly rather than hiding it behind fallback behavior.
+- If title-only, content-only, or hashtag-heavy cases behave differently, the evaluation should call out the impact of the chosen text-serialization format.
+- If the two candidate models produce materially different ranking quality or runtime or storage costs, the Phase 2 recommendation should state that explicitly rather than forcing an early default by assumption.
+- If later phases introduce new indexing or lifecycle mechanics, those changes should preserve the same product behavior rather than silently changing scoping or retrieval semantics.
 
 ## Migration
 
-- Add the Phase 1 embedding storage in a way that coexists with the current Project Memory tables and preserves existing exact retrieval behavior.
-- Existing nodes may require a backfill path before semantic retrieval has full coverage.
-- Backfill may be synchronous utility-driven, startup-triggered, or explicit tooling, but the chosen path should keep partial-coverage behavior understandable.
-- If semantic retrieval is unavailable because embeddings are missing or model initialization failed, the tool surface should degrade to exact retrieval or a clearly signaled partial mode rather than failing opaquely.
+- No shipped product migration is required in Phase 1 because the spike should not change the main Project Memory storage or tool surface.
+- Phase 1 should, however, document what migration questions Phase 2 will need to answer, such as schema additions, backfill approach, and degraded behavior when embeddings are missing.
+- Phase 2 should define the production migration shape for storage, backfill, and degraded behavior if shipped semantic retrieval is introduced.
+- If the spike uses exported or copied Project Memory-like data, that data-preparation path should be documented well enough that results can be repeated.
+- Later phases should evolve the internal implementation without breaking the explicit semantic-retrieval product contract established by this PRD.
 
 ## Testing
 
-- create Project Memory nodes with paraphrased but semantically related wording → verify: explicit semantic retrieval returns relevant nodes that exact-only retrieval misses or ranks lower
+### Phase 1 spike validation
+
+- run the spike on representative Project Memory-like nodes with paraphrased but semantically related wording → verify: semantic ranking surfaces relevant nodes that exact-only retrieval would miss or rank lower
+- compare exact retrieval expectations against the same corpus → verify: the spike demonstrates additive value rather than redefining what exact retrieval already does well
+- evaluate spike queries under project-like and `[GLOBAL]`-like scopes → verify: the prototype preserves the intended scoping semantics during ranking
 - run Phase 1 with `BGESmallENV15` and `BGESmallENV15Q` on the same corpus → verify: the quality-versus-size tradeoff is measured directly rather than assumed
-- create and update nodes that affect title/content/hashtags → verify: embeddings refresh consistently according to the declared serialization contract
-- query semantic retrieval within one project and with `project_dir="[GLOBAL]"` → verify: scoping semantics match existing Project Memory boundaries
-- store normalized vectors as plain SQLite blobs and rank in-process → verify: the simplest baseline remains correct and measurable
+- measure embedding generation, cold-start cost, warm query latency, and storage or runtime impact → verify: Phase 2 recommendations are backed by concrete observations
+- inspect the prototype's embedded text serialization and ranking behavior → verify: the experiment remains understandable and reproducible
+- simulate missing model assets, initialization failure, or partially prepared corpora → verify: failure modes are explicit in the spike results
+
+### Phase 2 shipped-feature validation
+
+- use the shipped semantic retrieval path on Project Memory nodes with paraphrased but semantically related wording → verify: relevant nodes are returned while existing exact retrieval remains available
+- use existing exact keyword or hashtag retrieval on the same corpus → verify: current exact-search behavior remains predictable and preserved
+- query shipped semantic retrieval within one project and with `project_dir="[GLOBAL]"` → verify: scoping semantics match existing Project Memory boundaries
+- create and update nodes that affect the chosen embedded text shape → verify: the production embedding lifecycle behaves consistently with the shipped serialization contract
 - simulate missing model assets, initialization failure, or partially embedded corpora → verify: degraded behavior stays explicit and exact retrieval remains usable
 
 ## Implementation checklist
 
-- [ ] add Phase 1 local embedding integration through `fastembed`
-- [ ] support `BGESmallENV15` and `BGESmallENV15Q` as the initial model pair
-- [ ] define one stable text-serialization format for embedding input
-- [ ] add SQLite-backed embedding storage using L2-normalized `f32` little-endian blobs
-- [ ] refresh embeddings on node create/update according to the Phase 1 lifecycle contract
-- [ ] add explicit semantic retrieval alongside existing exact search behavior
-- [ ] preserve Project Memory scoping and filter semantics in semantic retrieval
-- [ ] define backfill and partial-coverage behavior clearly enough for Phase 1
-- [ ] measure and record create/update latency, cold-start cost, warm query latency, and storage/runtime impact
-- [ ] document the implemented Phase 1 scope and any follow-on pressure toward `sqlite-vec` or async lifecycle work
+### Phase 1 checklist
+
+Completing this checklist does not complete the full PRD. It completes only the spike needed to validate the technical approach before Phase 2 production integration.
+
+- [ ] choose and create a lightweight isolated Phase 1 spike artifact outside shipped Project Memory paths
+- [ ] define a representative Project Memory-like evaluation corpus and query set
+- [ ] add local embedding integration through `fastembed` in the spike artifact
+- [ ] evaluate `BGESmallENV15` and `BGESmallENV15Q` as the initial model pair
+- [ ] define one stable text-serialization format for embedding input during the experiment
+- [ ] store vectors in a simple documented shape and rank bounded candidates in process
+- [ ] preserve project-like scoping and filter semantics in the evaluation logic
+- [ ] document partial-coverage and failure-mode behavior clearly enough for Phase 1 results
+- [ ] measure and record create, update, and query latency, cold-start cost, and storage or runtime impact
+- [ ] document the Phase 1 recommendation for whether and how to proceed to Phase 2 production integration
+
+### Phase 2 checklist
+
+- [ ] define the shipped semantic-retrieval product surface for Project Memory while preserving existing exact retrieval
+- [ ] add the production local embedding integration chosen from Phase 1 findings
+- [ ] define and implement the production storage and query shape for embeddings
+- [ ] refresh or backfill embeddings according to the chosen production lifecycle contract
+- [ ] preserve Project Memory scoping and filter semantics in shipped semantic retrieval
+- [ ] define degraded behavior clearly enough for partially embedded or temporarily unavailable semantic retrieval
+- [ ] document the implemented shipped behavior and any follow-on pressure toward later-phase indexing or lifecycle work
