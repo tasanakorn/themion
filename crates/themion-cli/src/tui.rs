@@ -60,7 +60,10 @@ enum Entry {
     User(String),
     Assistant(String),
     Banner(String),
-    ToolCall(String),
+    ToolCall {
+        detail: String,
+        reason: Option<String>,
+    },
     ToolDone,
     Status(String),
     #[cfg(feature = "stylos")]
@@ -83,6 +86,158 @@ enum NavigationMode {
 enum ReviewMode {
     Closed,
     Transcript,
+}
+
+const TOOL_DETAIL_MAX_CHARS: usize = 60;
+const TOOL_DETAIL_CENTER_TRIM_MARKER: &str = "󱑼";
+
+fn center_trim(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.to_string();
+    }
+
+    let marker_chars: Vec<char> = TOOL_DETAIL_CENTER_TRIM_MARKER.chars().collect();
+    if max <= marker_chars.len() {
+        return marker_chars.into_iter().take(max).collect();
+    }
+
+    let remaining = max - marker_chars.len();
+    let prefix_len = remaining / 2;
+    let suffix_len = remaining - prefix_len;
+
+    let prefix: String = chars[..prefix_len].iter().collect();
+    let suffix: String = chars[chars.len() - suffix_len..].iter().collect();
+    format!("{}{}{}", prefix, TOOL_DETAIL_CENTER_TRIM_MARKER, suffix)
+}
+
+fn self_session_id_fallback() -> String {
+    "session-bound".to_string()
+}
+
+fn split_tool_call_detail(name: &str, args_json: &str) -> (String, Option<String>) {
+    let args: serde_json::Value = serde_json::from_str(args_json).unwrap_or_default();
+    let t = |key: &str| center_trim(args[key].as_str().unwrap_or("?"), TOOL_DETAIL_MAX_CHARS);
+    let reason = args["reason"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| center_trim(value, TOOL_DETAIL_MAX_CHARS));
+    let with_reason = |detail: String| (detail, reason.clone());
+    match name {
+        "shell_run_command" | "bash" => with_reason(format!("shell: {}", t("command"))),
+        "fs_read_file" | "read_file" => with_reason(format!("read: {}", t("path"))),
+        "fs_write_file" | "write_file" => with_reason(format!("write: {}", t("path"))),
+        "fs_list_directory" | "list_directory" => with_reason(format!("ls: {}", t("path"))),
+        "history_recall" | "recall_history" => (
+            format!(
+                "history_recall: session={}",
+                center_trim(
+                    &args["session_id"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| self_session_id_fallback()),
+                    TOOL_DETAIL_MAX_CHARS,
+                )
+            ),
+            None,
+        ),
+        "history_search" | "search_history" => (format!("history_search: {}", t("query")), None),
+        "workflow_get_state" | "get_workflow_state" => ("workflow: inspect".to_string(), None),
+        "workflow_set_active" | "set_workflow" => {
+            (format!("workflow: set {}", t("workflow")), None)
+        }
+        "workflow_set_phase" | "set_workflow_phase" => {
+            (format!("workflow: phase {}", t("phase")), None)
+        }
+        "workflow_complete" | "complete_workflow" => {
+            (format!("workflow: complete {}", t("outcome")), None)
+        }
+        "stylos_request_talk" => (
+            format!(
+                "stylos_request_talk instance={} to_agent_id={}",
+                t("instance"),
+                center_trim(
+                    args["to_agent_id"]
+                        .as_str()
+                        .or_else(|| args["agent_id"].as_str())
+                        .unwrap_or("main"),
+                    TOOL_DETAIL_MAX_CHARS,
+                )
+            ),
+            None,
+        ),
+        "board_create_note" => {
+            let raw_to_instance = args["to_instance"].as_str().unwrap_or("?").trim();
+            let resolved_to_instance = match raw_to_instance {
+                "SELF" => "self",
+                "" => "?",
+                value => value,
+            };
+            let raw_to_agent = args["to_agent_id"].as_str().unwrap_or("?").trim();
+            let resolved_to_agent = match raw_to_agent {
+                "SELF" => "self",
+                "" => "?",
+                value => value,
+            };
+            (
+                format!(
+                    "board_create_note {}:{}",
+                    center_trim(resolved_to_instance, TOOL_DETAIL_MAX_CHARS),
+                    center_trim(resolved_to_agent, TOOL_DETAIL_MAX_CHARS)
+                ),
+                None,
+            )
+        }
+        "board_list_notes" => (
+            format!(
+                "board_list_notes column={}",
+                center_trim(
+                    args["column"].as_str().unwrap_or("?"),
+                    TOOL_DETAIL_MAX_CHARS
+                )
+            ),
+            None,
+        ),
+        "board_read_note" => (format!("board_read_note {}", t("note_id")), None),
+        "board_move_note" => (
+            format!(
+                "board_move_note {} -> {}",
+                t("note_id"),
+                center_trim(
+                    args["column"].as_str().unwrap_or("?"),
+                    TOOL_DETAIL_MAX_CHARS
+                )
+            ),
+            None,
+        ),
+        "board_update_note_result" => (format!("board_update_note_result {}", t("note_id")), None),
+        "memory_create_node" => (format!("memory_create_node {}", t("title")), None),
+        "memory_update_node" => (format!("memory_update_node {}", t("node_id")), None),
+        "memory_link_nodes" => (
+            format!(
+                "memory_link_nodes {} -> {}",
+                t("from_node_id"),
+                t("to_node_id")
+            ),
+            None,
+        ),
+        "memory_unlink_nodes" => (
+            format!(
+                "memory_unlink_nodes {} -> {}",
+                t("from_node_id"),
+                t("to_node_id")
+            ),
+            None,
+        ),
+        "memory_get_node" => (format!("memory_get_node {}", t("node_id")), None),
+        "memory_search" => with_reason(format!("memory_search {}", t("query"))),
+        "memory_open_graph" => (format!("memory_open_graph {}", t("node_id")), None),
+        "memory_delete_node" => (format!("memory_delete_node {}", t("node_id")), None),
+        "memory_list_hashtags" => (format!("memory_list_hashtags {}", t("prefix")), None),
+        "system_inspect_local" => ("system_inspect_local".to_string(), None),
+        other => (other.to_string(), None),
+    }
 }
 
 pub struct AgentHandle {
@@ -1070,10 +1225,18 @@ impl<'a> App<'a> {
                 self.clear_agent_activity();
                 self.push(Entry::Assistant(text));
             }
-            AgentEvent::ToolStart { detail } => {
+            AgentEvent::ToolStart {
+                name,
+                arguments_json,
+            } => {
                 self.streaming_idx = None;
-                self.set_agent_activity(AgentActivity::RunningTool(detail.clone()));
-                self.push(Entry::ToolCall(detail));
+                let (detail, reason) = split_tool_call_detail(&name, &arguments_json);
+                let activity_detail = match &reason {
+                    Some(reason) => format!("{detail} — {reason}"),
+                    None => detail.clone(),
+                };
+                self.set_agent_activity(AgentActivity::RunningTool(activity_detail));
+                self.push(Entry::ToolCall { detail, reason });
             }
             AgentEvent::ToolEnd => {
                 self.push(Entry::ToolDone);
@@ -1163,7 +1326,7 @@ impl<'a> App<'a> {
         let Some(Entry::ToolDone) = self.entries.last() else {
             return;
         };
-        let Some(Entry::ToolCall(detail)) = self.entries.iter().rev().nth(1) else {
+        let Some(Entry::ToolCall { detail, reason: _ }) = self.entries.iter().rev().nth(1) else {
             return;
         };
         let Some(handle) = self.stylos.as_ref() else {
@@ -2940,11 +3103,19 @@ fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Lin
                     )]));
                 }
             }
-            Entry::ToolCall(detail) => {
-                lines.push(Line::from(vec![Span::styled(
-                    format!("   {}", detail),
-                    Style::default().fg(Color::Yellow),
-                )]));
+            Entry::ToolCall { detail, reason } => {
+                lines.push(Line::from(vec![
+                    Span::styled("   ", Style::default().fg(Color::Yellow)),
+                    Span::styled(detail.clone(), Style::default().fg(Color::Yellow)),
+                ]));
+                if let Some(reason) = reason {
+                    lines.push(Line::from(vec![
+                        Span::raw("    "),
+                        Span::styled("reason", Style::default().fg(Color::DarkGray)),
+                        Span::styled(": ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(reason.clone(), Style::default().fg(Color::Cyan)),
+                    ]));
+                }
             }
             Entry::Status(text) => {
                 lines.push(Line::from(vec![Span::styled(

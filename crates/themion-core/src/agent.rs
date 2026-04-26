@@ -34,7 +34,10 @@ pub struct TurnStats {
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     LlmStart,
-    ToolStart { detail: String },
+    ToolStart {
+        name: String,
+        arguments_json: String,
+    },
     ToolEnd,
     Status(String),
     AssistantChunk(String),
@@ -63,86 +66,7 @@ impl TurnCancellation {
     }
 }
 
-const TOOL_DETAIL_MAX_CHARS: usize = 60;
-const TOOL_DETAIL_CENTER_TRIM_MARKER: &str = "󱑼";
 const MEMORY_KB_GUIDANCE: &str = "Project Memory guidance: memory_* tools are for intentional durable Project Memory knowledge that should outlive the current session, not routine transcript logging or disposable task tracking. Project Memory stores durable knowledge for the current project by default. Use project_dir=\"[GLOBAL]\" only for Global Knowledge: reusable cross-project facts, preferences, conventions, provider/tool behavior, or troubleshooting patterns. Global Knowledge is an explicitly selected context inside Project Memory, not a separate system. When unsure, keep knowledge project-local and promote later only when cross-project usefulness is clear. Prefer knowledge-base shaped entries: concepts, components, files, tasks, decisions, facts, observations, troubleshooting records, and typed links between them. Use node_type values such as concept, component, file, task, decision, fact, observation, troubleshooting, or person. Use node_type=memory only for genuinely narrative long-term capture when a more specific knowledge-base type is not yet known. Add hashtags for retrieval, and link related nodes when the relationship is useful. Keep ordinary conversation history in session history and coordination work in board notes rather than duplicating it into Project Memory.";
-
-fn center_trim(s: &str, max: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        return s.to_string();
-    }
-
-    let marker_chars: Vec<char> = TOOL_DETAIL_CENTER_TRIM_MARKER.chars().collect();
-    if max <= marker_chars.len() {
-        return marker_chars.into_iter().take(max).collect();
-    }
-
-    let remaining = max - marker_chars.len();
-    let prefix_len = remaining / 2;
-    let suffix_len = remaining - prefix_len;
-
-    let prefix: String = chars[..prefix_len].iter().collect();
-    let suffix: String = chars[chars.len() - suffix_len..].iter().collect();
-    format!("{}{}{}", prefix, TOOL_DETAIL_CENTER_TRIM_MARKER, suffix)
-}
-
-fn self_session_id_fallback() -> String {
-    "session-bound".to_string()
-}
-
-fn tool_call_detail(name: &str, args_json: &str) -> String {
-    let args: serde_json::Value = serde_json::from_str(args_json).unwrap_or_default();
-    let t = |key: &str| center_trim(args[key].as_str().unwrap_or("?"), TOOL_DETAIL_MAX_CHARS);
-    match name {
-        "shell_run_command" | "bash" => format!("shell: {}", t("command")),
-        "fs_read_file" | "read_file" => format!("read: {}", t("path")),
-        "fs_write_file" | "write_file" => format!("write: {}", t("path")),
-        "fs_list_directory" | "list_directory" => format!("ls: {}", t("path")),
-        "history_recall" | "recall_history" => format!(
-            "history_recall: session={}",
-            center_trim(
-                &args["session_id"]
-                    .as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| self_session_id_fallback()),
-                TOOL_DETAIL_MAX_CHARS,
-            )
-        ),
-        "history_search" | "search_history" => format!("history_search: {}", t("query")),
-        "workflow_get_state" | "get_workflow_state" => "workflow: inspect".to_string(),
-        "workflow_set_active" | "set_workflow" => format!("workflow: set {}", t("workflow")),
-        "workflow_set_phase" | "set_workflow_phase" => format!("workflow: phase {}", t("phase")),
-        "workflow_complete" | "complete_workflow" => format!("workflow: complete {}", t("outcome")),
-        "stylos_request_talk" => format!(
-            "stylos_request_talk instance={} to_agent_id={}",
-            t("instance"),
-            center_trim(
-                args["to_agent_id"]
-                    .as_str()
-                    .or_else(|| args["agent_id"].as_str())
-                    .unwrap_or("main"),
-                TOOL_DETAIL_MAX_CHARS,
-            )
-        ),
-        "board_create_note" => {
-            let raw_to_instance = args["to_instance"].as_str().unwrap_or("?").trim();
-            let resolved_to_instance = match raw_to_instance {
-                "SELF" => "self",
-                _ => raw_to_instance,
-            };
-            format!(
-                "board_create_note to_instance={} to_agent_id={}",
-                center_trim(resolved_to_instance, TOOL_DETAIL_MAX_CHARS),
-                center_trim(
-                    args["to_agent_id"].as_str().unwrap_or("main"),
-                    TOOL_DETAIL_MAX_CHARS,
-                )
-            )
-        }
-        _ => name.to_string(),
-    }
-}
 
 pub struct Agent {
     client: Box<dyn ChatBackend + Send + Sync>,
@@ -286,7 +210,6 @@ impl Agent {
     pub fn set_local_instance_id(&mut self, instance_id: Option<String>) {
         self.local_instance_id = instance_id;
     }
-
 
     fn current_turn_meta(&self) -> crate::db::TurnMeta {
         crate::db::TurnMeta {
@@ -865,7 +788,10 @@ impl Agent {
             let sid = self.session_id;
             let workflow = self.workflow_state.clone();
             let turn_meta = self.current_turn_meta();
-            tokio::task::spawn_blocking(move || db.begin_turn(sid, turn_seq, &workflow, Some(&turn_meta))).await??
+            tokio::task::spawn_blocking(move || {
+                db.begin_turn(sid, turn_seq, &workflow, Some(&turn_meta))
+            })
+            .await??
         };
 
         if requested_workflow.is_none() {
@@ -1261,8 +1187,10 @@ impl Agent {
                     break;
                 }
 
-                let detail = tool_call_detail(&tc.function.name, &tc.function.arguments);
-                self.emit(AgentEvent::ToolStart { detail });
+                self.emit(AgentEvent::ToolStart {
+                    name: tc.function.name.clone(),
+                    arguments_json: tc.function.arguments.clone(),
+                });
                 let tool_ctx = crate::tools::ToolCtx {
                     db: self.db.clone(),
                     session_id: self.session_id,
@@ -1484,38 +1412,4 @@ impl Agent {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{center_trim, tool_call_detail, TOOL_DETAIL_CENTER_TRIM_MARKER};
-
-    #[test]
-    fn center_trim_keeps_short_strings_unchanged() {
-        assert_eq!(center_trim("short", 10), "short");
-    }
-
-    #[test]
-    fn center_trim_inserts_marker_and_keeps_ends() {
-        let trimmed = center_trim("abcdefghijklmnopqrstuvwxyz", 10);
-        assert_eq!(
-            trimmed,
-            format!("abcd{}vwxyz", TOOL_DETAIL_CENTER_TRIM_MARKER)
-        );
-    }
-
-    #[test]
-    fn center_trim_preserves_unicode_boundaries() {
-        let trimmed = center_trim("こんにちは世界さようなら", 8);
-        assert!(trimmed.contains(TOOL_DETAIL_CENTER_TRIM_MARKER));
-        assert_eq!(trimmed.chars().count(), 8);
-    }
-
-    #[test]
-    fn tool_call_detail_center_trims_long_paths() {
-        let detail = tool_call_detail(
-            "fs_read_file",
-            r#"{"path":"/very/long/path/to/a/deeply/nested/file/with-important-name.rs"}"#,
-        );
-        assert!(detail.starts_with("read: /very/long/path/to/a/deeply"));
-        assert!(detail.contains(TOOL_DETAIL_CENTER_TRIM_MARKER));
-        assert!(detail.ends_with("file/with-important-name.rs"));
-    }
-}
+mod tests {}

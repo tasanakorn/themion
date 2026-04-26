@@ -1,6 +1,6 @@
 # PRD-058: Add Optional Tool Reason Guidance, Recording, and Chat Visibility
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Version:** v0.36.0
 - **Scope:** `themion-core`, `themion-cli`, docs
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
@@ -43,7 +43,7 @@ For example:
 - `fs_write_file(path="crates/themion-core/src/tools.rs")`
 - `shell_run_command(command="cargo check -p themion-core")`
 
-These are more understandable when surrounding assistant text is preserved, but that context is not always compact, nearby, or easy to scan later. A short explicit `reason` or `intent` field would make both live chat and stored history more interpretable.
+These are more understandable when surrounding assistant text is preserved, but that context is not always compact, nearby, or easy to scan later. A short explicit `reason` field makes both live chat and stored history more interpretable.
 
 ### Why this matters
 
@@ -120,9 +120,8 @@ The recorded data should make it possible to inspect at least:
 
 This PRD intentionally leaves room for implementation choice, such as:
 
-- extending stored tool-call metadata
-- recording a dedicated compact field alongside tool-call JSON
-- deriving a display-ready reason record from nearby assistant narration when that approach is simpler initially
+- storing `reason` inside existing tool argument JSON persisted in `agent_messages.tool_calls_json`
+- deriving display from that persisted argument payload without adding a new database column
 
 **Alternative considered:** require a new mandatory structured `reason` parameter on every tool schema. Rejected for this slice because it increases protocol and translation surface area before Themion has validated that the model reliably produces useful `reason` text.
 
@@ -185,7 +184,7 @@ If the experiment is successful, a later PRD can expand the design into broader 
 
 ## Migration
 
-- No database rewrite is required for existing history.
+- No database schema migration is required because `reason` is stored inside the existing tool argument JSON persisted in `agent_messages.tool_calls_json`.
 - Existing tool-call records without `reason` should remain valid.
 - New recordings should include tool `reason` text only when available.
 
@@ -203,3 +202,12 @@ If the experiment is successful, a later PRD can expand the design into broader 
 - move broader prompt-history compaction and oversized-payload shaping into PRD-070
 - if this experiment succeeds, consider whether tool `reason` should become a first-class structured field for more tools
 - if this experiment fails, keep the feature optional and avoid broad schema expansion
+
+
+## Implementation notes
+
+- Implemented by adding an optional `reason` property to the tool schemas for `fs_read_file`, `fs_write_file`, `fs_list_directory`, and `shell_run_command`.
+- Persisted history support uses the existing serialized tool-call payload path in `agent_messages.tool_calls_json`; no new database column was added.
+- Chat visibility is implemented by showing the reason as a compact secondary suffix in the emitted tool activity detail for supported tools when a non-empty `reason` is present.
+- Prompt guidance now explicitly encourages short, concrete optional `reason` text for meaningful file and shell tool calls.
+- The tool descriptions for the initial supported tools now also strongly recommend a short, concrete optional `reason`, so the guidance is visible directly in the tool schema presented to the model.

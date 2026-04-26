@@ -243,7 +243,7 @@ Each call to `run_loop(user_input)`:
 4. Stream tokens to TUI via `AgentEvent::AssistantChunk`; accumulate full response.
 5. Push `role="assistant"` response to history; persist to `agent_messages`.
 6. If response has no `tool_calls` → break.
-7. For each tool call: emit `ToolStart` (detail center-trimmed to about 60 chars with `󱑼` when needed), execute via `call_tool`, push `role="tool"` result; persist each.
+7. For each tool call: emit `ToolStart` with raw tool name plus arguments JSON for the frontend to format, execute via `call_tool`, push `role="tool"` result; persist each.
 8. Repeat from step 3 until the assistant returns with no more tool calls or another existing runtime stop condition ends the turn.
 9. Finalize the DB turn row with token stats; emit `TurnDone`.
 
