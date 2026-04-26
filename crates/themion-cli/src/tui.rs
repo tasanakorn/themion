@@ -89,7 +89,6 @@ enum ReviewMode {
 }
 
 const TOOL_DETAIL_MAX_CHARS: usize = 60;
-const TOOL_REASON_MAX_CHARS: usize = 72;
 const TOOL_DETAIL_CENTER_TRIM_MARKER: &str = "󱑼";
 
 fn center_trim(s: &str, max: usize) -> String {
@@ -123,7 +122,7 @@ fn split_tool_call_detail(name: &str, args_json: &str) -> (String, Option<String
         .as_str()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| center_trim(value, TOOL_REASON_MAX_CHARS));
+        .map(str::to_string);
     let with_reason_first = |detail: String| match &reason {
         Some(reason) => (reason.clone(), Some(detail)),
         None => (detail, None),
