@@ -111,9 +111,12 @@ Typical feature checks for `themion-cli`:
 - Omit sections that would contain only placeholders.
 - In Testing, write each outcome as `step → verify:`.
 - For major design choices, include a brief inline `Alternative considered` note in the relevant design subsection instead of adding a standalone alternatives section.
+- Keep PRDs centered on product requirements and intended behavior, not only engineering tactics.
+- When a PRD is phased, preserve the overall product outcome and make phases describe delivery slices beneath it rather than replacing it with "Phase 1" as the effective goal.
 - Treat implemented PRDs as historical specs/contracts, not living design docs.
 - Do not modify an implemented PRD unless the user explicitly instructs it.
 - The only routine exception is updating status/implementation notes in the PRD and `docs/README.md` so they reflect what has actually landed.
+- When updating a partially implemented PRD, preserve the broader product intent and clearly mark what phase has landed versus what remains deferred.
 - When implementing a feature from an existing PRD, update the relevant PRD and `docs/README.md` status/notes so the docs reflect what has actually landed.
 - When starting implementation of an existing PRD, automatically consider a repository version bump as part of the work rather than assuming no bump is needed.
 - If the PRD specifies a target software version, bump the repository version to match it unless the user explicitly asks not to.
@@ -134,6 +137,8 @@ Typical feature checks for `themion-cli`:
 When implementing an existing PRD, do not consider the task complete until you have checked all of the following:
 
 - behavior described by the PRD is implemented or any gap is clearly reported
+- the PRD still reads as a product requirement or historical product contract, not only as an engineering task list
+- if the PRD is phased, the currently landed phase is clear without erasing the broader product outcome or deferred phases
 - `docs/README.md` and the PRD status/implementation notes reflect what actually landed
 - version bump expectation was checked against the PRD and repository guidance
 - `Cargo.lock` was checked after any manifest or version change
@@ -163,6 +168,7 @@ When implementing an existing PRD, do not consider the task complete until you h
 - When bumping crate versions, do not stop at editing `Cargo.toml`; explicitly check `git status` for `Cargo.lock` and include it in the same commit when it changed.
 - When implementing a PRD, automatically consider whether the work should include a version bump, and if the PRD already names a target version, treat bumping to that version as the default expectation.
 - When a task includes a version bump, validate after the bump too; do not assume pre-bump checks are sufficient for version-sensitive behavior.
+- When revising phased PRDs, keep the overall product outcome visible so the document does not collapse into a phase-only implementation plan.
 
 ## When updating docs
 

@@ -60,8 +60,10 @@ After the metadata block, add a short plain-language summary section before the 
 - Use the heading `## Summary`.
 - Keep it short, usually 3–7 flat bullets.
 - Explain the proposal in simple terms so a reader can quickly understand the approach without reading the full PRD.
+- Lead with the product problem, intended outcome, or user-visible behavior before implementation tactics.
 - Prefer direct language such as "keep X, add Y, avoid Z" over abstract product or architecture phrasing.
 - When useful, include one bullet for the main problem, one for the proposed approach, and one for what explicitly stays unchanged.
+- If the work is phased, summarize the overall product outcome first and then note which phase is being proposed or implemented now.
 
 This section is for fast comprehension, not for replacing the full PRD.
 
@@ -116,19 +118,23 @@ Rules:
 ### Goals
 - Describe what the PRD intends to achieve.
 - Prefer concrete, user-visible or architecture-visible outcomes.
+- Keep the product requirement or user/problem outcome primary; do not let a delivery phase become the effective goal of the PRD.
 
 ### Non-goals
 - State what is explicitly out of scope.
 - This should prevent scope creep and future ambiguity.
+- Prefer product-scope boundaries first; implementation exclusions may follow when they clarify the proposed delivery slice.
 
 ### Background & Motivation
 - Explain current behavior and why the change is needed.
 - Include a `### Current state` subsection when useful.
 - Ground this section in existing docs first.
+- If the work is phased, explain the overall product motivation before narrowing to the current implementation slice.
 
 ### Design
 - Describe the proposed behavior and structure.
 - Break major topics into focused subsections.
+- If the work is phased, preserve the distinction between the overall product behavior and the current delivery phase.
 - For each major design choice, include an inline note in this format:
   - `**Alternative considered:** <option>. Rejected: <reason>.`
 - Do not add a standalone `Alternatives` section.
@@ -156,6 +162,8 @@ Rules:
 - Use markdown task list items such as `- [ ]` while the work is proposed or in progress.
 - Update items to `- [x]` as implementation lands when the PRD is later updated to reflect shipped work.
 - Keep the checklist scoped to concrete implementation slices implied by the PRD; do not turn it into a generic restatement of every paragraph.
+- The checklist should track engineering work, not replace the product outcome stated elsewhere in the PRD.
+- If the work is phased, make it clear which checklist items belong to the currently proposed or implemented phase and avoid erasing later phases from the document.
 - Omit the section only when the PRD is purely exploratory, historical, or otherwise not pretending to define an implementation path.
 
 ## Style
@@ -168,6 +176,7 @@ Match the style of neighboring PRDs:
 - Similar table formatting.
 - Use blockquote admonitions only when actually needed, such as supersession notes.
 - Keep the `## Summary` section plain-language and easy to skim.
+- Keep the document reading like a Product Requirements Document rather than only an engineering implementation plan.
 
 The finished PRD should look visually consistent with nearby PRDs in `docs/prd/`.
 
@@ -188,7 +197,10 @@ Before finishing:
 - Filename matches `prd-NNN-<slug>.md`.
 - Header metadata is complete.
 - Add a `## Summary` section after the metadata block.
+- Summary leads with the product problem/outcome before implementation tactics.
 - Top-level sections follow the required order.
+- Goals still describe the product requirement or user/problem outcome, not only the current implementation phase.
+- If the PRD is phased, the overall product intent remains visible and the current phase is clearly identified.
 - Empty sections were omitted.
 - Major design choices include inline `Alternative considered` notes.
 - Testing uses `step → verify:` lines.
