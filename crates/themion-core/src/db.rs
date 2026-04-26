@@ -707,8 +707,6 @@ impl DbHandle {
         Ok(conn.last_insert_rowid())
     }
 
-
-
     pub fn get_turn(&self, turn_id: i64) -> Result<Option<TurnRecord>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
@@ -1371,7 +1369,6 @@ impl NoteKind {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1380,7 +1377,8 @@ mod tests {
     fn turn_meta_round_trip_and_legacy_null_are_supported() {
         let db = DbHandle::open_in_memory().expect("db");
         let session_id = uuid::Uuid::new_v4();
-        db.insert_session(session_id, Path::new("/tmp"), true).expect("session");
+        db.insert_session(session_id, Path::new("/tmp"), true)
+            .expect("session");
         let workflow = crate::workflow::WorkflowState::default();
 
         let with_meta = TurnMeta {
@@ -1389,13 +1387,24 @@ mod tests {
             provider: Some("openai-codex".to_string()),
             model: Some("gpt-5.4".to_string()),
         };
-        let turn_id = db.begin_turn(session_id, 1, &workflow, Some(&with_meta)).expect("turn");
+        let turn_id = db
+            .begin_turn(session_id, 1, &workflow, Some(&with_meta))
+            .expect("turn");
         let row = db.get_turn(turn_id).expect("read").expect("row");
         assert_eq!(row.meta, Some(with_meta));
-        assert!(row.meta_json.as_deref().unwrap_or_default().contains("provider"));
+        assert!(row
+            .meta_json
+            .as_deref()
+            .unwrap_or_default()
+            .contains("provider"));
 
-        let legacy_turn_id = db.begin_turn(session_id, 2, &workflow, None).expect("legacy turn");
-        let legacy_row = db.get_turn(legacy_turn_id).expect("read legacy").expect("legacy row");
+        let legacy_turn_id = db
+            .begin_turn(session_id, 2, &workflow, None)
+            .expect("legacy turn");
+        let legacy_row = db
+            .get_turn(legacy_turn_id)
+            .expect("read legacy")
+            .expect("legacy row");
         assert_eq!(legacy_row.meta, None);
         assert_eq!(legacy_row.meta_json, None);
     }
