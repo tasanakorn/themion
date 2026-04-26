@@ -294,12 +294,12 @@ Completing the Phase 1 items does not complete the full PRD. It completes only t
 
 ## Phase 1 implementation notes
 
-- Reproducible runner command for the current recommended model: `PRD059_EMBEDDING_MODEL='BGE-Micro-v2' rust-script scripts/prd059_phase1_spike.rs --artifact-dir tmp/prd059-phase1-bge-micro-refresh`
+- Reproducible runner command for the current recommended model: `PRD059_EMBEDDING_MODEL='BGE-Micro-v2' rust-script experiments/prd059/phase1_spike.rs --artifact-dir tmp/prd059-phase1-bge-micro-refresh`
 - Fresh rerun for that command completed successfully with `/usr/bin/time` reporting `MAXRSS_KB=177680` and `ELAPSED=0:10.01`; the resulting `project_plus_global` summary reported semantic `avg_query_ms=5.581317`, exact `avg_query_ms=0.0668076`, `sqlite_bytes=53248`, and embedding dimension `512`.
 - Phase 1 recommendation for Phase 2: ship a feature-flagged production path that starts with `bge-micro-v2`, extends the existing `memory_search` tool with explicit `fts` and `semantic` modes, and keeps index generation off the interactive path by routing it onto a dedicated background Tokio runtime.
 - Expected maintenance surfaces from the Phase 1 recommendation: a slash command for generating missing or pending indexes, a slash command for full regeneration, and a standalone CLI maintenance command for rare shell-driven indexing runs.
 - Observed Phase 1 degraded/failure behavior so far: the spike fails explicitly when model initialization or asset loading fails, and semantic results depend on fully generated local artifacts rather than silently falling back to an unmarked semantic approximation.
-- Landed spike runner: `scripts/prd059_phase1_spike.rs`
+- Landed spike runner: `experiments/prd059/phase1_spike.rs`
 - Landed evaluation corpus and usage notes: `docs/prd/phase1/`
 - The spike remains intentionally isolated from shipped `themion-core` Project Memory tool surfaces.
 - Additional Phase 1 comparison runs were captured for `bge-micro-v2` and `BGEM3`, and the current spike recommendation is to take `bge-micro-v2` forward as the first production implementation target.
@@ -319,6 +319,6 @@ Current measured comparison runs from the isolated ONNX-based `fastembed` spike 
 Table notes:
 
 - Latency values above use the `project_plus_global` semantic `avg_query_ms` measurements from the refreshed local spike reruns so the table compares one like-for-like scenario across all models.
-- Memory usage values above are peak RSS measurements captured by rerunning `scripts/prd059_phase1_spike.rs` under `/usr/bin/time -f %M`, then converting reported KiB to approximate MiB/GiB for readability.
+- Memory usage values above are peak RSS measurements captured by rerunning `experiments/prd059/phase1_spike.rs` under `/usr/bin/time -f %M`, then converting reported KiB to approximate MiB/GiB for readability.
 - All four measured models reached the same recall-at-5 and MRR-at-5 on the current small evaluation corpus, so the practical difference in this appendix is primarily runtime and storage cost rather than observed retrieval-quality separation so far.
 - These findings support taking `bge-micro-v2` forward as the first production implementation target for Phase 2, while keeping `BGESmallENV15` and `BGESmallENV15Q` as useful comparison anchors and `BGEM3` as a measured high-cost reference point.
