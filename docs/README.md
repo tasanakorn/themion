@@ -67,4 +67,7 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-053 | [Tighten Tokio Runtime Topology Semantics and Remove Remaining TUI-Orchestration Leakage](prd/prd-053-tighten-tokio-runtime-topology-and-tui-layering.md) | Implemented | v0.34.0 | `themion-cli`, docs |
 | PRD-054 | [Rename Shared CLI Application Runtime Type to `AppState`](prd/prd-054-rename-shared-cli-app-runtime-to-app-state.md) | Implemented | v0.34.1 | `themion-cli`, docs |
 | PRD-055 | [Fix TUI Input Dirty Detection for Non-ASCII Typing and Paste-Burst Flushes](prd/prd-055-fix-tui-input-dirty-detection-for-non-ascii-and-paste-burst.md) | Proposed | v0.34.2 | `themion-cli`, docs |
-| PRD-056 | [Right-Size Tool Result Payloads and Standardize Mutation Acknowledgements](prd/prd-056-right-size-tool-result-payloads-and-standardize-mutation-acks.md) | Imple
+| PRD-056 | [Right-Size Tool Result Payloads and Standardize Mutation Acknowledgements](prd/prd-056-right-size-tool-result-payloads-and-standardize-mutation-acks.md) | Implemented | v0.35.0 | `themion-core`, `themion-cli`, docs |
+| PRD-057 | [Project-Wide Conversation Search and Recall from the Active Session](prd/prd-057-project-wide-history-search-and-recall.md) | Implemented | v0.35.1 | `themion-core`, docs |
+| PRD-058 | [Optional Tool-Reason Guidance Recording and Chat Visibility](prd/prd-058-optional-tool-reason-guidance-recording-and-chat-visibility.md) | Implemented | v0.36.0 | `themion-core`, `themion-cli`, docs |
+| PRD-059 | [Add Vector Embedding and Semantic Search for Project Memory](prd/prd-059-add-vector-embedding-and-semantic-search-for-project-memory.md) | Partially implemented (Phase 1 complete; Phase 2 ready) | v0.37.0 | `themion-core`, `themion-cli`, docs |
