@@ -20,7 +20,7 @@ Instructions for coding agents working in this repository.
   - look here first for file IO, TUI event handling, and app/session orchestration
 - `docs/`
   - project docs and behavior notes; consult relevant docs before changing documented flows
-  - PRDs live in `docs/prd/`; when creating or updating a PRD, follow `docs/prd/README.md`
+  - PRDs live in `docs/prd/`; when creating or updating a PRD, follow `docs/prd/PRD_AUTHORING_GUIDE.md`
 - `scripts/`
   - repository maintenance helpers
   - use `scripts/bump_version.py <semver>` to update crate package versions consistently
@@ -103,7 +103,7 @@ Typical feature checks for `themion-cli`:
 
 ## When writing PRDs
 
-- Follow `docs/prd/README.md` for PRD authoring conventions in this repository.
+- Follow `docs/prd/PRD_AUTHORING_GUIDE.md` for PRD authoring conventions in this repository.
 - Before writing, read the most recent 2–3 PRDs in `docs/prd/` and match their structure, heading style, and prose voice.
 - Keep PRDs docs-first: ground the document in existing behavior described in `docs/`, then read source only where documentation leaves gaps.
 - Use sequential filenames `prd-NNN-<slug>.md` and update the PRD table in `docs/README.md` with the new entry.
