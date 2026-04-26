@@ -89,6 +89,7 @@ enum ReviewMode {
 }
 
 const TOOL_DETAIL_MAX_CHARS: usize = 60;
+const TOOL_REASON_MAX_CHARS: usize = 72;
 const TOOL_DETAIL_CENTER_TRIM_MARKER: &str = "󱑼";
 
 fn center_trim(s: &str, max: usize) -> String {
@@ -122,13 +123,16 @@ fn split_tool_call_detail(name: &str, args_json: &str) -> (String, Option<String
         .as_str()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| center_trim(value, TOOL_DETAIL_MAX_CHARS));
-    let with_reason = |detail: String| (detail, reason.clone());
+        .map(|value| center_trim(value, TOOL_REASON_MAX_CHARS));
+    let with_reason_first = |detail: String| match &reason {
+        Some(reason) => (reason.clone(), Some(detail)),
+        None => (detail, None),
+    };
     match name {
-        "shell_run_command" | "bash" => with_reason(format!("shell: {}", t("command"))),
-        "fs_read_file" | "read_file" => with_reason(format!("read: {}", t("path"))),
-        "fs_write_file" | "write_file" => with_reason(format!("write: {}", t("path"))),
-        "fs_list_directory" | "list_directory" => with_reason(format!("ls: {}", t("path"))),
+        "shell_run_command" | "bash" => with_reason_first(format!("shell: {}", t("command"))),
+        "fs_read_file" | "read_file" => with_reason_first(format!("read: {}", t("path"))),
+        "fs_write_file" | "write_file" => with_reason_first(format!("write: {}", t("path"))),
+        "fs_list_directory" | "list_directory" => with_reason_first(format!("ls: {}", t("path"))),
         "history_recall" | "recall_history" => (
             format!(
                 "history_recall: session={}",
@@ -231,7 +235,7 @@ fn split_tool_call_detail(name: &str, args_json: &str) -> (String, Option<String
             None,
         ),
         "memory_get_node" => (format!("memory_get_node {}", t("node_id")), None),
-        "memory_search" => with_reason(format!("memory_search {}", t("query"))),
+        "memory_search" => with_reason_first(format!("memory_search {}", t("query"))),
         "memory_open_graph" => (format!("memory_open_graph {}", t("node_id")), None),
         "memory_delete_node" => (format!("memory_delete_node {}", t("node_id")), None),
         "memory_list_hashtags" => (format!("memory_list_hashtags {}", t("prefix")), None),
@@ -3111,9 +3115,7 @@ fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Lin
                 if let Some(reason) = reason {
                     lines.push(Line::from(vec![
                         Span::raw("    "),
-                        Span::styled("reason", Style::default().fg(Color::DarkGray)),
-                        Span::styled(": ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(reason.clone(), Style::default().fg(Color::Cyan)),
+                        Span::styled(reason.clone(), Style::default().fg(Color::DarkGray)),
                     ]));
                 }
             }
