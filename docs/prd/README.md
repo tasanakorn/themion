@@ -41,7 +41,17 @@ Start each PRD with a title and metadata block like the existing PRDs:
 - `- **Author:** <name> (design) + <tool/agent name> (PRD authoring)`
 - `- **Date:** YYYY-MM-DD`
 
-Default status should be `Proposed` unless there is a clear reason to use another status.
+Default status should be `Draft` unless there is a clear reason to use another status. Use `Draft` for PRDs that are not yet ready to implement and still need refinement or correctness verification before they should be treated as implementation-ready.
+
+### Status guidance
+
+Use PRD status labels intentionally:
+
+- `Draft` — not ready to implement yet; needs refinement, correctness verification, or open design review before implementation should begin
+- `Proposed` — implementation-shaped and ready for review/approval as a candidate plan
+- `Implemented` / `Partially implemented` — reflect landed work in the repository
+
+When a PRD still has unresolved design questions, uncertain correctness, or needs more validation of the proposed behavior, prefer `Draft` over `Proposed`.
 
 ### Summary / TL;DR
 
@@ -57,13 +67,28 @@ This section is for fast comprehension, not for replacing the full PRD.
 
 ### Short semver guideline
 
-Use the PRD `Version` field to record the intended release target using semantic versioning:
+Use the PRD `Version` field to record the intended release target using semantic versioning.
+
+For implementation-ready or implemented PRDs, use an exact target version:
 
 - Patch (`vX.Y.Z` → `vX.Y.(Z+1)`): bug fixes, wording-only doc corrections, or small behavior adjustments that do not materially expand user-facing capability.
 - Minor (`vX.Y.Z` → `vX.(Y+1).0`): new user-visible features, meaningful workflow changes, or additive capabilities that remain backward compatible.
 - Major (`vX.Y.Z` → `v(X+1).0.0`): breaking changes, removals, or incompatible behavior/config changes.
 
-When updating a PRD for newly implemented work, detect whether the change is patch, minor, or major scope and increment the version number accordingly instead of always bumping the minor version.
+For `Draft` PRDs, prefer a semantic target when the exact landing release is not yet decided:
+
+- `>vX.Y.Z +patch`
+- `>vX.Y.Z +minor`
+- `>vX.Y.Z +major`
+
+This means the PRD is expected to land after the referenced version and indicates the intended semver impact without pretending the exact implementation release is already fixed.
+
+Examples:
+
+- `- **Version:** >v0.36.0 +minor` for a draft that is not yet implementation-ready but is expected to be a minor release when it lands
+- `- **Version:** v0.37.0` once the PRD becomes implementation-ready or the target release is known
+
+When a draft becomes implementation-ready, replace the semantic target with a concrete version. When updating a PRD for newly implemented work, detect whether the change is patch, minor, or major scope and set or update the concrete version accordingly instead of always bumping the minor version.
 
 ## Canonical section order
 
