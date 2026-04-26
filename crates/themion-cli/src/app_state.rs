@@ -361,6 +361,8 @@ pub fn build_agent(
     let mut agent = Agent::new_with_db(
         client,
         session.model.clone(),
+        Some(session.provider.clone()),
+        Some(session.active_profile.clone()),
         session.system_prompt.clone(),
         session_id,
         project_dir,

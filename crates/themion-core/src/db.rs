@@ -1,11 +1,67 @@
-use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension};
+use anyhow::{Context, Result};
+use rusqlite::{Connection, OptionalExtension, Row};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const BLOCKED_RETRY_COOLDOWN_MS: i64 = 5 * 60 * 1000;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TurnMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+impl TurnMeta {
+    pub fn to_json(&self) -> Result<Option<String>> {
+        if self.app_version.is_none()
+            && self.profile.is_none()
+            && self.provider.is_none()
+            && self.model.is_none()
+        {
+            return Ok(None);
+        }
+        serde_json::to_string(self)
+            .context("failed to serialize turn meta")
+            .map(Some)
+    }
+
+    pub fn from_json(raw: Option<&str>) -> Option<Self> {
+        let raw = raw?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        serde_json::from_str(raw).ok()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnRecord {
+    pub turn_id: i64,
+    pub session_id: String,
+    pub turn_seq: u32,
+    pub meta_json: Option<String>,
+    pub meta: Option<TurnMeta>,
+}
+
+fn map_turn_row(row: &Row<'_>) -> rusqlite::Result<TurnRecord> {
+    let meta_json: Option<String> = row.get(3)?;
+    let meta = TurnMeta::from_json(meta_json.as_deref());
+    Ok(TurnRecord {
+        turn_id: row.get(0)?,
+        session_id: row.get(1)?,
+        turn_seq: row.get::<_, i64>(2)? as u32,
+        meta_json,
+        meta,
+    })
+}
 
 fn now_unix() -> i64 {
     SystemTime::now()
@@ -67,7 +123,8 @@ CREATE TABLE IF NOT EXISTS agent_turns (
     workflow_status_at_end TEXT,
     phase_result_at_end TEXT,
     workflow_continues_after_turn INTEGER,
-    turn_end_reason TEXT
+    turn_end_reason TEXT,
+    meta TEXT
 );
 
 CREATE TABLE IF NOT EXISTS agent_messages (
@@ -365,6 +422,7 @@ fn init_schema(conn: &Connection, fts5: bool) -> Result<()> {
         "INTEGER",
     )?;
     ensure_column(conn, "agent_turns", "turn_end_reason", "TEXT")?;
+    ensure_column(conn, "agent_turns", "meta", "TEXT")?;
     ensure_column(conn, "agent_messages", "workflow_name", "TEXT")?;
     ensure_column(conn, "agent_messages", "phase_name", "TEXT")?;
     ensure_column(
@@ -628,12 +686,13 @@ impl DbHandle {
         session_id: uuid::Uuid,
         turn_seq: u32,
         workflow: &crate::workflow::WorkflowState,
+        turn_meta: Option<&TurnMeta>,
     ) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO agent_turns (
                 session_id, turn_seq, created_at, workflow_name, phase_start, workflow_status_at_start, phase_result_at_start
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             , meta) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 session_id.to_string(),
                 turn_seq as i64,
@@ -642,9 +701,23 @@ impl DbHandle {
                 workflow.phase_name,
                 workflow.status.as_str(),
                 workflow.phase_result.as_str(),
+                turn_meta.and_then(|meta| meta.to_json().ok()).flatten(),
             ],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+
+
+    pub fn get_turn(&self, turn_id: i64) -> Result<Option<TurnRecord>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT turn_id, session_id, turn_seq, meta FROM agent_turns WHERE turn_id = ?1",
+            rusqlite::params![turn_id],
+            map_turn_row,
+        )
+        .optional()
+        .map_err(anyhow::Error::from)
     }
 
     pub fn append_message(
@@ -1295,5 +1368,35 @@ impl NoteKind {
             "done_mention" => Some(Self::DoneMention),
             _ => None,
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_meta_round_trip_and_legacy_null_are_supported() {
+        let db = DbHandle::open_in_memory().expect("db");
+        let session_id = uuid::Uuid::new_v4();
+        db.insert_session(session_id, Path::new("/tmp"), true).expect("session");
+        let workflow = crate::workflow::WorkflowState::default();
+
+        let with_meta = TurnMeta {
+            app_version: Some("0.35.0".to_string()),
+            profile: Some("codex".to_string()),
+            provider: Some("openai-codex".to_string()),
+            model: Some("gpt-5.4".to_string()),
+        };
+        let turn_id = db.begin_turn(session_id, 1, &workflow, Some(&with_meta)).expect("turn");
+        let row = db.get_turn(turn_id).expect("read").expect("row");
+        assert_eq!(row.meta, Some(with_meta));
+        assert!(row.meta_json.as_deref().unwrap_or_default().contains("provider"));
+
+        let legacy_turn_id = db.begin_turn(session_id, 2, &workflow, None).expect("legacy turn");
+        let legacy_row = db.get_turn(legacy_turn_id).expect("read legacy").expect("legacy row");
+        assert_eq!(legacy_row.meta, None);
+        assert_eq!(legacy_row.meta_json, None);
     }
 }

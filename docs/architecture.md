@@ -296,7 +296,7 @@ Database path: `$XDG_DATA_HOME/themion/system.db` (default `~/.local/share/themi
 History and note persistence currently use these main tables:
 
 - `agent_sessions` — one row per harness session, including project directory, interactive flag, and persisted workflow state
-- `agent_turns` — one row per user turn with token counts, LLM round counts, tool-call counts, and workflow phase-at-start/end metadata
+- `agent_turns` — one row per user turn with token counts, LLM round counts, tool-call counts, workflow phase-at-start/end metadata, and optional turn-level runtime attribution JSON in `meta` (for example `app_version`, `profile`, `provider`, and `model`)
 - `agent_messages` — one row per persisted message; assistant tool-call payloads are stored in `tool_calls_json`, and tool result rows link back through `tool_call_id`
 - `agent_workflow_transitions` — workflow/phase transition audit trail
 - `board_notes` — durable note board rows keyed by canonical UUID `note_id` with unique human-friendly `note_slug`

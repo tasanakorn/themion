@@ -147,6 +147,8 @@ fn tool_call_detail(name: &str, args_json: &str) -> String {
 pub struct Agent {
     client: Box<dyn ChatBackend + Send + Sync>,
     model: String,
+    provider: Option<String>,
+    active_profile: Option<String>,
     system_prompt: String,
     messages: Vec<Message>,
     event_tx: Option<mpsc::UnboundedSender<AgentEvent>>,
@@ -176,6 +178,8 @@ impl Agent {
         Self {
             client,
             model,
+            provider: None,
+            active_profile: None,
             system_prompt,
             messages: Vec::new(),
             event_tx: None,
@@ -219,6 +223,8 @@ impl Agent {
     pub fn new_with_db(
         client: Box<dyn ChatBackend + Send + Sync>,
         model: String,
+        provider: Option<String>,
+        active_profile: Option<String>,
         system_prompt: String,
         session_id: Uuid,
         project_dir: PathBuf,
@@ -232,6 +238,8 @@ impl Agent {
         Self {
             client,
             model,
+            provider,
+            active_profile,
             system_prompt,
             messages: Vec::new(),
             event_tx: None,
@@ -277,6 +285,16 @@ impl Agent {
     #[cfg(feature = "stylos")]
     pub fn set_local_instance_id(&mut self, instance_id: Option<String>) {
         self.local_instance_id = instance_id;
+    }
+
+
+    fn current_turn_meta(&self) -> crate::db::TurnMeta {
+        crate::db::TurnMeta {
+            app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            profile: self.active_profile.clone(),
+            provider: self.provider.clone(),
+            model: Some(self.model.clone()),
+        }
     }
 
     pub fn clear_context(&mut self) {
@@ -846,7 +864,8 @@ impl Agent {
             let db = self.db.clone();
             let sid = self.session_id;
             let workflow = self.workflow_state.clone();
-            tokio::task::spawn_blocking(move || db.begin_turn(sid, turn_seq, &workflow)).await??
+            let turn_meta = self.current_turn_meta();
+            tokio::task::spawn_blocking(move || db.begin_turn(sid, turn_seq, &workflow, Some(&turn_meta))).await??
         };
 
         if requested_workflow.is_none() {

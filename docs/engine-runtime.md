@@ -25,7 +25,7 @@ A single user turn follows this shape:
 
 1. The CLI starts or resumes a harness session.
 2. The user submits input.
-3. The harness records a new turn and persists the user message.
+3. The harness records a new turn and persists the user message. New `agent_turns` rows also capture optional turn-level runtime attribution in `agent_turns.meta` as compact JSON, currently including `app_version`, `profile`, `provider`, and `model` when available.
 4. The harness builds the model input from:
    - the base system prompt
    - predefined built-in coding guardrails
@@ -39,7 +39,7 @@ A single user turn follows this shape:
 7. The harness calls the model again with the updated conversation.
 8. Workflow tools may also inspect or mutate the current workflow state between model calls.
 9. This repeats until the model returns a normal assistant response with no more tool calls, or another existing runtime stop condition ends the turn.
-10. The turn is finalized in SQLite with message, workflow, and token metadata.
+10. The turn is finalized in SQLite with message, workflow, token, and turn-level runtime metadata.
 
 ## Agent identity boundary
 
