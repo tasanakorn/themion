@@ -18,6 +18,7 @@ Use this guide whenever you create or update a PRD.
    - Make the document easy to skim and easy to decide on.
    - Prefer concise requirements over long narrative explanation.
    - Include detail only when it changes a product or implementation decision.
+   - If technical research or evidence is useful but too detailed for the main PRD body, move it into an optional technical note or appendix rather than bloating the core review path.
 5. Update `docs/README.md`.
    - Add the new PRD to the PRD table with link, status, and short description.
 
@@ -117,6 +118,7 @@ Rules:
 - Keep top-level headings as `##`.
 - Use `###` for subsections.
 - Use `####` only rarely.
+- Optional `## Appendix` or `## Technical note` sections may appear after the main required sections when they materially help preserve evidence without slowing the main review path.
 
 ## Section expectations
 
@@ -178,6 +180,13 @@ Rules:
 - If the work is phased, make it clear which checklist items belong to the currently proposed or implemented phase and avoid erasing later phases from the document.
 - Omit the section only when the PRD is purely exploratory, historical, or otherwise not pretending to define an implementation path.
 
+### Appendix / technical note
+- Use this only when supporting evidence, model comparisons, benchmarks, API notes, or technical research materially help the decision but would slow down the main review path.
+- Keep the main PRD body self-sufficient: a reviewer should still understand the problem, proposal, and decision points without reading the appendix.
+- Treat appendices as supporting evidence, not as a place to hide core requirements or unresolved product decisions.
+- Place optional appendices after the main required sections and after any implementation checklist.
+- Title them clearly, for example `## Appendix: Model comparison notes` or `## Technical note: Embedding candidate evidence`.
+
 ## Style
 
 Match the style of neighboring PRDs:
@@ -191,6 +200,7 @@ Match the style of neighboring PRDs:
 - Keep the document reading like a Product Requirements Document rather than only an engineering implementation plan.
 - Prefer bullets, compact paragraphs, and tables over long narrative blocks when they communicate the same information.
 - Do not repeat the same point across Summary, Goals, Background, and Design unless the later section adds new decision-relevant detail.
+- If detailed evidence is needed, prefer a short synthesis in the main body and move the supporting detail to an appendix or technical note.
 
 The finished PRD should look visually consistent with nearby PRDs in `docs/prd/`.
 
@@ -219,6 +229,7 @@ Before finishing:
 - Major design choices include inline `Alternative considered` notes.
 - Testing uses `step → verify:` lines.
 - Add an `Implementation checklist` section when the PRD defines an implementation path.
+- If detailed evidence is needed, keep the PRD review-efficient by moving it into an optional appendix or technical note.
 - `docs/README.md` PRD table was updated.
 - Structure and voice match recent PRDs.
 - Repeated explanation was removed where bullets or tables would be clearer.
