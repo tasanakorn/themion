@@ -1,6 +1,6 @@
 # PRD-050: Reorganize Tokio Runtime Execution into Domain-Specific Pools
 
-- **Status:** Partially implemented
+- **Status:** Implemented
 - **Version:** v0.31.0
 - **Scope:** `themion-cli`, `themion-core`, docs
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
@@ -13,7 +13,7 @@
 - This PRD is now scoped to executor-domain ownership and task placement only.
 - It does not define the broader future split between shared app/runtime logic and TUI presentation.
 - Headless-capable shared-runtime architecture, TUI-optional operation, and removal/replacement of overlapping bootstrap scaffolding are deferred to a successor PRD.
-- Remaining work under this PRD is limited to runtime-domain follow-through such as placement audit, observability accuracy, and cleanup of ambiguous spawn/blocking paths.
+- Follow-through work that remained open when this PRD was narrowed has since been completed here or absorbed by successor PRDs while preserving PRD-050 as the shipped runtime-domain foundation.
 
 ## Goals
 
@@ -201,8 +201,8 @@ Expected rollout shape:
 
 - keep the explicit domain-owned startup already landed
 - keep runtime-domain docs aligned with actual code
-- finish only the remaining runtime-domain audit and observability follow-through that is directly related to this topology
-- handle larger shared-runtime and TUI-optional redesign work in a successor PRD
+- treat successor PRDs as follow-through on adjacent architecture questions without reopening the core runtime-domain split
+- preserve PRD-050 as the historical contract for the shipped runtime-domain foundation
 
 There is no database or protocol migration tied specifically to this narrowed PRD scope.
 
@@ -222,8 +222,8 @@ There is no database or protocol migration tied specifically to this narrowed PR
 - [x] route print-mode startup through explicit core runtime ownership
 - [x] route long-lived Stylos startup through explicit network runtime ownership
 - [x] update architecture/runtime docs to describe the shipped runtime-domain topology
-- [~] audit remaining ambiguous spawn and blocking paths that materially affect runtime-domain correctness
-- [~] improve runtime observability so diagnostics reflect the actual domain topology precisely
+- [x] audit remaining ambiguous spawn and blocking paths that materially affect runtime-domain correctness
+- [x] improve runtime observability so diagnostics reflect the actual domain topology precisely
 - [x] narrow PRD-050 so broader TUI-optional/shared-runtime architecture is deferred to a successor PRD
 
 ## Implementation notes
@@ -238,8 +238,10 @@ Current shipped state:
 - `crates/themion-cli/src/app_runtime.rs` exists as overlapping scaffolding but is not the active bootstrap path
 - docs now treat larger app/runtime-vs-TUI separation as successor work rather than PRD-050 scope
 
-Remaining follow-through under this PRD stays narrow:
+Follow-through that was still open when this PRD was narrowed has since landed across the repository:
 
-- audit remaining ambiguous spawn and blocking paths in runtime-sensitive areas
-- improve observability parity between documented domain topology and debug output
-- keep docs aligned with actual runtime shapes and active startup paths
+- runtime-domain documentation in `docs/architecture.md` and `docs/engine-runtime.md` now reflects the shipped topology
+- runtime observability and debug coverage now describe the actual domain and thread model more precisely
+- adjacent shared-runtime and TUI-optional architecture work was split into successor PRDs, especially PRD-051, PRD-053, and PRD-054, without changing PRD-050's core runtime-domain contract
+
+PRD-050 should now be read as the implemented historical contract for the runtime-domain split that shipped, while later PRDs carry the follow-on application-architecture refinements.

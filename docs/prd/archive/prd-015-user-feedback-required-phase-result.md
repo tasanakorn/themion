@@ -1,6 +1,6 @@
 # PRD-015: User-Feedback-Required Phase Result
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Version:** v0.8.0
 - **Scope:** `themion-core`, `themion-cli`, docs
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
@@ -219,3 +219,16 @@ No user config migration is required.
 - inspect prompt/workflow context in a paused session → verify: the model sees both `status=waiting_user` and `phase_result=user_feedback_required`.
 - exercise a normal retryable failure using `phase_result=failed` → verify: existing retry behavior remains unchanged for true failures.
 - run `cargo check -p themion-core -p themion-cli` after implementation → verify: workflow-model, TUI, and docs changes compile cleanly.
+
+## Implementation notes
+
+This PRD is implemented in the workflow/runtime model.
+
+Implemented behavior includes:
+
+- `crates/themion-core/src/workflow.rs` adds `user_feedback_required` to `PhaseResult` and preserves `waiting_user` as the paused workflow status
+- `crates/themion-core/src/tools.rs` accepts `user_feedback_required` in `workflow_set_phase_result`
+- `crates/themion-core/src/agent.rs` treats `user_feedback_required` as a turn-ending wait-for-user condition rather than a retryable failure
+- the next user turn resumes the same phase by resetting the blocked phase result to `pending` unless the user explicitly changes workflows
+
+The shipped implementation matches the intended workflow behavior closely enough that this PRD should be treated as an implemented product contract rather than a pending proposal.

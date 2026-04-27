@@ -26,10 +26,10 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-012 | [Human-Friendly Statusline Token Units](prd/archive/prd-012-human-friendly-statusline-token-units.md) | Implemented | v0.6.1 | `themion-cli`, docs      |
 | PRD-013 | [Minimal Karpathy-Inspired Predefined Coding Guardrails](prd/archive/prd-013-minimal-karpathy-inspired-system-prompt-guardrails.md) | Implemented | v0.7.0 | `themion-core`, docs |
 | PRD-014 | [Codex CLI Web-Search Instruction Injection](prd/archive/prd-014-codex-cli-web-search-instruction-injection.md) | Implemented | v0.8.0 | `themion-core`, docs |
-| PRD-015 | [User-Feedback-Required Phase Result](prd/archive/prd-015-user-feedback-required-phase-result.md) | Proposed | v0.8.0 | `themion-core`, `themion-cli`, docs |
+| PRD-015 | [User-Feedback-Required Phase Result](prd/archive/prd-015-user-feedback-required-phase-result.md) | Implemented | v0.8.0 | `themion-core`, `themion-cli`, docs |
 | PRD-016 | [Commit-When-Asked Guardrail for Useful Brief Commit Messages](prd/archive/prd-016-commit-when-asked-brief-summary-guardrail.md) | Implemented | v0.8.1 | `themion-core`, docs |
 | PRD-017 | [Press `Esc` to Interrupt an In-Progress Agent Turn](prd/archive/prd-017-press-esc-to-interrupt-agent.md) | Implemented | v0.9.0 | `themion-cli`, `themion-core`, docs |
-| PRD-018 | [Stronger Short Commit-Message Guardrail](prd/archive/prd-018-stronger-short-commit-message-guardrail.md) | Proposed | v0.9.1 | `themion-core`, docs |
+| PRD-018 | [Stronger Short Commit-Message Guardrail](prd/archive/prd-018-stronger-short-commit-message-guardrail.md) | Implemented | v0.9.1 | `themion-core`, docs |
 | PRD-019 | [Basic Stylos Support in `themion-cli`](prd/archive/prd-019-basic-stylos-support-in-themion-cli.md) | Implemented | v0.10.0 | `themion-cli`, docs |
 | PRD-020 | [Stylos Git Metadata Cache and Remote URL Simplification](prd/archive/prd-020-stylos-git-metadata-cache-and-remote-url-simplification.md) | Implemented | v0.10.1 | `themion-cli`, docs |
 | PRD-021 | [Single-Process Multi-Agent Runtime and Multi-Agent Stylos Status Reporting](prd/archive/prd-021-single-process-multi-agent-runtime-and-stylos-reporting.md) | Implemented | v0.11.0 | `themion-core`, `themion-cli`, docs |
@@ -47,7 +47,7 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-033 | [Note Injection Should Present Note Identity and Metadata in the Initial Prompt](prd/archive/prd-033-note-injection-metadata-first-prompting.md) | Implemented | v0.19.0 | `themion-core`, `themion-cli`, docs |
 | PRD-034 | [Note-First Multi-Agent Collaboration and Done Mentions](prd/archive/prd-034-note-first-multi-agent-collaboration-and-done-mentions.md) | Implemented | v0.20.0 | `themion-core`, `themion-cli`, docs |
 | PRD-035 | [Add `blocked` Board Column with Cooldown-Aware Revisit Semantics](prd/archive/prd-035-blocked-board-column-and-cooldown.md) | Implemented | v0.21.0 | `themion-core`, `themion-cli`, docs |
-| PRD-036 | [Prompt Guidance for Self-Note Creation Beyond Simple Q&A](prd/archive/prd-036-prompt-guidance-for-self-note-creation-beyond-simple-qa.md) | Proposed | v0.22.0 | `themion-core`, docs |
+| PRD-036 | [Prompt Guidance for Self-Note Creation Beyond Simple Q&A](prd/archive/prd-036-prompt-guidance-for-self-note-creation-beyond-simple-qa.md) | Implemented | v0.22.0 | `themion-core`, docs |
 | PRD-037 | [Remove the Hard-Coded 10-Round Harness Loop Limit and Rely on State-Based Termination](prd/archive/prd-037-replace-hard-coded-harness-loop-limit.md) | Implemented | v0.23.0 | `themion-core`, docs |
 | PRD-038 | [Center Trim Tool Call Chat Labels](prd/archive/prd-038-center-trim-tool-call-chat-labels.md) | Implemented | v0.26.0 | `themion-core`, `themion-cli`, docs |
 | PRD-039 | [Refactor Board and Note Naming Toward Local-Board-First Semantics](prd/archive/prd-039-refactor-board-and-note-naming-toward-local-board-first-semantics.md) | Implemented | v0.24.0 | `themion-core`, `themion-cli`, docs |
@@ -61,13 +61,14 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-047 | [Prefer `note_slug` in User-Facing Board Note Chat Events](prd/archive/prd-047-prefer-note-slug-in-chat-events.md) | Implemented | v0.29.2 | `themion-cli`, docs |
 | PRD-048 | [Remove Long Navigation Shortcut Hints from the TUI Statusline](prd/archive/prd-048-remove-navigation-shortcut-hints-from-statusline.md) | Implemented | v0.29.3 | `themion-cli`, docs |
 | PRD-049 | [Project Memory and Global Knowledge Naming for Durable Knowledge Tools](prd/archive/prd-049-project-memory-and-global-knowledge-naming.md) | Implemented | v0.30.0 | `themion-core`, `themion-cli`, docs |
-| PRD-050 | [Reorganize Tokio Runtime Execution into Domain-Specific Pools](prd/archive/prd-050-reorganize-tokio-runtime-pools.md) | Partially implemented | v0.31.0 | `themion-cli`, `themion-core`, docs |
+| PRD-050 | [Reorganize Tokio Runtime Execution into Domain-Specific Pools](prd/archive/prd-050-reorganize-tokio-runtime-pools.md) | Implemented | v0.31.0 | `themion-cli`, `themion-core`, docs |
 | PRD-051 | [Separate Shared Application Runtime from TUI Presentation and Introduce Headless Mode](prd/prd-051-separate-shared-application-runtime-from-tui-presentation-and-introduce-headless-mode.md) | Implemented | v0.32.0 | `themion-cli`, docs |
 | PRD-052 | [Local System Inspection Tool for Runtime, Tooling, and Provider Readiness](prd/prd-052-tool-and-model-self-healthcheck.md) | Implemented | v0.33.0 | `themion-core`, `themion-cli`, docs |
 | PRD-053 | [Tighten Tokio Runtime Topology Semantics and Remove Remaining TUI-Orchestration Leakage](prd/prd-053-tighten-tokio-runtime-topology-and-tui-layering.md) | Implemented | v0.34.0 | `themion-cli`, docs |
 | PRD-054 | [Rename Shared CLI Application Runtime Type to `AppState`](prd/prd-054-rename-shared-cli-app-runtime-to-app-state.md) | Implemented | v0.34.1 | `themion-cli`, docs |
-| PRD-055 | [Fix TUI Input Dirty Detection for Non-ASCII Typing and Paste-Burst Flushes](prd/prd-055-fix-tui-input-dirty-detection-for-non-ascii-and-paste-burst.md) | Proposed | v0.34.2 | `themion-cli`, docs |
+| PRD-055 | [Fix TUI Input Dirty Detection for Non-ASCII Typing and Paste-Burst Flushes](prd/prd-055-fix-tui-input-dirty-detection-for-non-ascii-and-paste-burst.md) | Implemented | v0.34.2 | `themion-cli`, docs |
 | PRD-056 | [Right-Size Tool Result Payloads and Standardize Mutation Acknowledgements](prd/prd-056-right-size-tool-result-payloads-and-standardize-mutation-acks.md) | Implemented | v0.35.0 | `themion-core`, `themion-cli`, docs |
-| PRD-057 | [Project-Wide Conversation Search and Recall from the Active Session](prd/prd-057-project-wide-history-search-and-recall.md) | Implemented | v0.35.1 | `themion-core`, docs |
+| PRD-057 | [Store Turn-Level Runtime Metadata as JSON in `agent_turns.meta`](prd/prd-057-store-turn-level-runtime-metadata-as-json-in-agent-turns-meta.md) | Implemented | v0.35.1 | `themion-core`, docs |
 | PRD-058 | [Optional Tool-Reason Guidance Recording and Chat Visibility](prd/prd-058-optional-tool-reason-guidance-recording-and-chat-visibility.md) | Implemented | v0.36.0 | `themion-core`, `themion-cli`, docs |
 | PRD-059 | [Add Vector Embedding and Semantic Search for Project Memory](prd/prd-059-add-vector-embedding-and-semantic-search-for-project-memory.md) | Implemented | v0.37.0 | `themion-core`, `themion-cli`, docs |
+| PRD-070 | [Reduce Prompt-History Token Cost by Compacting Persisted Chat Turns](prd/prd-070-reduce-prompt-history-token-cost-by-compacting-persisted-chat-turns.md) | Draft | v0.40.0 | `themion-core`, docs |

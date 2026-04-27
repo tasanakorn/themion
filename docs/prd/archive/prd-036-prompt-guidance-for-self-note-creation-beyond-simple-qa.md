@@ -1,6 +1,6 @@
 # PRD-036: Prompt Guidance for Self-Note Creation Beyond Simple Q&A
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Version:** v0.22.0
 - **Scope:** `themion-core`, docs
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
@@ -117,10 +117,16 @@ This is a prompt-and-docs change only:
 
 ## Implementation checklist
 
-- [ ] add concise prompt guidance for self-note creation near existing board instructions
-- [ ] explicitly state that simple Q&A without tools usually does not need a self-note
-- [ ] explicitly state that work beyond simple Q&A should trigger self-note consideration
-- [ ] mention tool use and follow-up tracking as strong signals for self-note creation
-- [ ] keep the wording advisory rather than mandatory for every tool call
-- [ ] update docs if they describe this prompt behavior
-- [ ] update `docs/README.md` with the new PRD entry
+- [x] add concise prompt guidance for self-note creation near existing board instructions
+- [x] explicitly state that simple Q&A without tools usually does not need a self-note
+- [x] explicitly state that work beyond simple Q&A should trigger self-note consideration
+- [x] mention tool use and follow-up tracking as strong signals for self-note creation
+- [x] keep the wording advisory rather than mandatory for every tool call
+- [x] update docs if they describe this prompt behavior
+- [x] update `docs/README.md` with the new PRD entry
+
+## Implementation notes
+
+This PRD is implemented through prompt-visible board guidance injected by `crates/themion-core/src/agent.rs` and corresponding documentation in `docs/engine-runtime.md`.
+
+The shipped wording now says that simple direct Q&A without tools usually should not create a self-note, while tasks needing tools, edits, validation, or durable follow-up tracking should consider creating one. The guidance remains advisory rather than mechanically requiring a note for every tool call.
