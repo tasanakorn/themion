@@ -162,7 +162,7 @@ fn build_app(
     project_dir: PathBuf,
     runtime_domains: &Arc<RuntimeDomains>,
     #[cfg(feature = "stylos")] stylos_handle: Option<crate::stylos::StylosHandle>,
-) -> App<'static> {
+) -> App {
     App::new(
         session,
         db,
@@ -179,7 +179,7 @@ fn build_app(
 
 fn perform_initial_draw(
     terminal: &mut TuiTerminal,
-    app: &mut App<'_>,
+    app: &mut App,
     frame_requester: &FrameRequester,
 ) -> anyhow::Result<()> {
     terminal.draw(|f| draw(f, app))?;
@@ -188,7 +188,7 @@ fn perform_initial_draw(
 }
 
 async fn run_event_loop(
-    app: &mut App<'_>,
+    app: &mut App,
     ctx: &mut RunnerContext,
     terminal: &mut TuiTerminal,
 ) -> anyhow::Result<()> {
@@ -210,7 +210,7 @@ async fn run_event_loop(
 }
 
 #[cfg(feature = "stylos")]
-async fn shutdown_app(app: &mut App<'_>, ctx: RunnerContext) {
+async fn shutdown_app(app: &mut App, ctx: RunnerContext) {
     ctx.shutdown();
     drop(ctx.app_tx);
     if let Some(stylos) = app.shutdown_stylos() {
@@ -219,7 +219,7 @@ async fn shutdown_app(app: &mut App<'_>, ctx: RunnerContext) {
 }
 
 #[cfg(not(feature = "stylos"))]
-async fn shutdown_app(_app: &mut App<'_>, ctx: RunnerContext) {
+async fn shutdown_app(_app: &mut App, ctx: RunnerContext) {
     ctx.shutdown();
     drop(ctx.app_tx);
 }

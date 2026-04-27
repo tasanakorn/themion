@@ -1,3 +1,4 @@
+use crate::chat_composer::{ChatComposer, InputAction};
 use crate::config::{save_profiles, ProfileConfig};
 use crate::runtime_domains::DomainHandle;
 #[cfg(feature = "stylos")]
@@ -5,7 +6,7 @@ use crate::stylos::{
     tool_bridge, IncomingPromptRequest, StylosHandle, StylosRuntimeState, StylosToolBridge,
 };
 use crate::{format_stats, Session};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -25,11 +26,7 @@ use themion_core::workflow::WorkflowState;
 use themion_core::ModelInfo;
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc};
-use tui_textarea::CursorMove;
-use tui_textarea::TextArea;
-use unicode_width::UnicodeWidthChar;
-
-use crate::paste_burst::{CharDecision, FlushResult, PasteBurst};
+use crate::textarea::TextAreaState;
 use uuid::Uuid;
 
 pub(crate) enum AppEvent {
@@ -624,7 +621,7 @@ impl AgentActivity {
     }
 }
 
-pub struct App<'a> {
+pub struct App {
     #[cfg(feature = "stylos")]
     pub(crate) stylos: Option<StylosHandle>,
     #[cfg(feature = "stylos")]
@@ -632,17 +629,13 @@ pub struct App<'a> {
     session: Session,
     entries: Vec<Entry>,
     pending: Option<String>,
-    input: TextArea<'a>,
-    paste_burst: PasteBurst,
+    composer: ChatComposer,
     pub(crate) running: bool,
     agent_busy: bool,
     scroll_offset: usize,
     navigation_mode: NavigationMode,
     review_mode: ReviewMode,
     review_scroll_offset: usize,
-    history: Vec<String>,
-    history_pos: Option<usize>,
-    history_draft: String,
     streaming_idx: Option<usize>,
     anim_frame: u8,
     dirty: UiDirty,
@@ -677,7 +670,7 @@ pub struct App<'a> {
     stylos_tool_bridge: Option<StylosToolBridge>,
 }
 
-impl<'a> App<'a> {
+impl App {
     pub fn new(
         session: Session,
         db: Arc<DbHandle>,
@@ -774,17 +767,13 @@ impl<'a> App<'a> {
             session,
             entries: initial_entries,
             pending: None,
-            input: make_input(),
-            paste_burst: PasteBurst::default(),
+            composer: ChatComposer::new(),
             running: true,
             agent_busy: false,
             scroll_offset: 0,
             navigation_mode: NavigationMode::FollowTail,
             review_mode: ReviewMode::Closed,
             review_scroll_offset: 0,
-            history: Vec::new(),
-            history_pos: None,
-            history_draft: String::new(),
             streaming_idx: None,
             anim_frame: 0,
             dirty: {
@@ -868,38 +857,6 @@ impl<'a> App<'a> {
 
     fn close_transcript_review(&mut self) {
         self.review_mode = ReviewMode::Closed;
-    }
-
-    fn history_up(&mut self) {
-        if self.history.is_empty() {
-            return;
-        }
-        let new_pos = match self.history_pos {
-            None => {
-                self.history_draft = self.input.lines().join("\n");
-                self.history.len() - 1
-            }
-            Some(0) => return,
-            Some(i) => i - 1,
-        };
-        self.history_pos = Some(new_pos);
-        set_input_text(&mut self.input, &self.history[new_pos].clone());
-    }
-
-    fn history_down(&mut self) {
-        match self.history_pos {
-            None => {}
-            Some(i) if i + 1 < self.history.len() => {
-                self.history_pos = Some(i + 1);
-                let text = self.history[i + 1].clone();
-                set_input_text(&mut self.input, &text);
-            }
-            Some(_) => {
-                self.history_pos = None;
-                let draft = self.history_draft.clone();
-                set_input_text(&mut self.input, &draft);
-            }
-        }
     }
 
     fn pending_str(&self) -> String {
@@ -2102,17 +2059,15 @@ impl<'a> App<'a> {
     }
 
     fn submit_text(&mut self, text: String, app_tx: &mpsc::UnboundedSender<AppEvent>) {
-        let text = text.trim().to_string();
-        if text.is_empty() || self.agent_busy {
+        if self.agent_busy {
             return;
         }
 
-        if self.history.last() != Some(&text) {
-            self.history.push(text.clone());
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
         }
-        self.history_pos = None;
-        self.history_draft = String::new();
-        self.input = make_input();
+
         self.return_to_latest();
 
         if text == "/exit" || text == "/quit" {
@@ -2325,8 +2280,11 @@ impl<'a> App<'a> {
     }
 
     fn submit_input(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) -> bool {
-        let text: String = self.input.lines().join("\n");
+        let Some(text) = self.composer.submit_input_text() else {
+            return false;
+        };
         let was_dirty = self.dirty.any();
+        self.return_to_latest();
         self.submit_text(text, app_tx);
         self.dirty.any() && !was_dirty
     }
@@ -2354,7 +2312,7 @@ impl<'a> App<'a> {
 
     pub(crate) fn handle_paste_event(&mut self, text: String, frame_requester: &FrameRequester) {
         self.activity_counters.input_paste_count += 1;
-        self.commit_pasted_input(text, frame_requester);
+        self.composer.handle_paste_event(text);
         self.mark_dirty_input();
         self.request_draw(frame_requester);
     }
@@ -2575,36 +2533,6 @@ impl<'a> App<'a> {
         Ok(())
     }
 
-    fn commit_input_change<F>(&mut self, frame_requester: &FrameRequester, apply: F)
-    where
-        F: FnOnce(&mut TextArea<'a>),
-    {
-        apply(&mut self.input);
-        self.mark_dirty_input();
-        self.request_draw(frame_requester);
-    }
-
-    fn commit_pasted_input(&mut self, pasted: String, frame_requester: &FrameRequester) {
-        self.commit_input_change(frame_requester, |input| {
-            insert_pasted_text(input, &pasted);
-        });
-        self.paste_burst.clear_after_explicit_paste();
-    }
-
-    fn handle_non_ascii_char(
-        &mut self,
-        key: event::KeyEvent,
-        _now: Instant,
-        frame_requester: &FrameRequester,
-    ) {
-        if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-            self.commit_pasted_input(pasted, frame_requester);
-        }
-        self.commit_input_change(frame_requester, |input| {
-            input.input(key);
-        });
-    }
-
     pub(crate) fn handle_shell_complete_event(
         &mut self,
         output: String,
@@ -2714,163 +2642,51 @@ impl<'a> App<'a> {
     ) {
         self.activity_counters.input_key_count += 1;
 
-        let now = Instant::now();
-        match self.paste_burst.flush_if_due(now) {
-            FlushResult::Paste(text) => self.commit_pasted_input(text, frame_requester),
-            FlushResult::Typed(ch) => self.commit_input_change(frame_requester, |input| {
-                input.insert_char(ch);
-            }),
-            FlushResult::None => {}
-        }
-
-        if matches!(key.code, KeyCode::Enter)
-            && self.paste_burst.is_active()
-            && self.paste_burst.append_newline_if_active(now)
+        match self
+            .composer
+            .handle_key_event(key, self.review_mode != ReviewMode::Closed, self.agent_busy)
         {
-            return;
-        }
-
-        if let KeyCode::Char(ch) = key.code {
-            let has_ctrl_or_alt = key.modifiers.contains(KeyModifiers::CONTROL)
-                || key.modifiers.contains(KeyModifiers::ALT);
-            if !has_ctrl_or_alt {
-                if !ch.is_ascii() {
-                    self.handle_non_ascii_char(key, now, frame_requester);
-                    return;
-                }
-
-                if let Some(decision) = self.paste_burst.on_plain_char_no_hold(now) {
-                    match decision {
-                        CharDecision::BufferAppend => {
-                            self.paste_burst.append_char_to_buffer(ch, now);
-                            return;
-                        }
-                        CharDecision::BeginBuffer { retro_chars } => {
-                            let (text, byte_pos) = input_text_and_cursor_byte(&self.input);
-                            let safe_cursor = clamp_to_char_boundary(&text, byte_pos);
-                            let before = &text[..safe_cursor];
-                            if let Some(grab) = self.paste_burst.decide_begin_buffer(
-                                now,
-                                before,
-                                retro_chars as usize,
-                            ) {
-                                let kept =
-                                    format!("{}{}", &text[..grab.start_byte], &text[safe_cursor..]);
-                                set_input_text_and_cursor(&mut self.input, &kept, grab.start_byte);
-                                self.paste_burst.append_char_to_buffer(ch, now);
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-                self.commit_pasted_input(pasted, frame_requester);
-            }
-        }
-
-        if !matches!(key.code, KeyCode::Char(_) | KeyCode::Enter) {
-            if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-                self.commit_pasted_input(pasted, frame_requester);
-            }
-        }
-
-        match (key.code, key.modifiers) {
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.running = false,
-            (KeyCode::Esc, _) if self.review_mode == ReviewMode::Transcript => {
-                self.close_transcript_review();
-                self.mark_dirty_overlay();
+            InputAction::None => {}
+            InputAction::RequestDraw => {
+                self.mark_dirty_input();
                 self.request_draw(frame_requester);
             }
-            (KeyCode::Esc, _) if self.agent_busy => self.request_interrupt(),
-            (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
+            InputAction::Submit => {
                 let tx = app_tx.clone();
                 if self.submit_input(&tx) {
                     self.request_draw(frame_requester);
                 }
             }
-            (KeyCode::Enter, KeyModifiers::NONE) => {
-                if self.review_mode != ReviewMode::Closed {
-                    self.close_transcript_review();
-                } else if self
-                    .paste_burst
-                    .newline_should_insert_instead_of_submit(now)
-                {
-                    self.input.insert_newline();
-                    self.mark_dirty_input();
-                    self.request_draw(frame_requester);
-                    self.paste_burst.extend_window(now);
-                } else {
-                    let tx = app_tx.clone();
-                    if self.submit_input(&tx) {
-                        self.request_draw(frame_requester);
-                    }
-                }
-            }
-            (KeyCode::Enter, KeyModifiers::SHIFT) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
-                if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-                    self.commit_pasted_input(pasted, frame_requester);
-                }
-                self.input.insert_newline();
-                self.mark_dirty_input();
+            InputAction::Quit => self.running = false,
+            InputAction::Interrupt => self.request_interrupt(),
+            InputAction::OpenTranscriptReview => {
+                self.open_transcript_review();
+                self.mark_dirty_overlay();
                 self.request_draw(frame_requester);
             }
-            (KeyCode::PageUp, _) => {
-                let page = area_page_height(terminal, self);
-                self.page_up(page);
+            InputAction::CloseTranscriptReview => {
+                self.close_transcript_review();
+                self.mark_dirty_overlay();
+                self.request_draw(frame_requester);
             }
-            (KeyCode::PageDown, _) => {
-                let page = area_page_height(terminal, self);
-                self.page_down(page);
-            }
-            (KeyCode::Up, KeyModifiers::ALT) => self.scroll_up(),
-            (KeyCode::Down, KeyModifiers::ALT) => self.scroll_down(),
-            (KeyCode::Char('g'), KeyModifiers::ALT) => {
+            InputAction::ScrollUp => self.scroll_up(),
+            InputAction::ScrollDown => self.scroll_down(),
+            InputAction::ReturnToLatest => {
                 self.return_to_latest();
                 self.mark_dirty_conversation();
                 self.request_draw(frame_requester);
             }
-            (KeyCode::Char('t'), KeyModifiers::ALT) => {
-                if self.review_mode == ReviewMode::Transcript {
-                    self.close_transcript_review();
-                } else {
-                    self.open_transcript_review();
-                    self.mark_dirty_overlay();
-                    self.request_draw(frame_requester);
-                }
-            }
-            (KeyCode::Home, KeyModifiers::ALT) => {
+            InputAction::JumpToTop => {
                 let (total, height) = current_total_and_height(terminal, self);
                 self.jump_to_top(total, height);
             }
-            (KeyCode::Up, KeyModifiers::NONE) if self.review_mode == ReviewMode::Closed => {
-                self.history_up();
-                self.mark_dirty_input();
-                self.request_draw(frame_requester)
+            InputAction::PageUp => {
+                let page = area_page_height(terminal, self);
+                self.page_up(page);
             }
-            (KeyCode::Down, KeyModifiers::NONE) if self.review_mode == ReviewMode::Closed => {
-                self.history_down();
-                self.mark_dirty_input();
-                self.request_draw(frame_requester)
-            }
-            _ => {
-                if self.review_mode == ReviewMode::Closed {
-                    self.input.input(key);
-                    self.mark_dirty_input();
-                    self.request_draw(frame_requester);
-                    match key.code {
-                        KeyCode::Char(_) => {
-                            let has_ctrl_or_alt = key.modifiers.contains(KeyModifiers::CONTROL)
-                                || key.modifiers.contains(KeyModifiers::ALT);
-                            if has_ctrl_or_alt {
-                                self.paste_burst.clear_window_after_non_char();
-                            }
-                        }
-                        KeyCode::Enter => {}
-                        _ => self.paste_burst.clear_window_after_non_char(),
-                    }
-                }
+            InputAction::PageDown => {
+                let page = area_page_height(terminal, self);
+                self.page_down(page);
             }
         }
     }
@@ -2991,50 +2807,6 @@ pub(crate) fn stylos_tool_invoker(
     })
 }
 
-fn set_input_text(input: &mut TextArea, text: &str) {
-    *input = make_input();
-    if !text.is_empty() {
-        input.insert_str(text);
-    }
-}
-
-fn set_input_text_and_cursor(input: &mut TextArea, text: &str, cursor_byte: usize) {
-    set_input_text(input, text);
-    let cursor_byte = clamp_to_char_boundary(text, cursor_byte);
-    let mut row = 0usize;
-    let mut col = 0usize;
-    let mut remaining = cursor_byte;
-    for line in text.split('\n') {
-        if remaining <= line.len() {
-            col = line[..remaining].chars().count();
-            break;
-        }
-        remaining = remaining.saturating_sub(line.len() + 1);
-        row += 1;
-    }
-    input.move_cursor(CursorMove::Jump(row as u16, col as u16));
-}
-
-fn input_text_and_cursor_byte(input: &TextArea) -> (String, usize) {
-    let lines = input.lines();
-    let text = lines.join("\n");
-    let (row, col) = input.cursor();
-    let mut byte_pos = 0usize;
-    for (idx, line) in lines.iter().enumerate() {
-        if idx == row {
-            let safe_col = col.min(line.chars().count());
-            byte_pos += line
-                .char_indices()
-                .nth(safe_col)
-                .map(|(i, _)| i)
-                .unwrap_or(line.len());
-            break;
-        }
-        byte_pos += line.len() + 1;
-    }
-    (text, byte_pos)
-}
-
 pub(crate) fn dispatch_terminal_event(
     app_tx: &mpsc::UnboundedSender<AppEvent>,
     event: Event,
@@ -3047,97 +2819,6 @@ pub(crate) fn dispatch_terminal_event(
         _ => return true,
     };
     app_tx.send(app_event).is_ok()
-}
-
-fn insert_pasted_text(input: &mut TextArea, text: &str) {
-    if text.is_empty() {
-        return;
-    }
-    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-    input.insert_str(normalized);
-}
-
-fn clamp_to_char_boundary(text: &str, pos: usize) -> usize {
-    let mut p = pos.min(text.len());
-    if p < text.len() && !text.is_char_boundary(p) {
-        p = text
-            .char_indices()
-            .map(|(i, _)| i)
-            .take_while(|&i| i <= p)
-            .last()
-            .unwrap_or(0);
-    }
-    p
-}
-
-fn make_input<'a>() -> TextArea<'a> {
-    let mut ta = TextArea::default();
-    ta.set_block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .padding(Padding::left(1)),
-    );
-    ta.set_cursor_line_style(Style::default());
-    ta.set_placeholder_text(
-        "message…  (Enter/Ctrl-S send | Shift-Enter/Ctrl-J newline | Esc interrupt | Ctrl-C quit)",
-    );
-    ta
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct InputLayoutMetrics {
-    visual_lines: u16,
-    cursor_row: u16,
-    cursor_col: u16,
-}
-
-fn char_display_width(ch: char) -> u16 {
-    UnicodeWidthChar::width(ch).unwrap_or(0).max(1) as u16
-}
-
-fn input_layout_metrics(text: &str, cursor_byte: usize, width: u16) -> InputLayoutMetrics {
-    let width = width.max(1);
-    let cursor_byte = clamp_to_char_boundary(text, cursor_byte);
-    let mut visual_lines = 1u16;
-    let mut cursor_row = 0u16;
-    let mut cursor_col = 0u16;
-    let mut row = 0u16;
-    let mut col = 0u16;
-
-    for (byte_idx, ch) in text.char_indices() {
-        if byte_idx == cursor_byte {
-            cursor_row = row;
-            cursor_col = col;
-        }
-
-        if ch == '\n' {
-            row = row.saturating_add(1);
-            visual_lines = visual_lines.max(row.saturating_add(1));
-            col = 0;
-            continue;
-        }
-
-        let ch_width = char_display_width(ch);
-        if col.saturating_add(ch_width) > width {
-            row = row.saturating_add(1);
-            visual_lines = visual_lines.max(row.saturating_add(1));
-            col = 0;
-        }
-        col = col.saturating_add(ch_width);
-        visual_lines = visual_lines.max(row.saturating_add(1));
-    }
-
-    if cursor_byte == text.len() {
-        cursor_row = row;
-        cursor_col = col;
-    }
-
-    InputLayoutMetrics {
-        visual_lines: visual_lines.max(1),
-        cursor_row,
-        cursor_col,
-    }
 }
 
 fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Line<'a>> {
@@ -3294,7 +2975,7 @@ fn review_area(area: Rect) -> Rect {
 
 pub(crate) fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
-    let input_text = app.input.lines().join("\n");
+    let input_text = app.composer.input.lines().join("\n");
 
     let input_block = Block::default()
         .borders(Borders::ALL)
@@ -3303,10 +2984,12 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
 
     let input_inner = input_block.inner(area);
     let input_inner_width = input_inner.width.max(1);
-    let (_, cursor_byte) = input_text_and_cursor_byte(&app.input);
-    let input_layout = input_layout_metrics(&input_text, cursor_byte, input_inner_width);
+    let (cursor_col, cursor_row) = app
+        .composer
+        .input
+        .cursor_pos_with_state(input_inner_width, TextAreaState);
 
-    let input_height = (input_layout.visual_lines + 2).clamp(3, 8);
+    let input_height = (app.composer.input.desired_height(input_inner_width) + 2).clamp(3, 8);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -3342,8 +3025,8 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
     f.render_widget(input_para, chunks[1]);
 
     if app.review_mode == ReviewMode::Closed {
-        let cursor_x = chunks[1].x + 2 + input_layout.cursor_col;
-        let cursor_y = chunks[1].y + 1 + input_layout.cursor_row;
+        let cursor_x = chunks[1].x + 2 + cursor_col;
+        let cursor_y = chunks[1].y + 1 + cursor_row;
         if cursor_y < chunks[1].bottom() && cursor_x < chunks[1].right() {
             f.set_cursor_position((cursor_x, cursor_y));
         }
@@ -3436,7 +3119,7 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
 
 pub(crate) fn area_page_height(
     terminal: &Terminal<CrosstermBackend<std::io::Stdout>>,
-    app: &App<'_>,
+    app: &App,
 ) -> usize {
     let area = terminal.size().map(|r| r.height as usize).unwrap_or(24);
     let reserved = 8usize + 3usize;
@@ -3453,7 +3136,7 @@ pub(crate) fn area_page_height(
 
 pub(crate) fn current_total_and_height(
     terminal: &Terminal<CrosstermBackend<std::io::Stdout>>,
-    app: &App<'_>,
+    app: &App,
 ) -> (usize, usize) {
     let size = terminal
         .size()
@@ -3485,53 +3168,6 @@ fn unix_epoch_now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
-}
-
-#[cfg(test)]
-mod input_layout_tests {
-    use super::*;
-
-    #[test]
-    fn input_layout_metrics_moves_cursor_after_explicit_newline() {
-        let text = "hello\nworld";
-        let metrics = input_layout_metrics(text, "hello\n".len(), 20);
-        assert_eq!(
-            metrics,
-            InputLayoutMetrics {
-                visual_lines: 2,
-                cursor_row: 1,
-                cursor_col: 0,
-            }
-        );
-    }
-
-    #[test]
-    fn input_layout_metrics_wraps_long_lines_for_cursor_tracking() {
-        let text = "abcdef";
-        let metrics = input_layout_metrics(text, text.len(), 4);
-        assert_eq!(
-            metrics,
-            InputLayoutMetrics {
-                visual_lines: 2,
-                cursor_row: 1,
-                cursor_col: 2,
-            }
-        );
-    }
-
-    #[test]
-    fn input_layout_metrics_handles_wide_chars_across_wraps() {
-        let text = "ab界c";
-        let metrics = input_layout_metrics(text, text.len(), 4);
-        assert_eq!(
-            metrics,
-            InputLayoutMetrics {
-                visual_lines: 2,
-                cursor_row: 1,
-                cursor_col: 1,
-            }
-        );
-    }
 }
 
 #[cfg(all(test, feature = "stylos"))]

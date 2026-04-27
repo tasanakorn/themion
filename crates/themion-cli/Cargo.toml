@@ -1,6 +1,6 @@
 [package]
 name = "themion-cli"
-version = "0.37.0"
+version = "0.38.0"
 edition = "2021"
 
 [[bin]]
@@ -30,7 +30,6 @@ urlencoding.workspace = true
 dirs = "5"
 ratatui.workspace = true
 crossterm.workspace = true
-tui-textarea.workspace = true
 unicode-width = "0.2"
 tokio.workspace = true
 tokio-stream.workspace = true

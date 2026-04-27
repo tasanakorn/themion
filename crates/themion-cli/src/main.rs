@@ -1,12 +1,14 @@
 mod app_state;
 mod auth_store;
 mod config;
+mod chat_composer;
 mod headless_runner;
 mod login_codex;
 mod paste_burst;
 mod runtime_domains;
 #[cfg(feature = "stylos")]
 mod stylos;
+mod textarea;
 mod tui;
 mod tui_runner;
 use app_state::AppState;
