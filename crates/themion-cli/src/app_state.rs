@@ -200,6 +200,7 @@ impl AppState {
             #[cfg(feature = "stylos")]
             "main",
             Some(self.system_inspection_snapshot()),
+            false,
         )
     }
 }
@@ -327,6 +328,7 @@ pub fn build_agent(
     #[cfg(feature = "stylos")] local_instance_id: Option<&str>,
     #[cfg(feature = "stylos")] local_agent_id: &str,
     system_inspection: Option<SystemInspectionResult>,
+    api_log_enabled: bool,
 ) -> anyhow::Result<Agent> {
     let client: Box<dyn ChatBackend + Send + Sync> = match session.provider.as_str() {
         "openai-codex" => {
@@ -368,6 +370,7 @@ pub fn build_agent(
         project_dir,
         db,
     );
+    agent.set_api_log_enabled(api_log_enabled);
     agent.set_system_inspection(system_inspection);
 
     #[cfg(feature = "stylos")]

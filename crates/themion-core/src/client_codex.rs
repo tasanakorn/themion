@@ -7,7 +7,8 @@ use tokio::sync::RwLock;
 
 use crate::auth::CodexAuth;
 use crate::client::{
-    ChatBackend, FunctionCall, Message, ModelInfo, ResponseMessage, ToolCall, Usage, UsageDetails,
+    ChatBackend, ChatRoundTrace, FunctionCall, Message, ModelInfo, ResponseMessage, ToolCall,
+    Usage, UsageDetails,
 };
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -86,6 +87,23 @@ struct CodexModelInfo {
     display_name: Option<String>,
     context_window: Option<u64>,
     max_context_window: Option<u64>,
+}
+
+fn build_responses_api_body(model: &str, messages: &[Message], tools: &Value) -> Value {
+    let (instructions, input_items) = translate_messages(messages);
+    let translated_tools = translate_tools(tools);
+
+    let mut body = serde_json::json!({
+        "model": model,
+        "store": false,
+        "input": input_items,
+        "tools": translated_tools,
+        "stream": true,
+    });
+    if let Some(ref instr) = instructions {
+        body["instructions"] = Value::String(instr.clone());
+    }
+    body
 }
 
 impl CodexClient {
@@ -708,6 +726,19 @@ struct ToolCallSlot {
 
 #[async_trait::async_trait]
 impl ChatBackend for CodexClient {
+    fn backend_name(&self) -> &'static str {
+        "responses"
+    }
+
+    fn build_round_request_payload(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &Value,
+    ) -> Value {
+        build_responses_api_body(model, messages, tools)
+    }
+
     async fn chat_completion_stream(
         &self,
         model: &str,
@@ -719,22 +750,11 @@ impl ChatBackend for CodexClient {
         ResponseMessage,
         Option<Usage>,
         Option<ApiCallRateLimitReport>,
+        ChatRoundTrace,
     )> {
         let (access_token, account_id) = self.auth_headers().await?;
 
-        let (instructions, input_items) = translate_messages(messages);
-        let translated_tools = translate_tools(tools);
-
-        let mut body = serde_json::json!({
-            "model": model,
-            "store": false,
-            "input": input_items,
-            "tools": translated_tools,
-            "stream": true,
-        });
-        if let Some(ref instr) = instructions {
-            body["instructions"] = Value::String(instr.clone());
-        }
+        let body = build_responses_api_body(model, messages, tools);
 
         let response = self
             .http
@@ -922,8 +942,17 @@ impl ChatBackend for CodexClient {
             },
             tool_calls,
         };
+        let trace = ChatRoundTrace {
+            backend: "responses".to_string(),
+            request: body,
+            response: Some(serde_json::to_value(&message)?),
+            error: None,
+            http_status: Some(response_status.as_u16()),
+            usage: usage.clone(),
+            rate_limits: rate_limit_report.clone(),
+        };
 
-        Ok((message, usage, rate_limit_report))
+        Ok((message, usage, rate_limit_report, trace))
     }
 
     async fn fetch_model_info(&self, model: &str) -> Result<Option<ModelInfo>> {

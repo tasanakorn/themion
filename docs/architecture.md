@@ -275,6 +275,19 @@ The full `messages` Vec is never trimmed — the in-memory copy is always comple
 
 `"stream_options": {"include_usage": true}` is sent so the last chunk carries token counts.
 
+### Session-level API call logging
+
+Themion now includes a TUI-local session-scoped API call logging toggle for provider debugging.
+
+Current behavior:
+
+- `/debug api-log enable` enables per-round provider/API logging for the current session only
+- `/debug api-log disable` disables it again for the current session only
+- when enabled, each provider round writes one JSON artifact under the system temp root, typically `/tmp/themion/<session_id>/<turn>/round_<n>.json` on Unix-like systems
+- artifacts include session, project, turn, round, provider/backend/model attribution, the translated request payload, the accumulated structured assistant response shape, and timing/status/error metadata
+- logging-write failures degrade gracefully and surface a bounded local warning instead of crashing the session
+- the toggle follows the current TUI session and is threaded into rebuilt interactive agents such as profile switches or post-login agent recreation
+
 ### Codex Responses backend (`client_codex.rs`)
 
 Codex uses the OpenAI Responses API rather than Chat Completions. Its stream consists of named SSE events such as `response.output_text.delta` and `response.completed`. The parser accumulates `event:` and `data:` lines until a blank-line frame boundary, then updates the in-flight response state. Text deltas stream to the UI immediately; usage is taken from the completion event.

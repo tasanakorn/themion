@@ -37,12 +37,12 @@ pub struct FunctionCall {
     pub arguments: String,
 }
 
-#[derive(Debug, Deserialize, Default, Clone)]
+#[derive(Debug, Deserialize, Default, Clone, Serialize)]
 pub struct UsageDetails {
     pub cached_tokens: Option<u64>,
 }
 
-#[derive(Debug, Deserialize, Default, Clone)]
+#[derive(Debug, Deserialize, Default, Clone, Serialize)]
 pub struct Usage {
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
@@ -60,11 +60,22 @@ pub struct Choice {
     pub message: ResponseMessage,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone, Serialize)]
 pub struct ResponseMessage {
     pub role: String,
     pub content: Option<String>,
     pub tool_calls: Option<Vec<ToolCall>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatRoundTrace {
+    pub backend: String,
+    pub request: Value,
+    pub response: Option<Value>,
+    pub error: Option<String>,
+    pub http_status: Option<u16>,
+    pub usage: Option<Usage>,
+    pub rate_limits: Option<ApiCallRateLimitReport>,
 }
 
 #[derive(Deserialize, Default)]
@@ -105,6 +116,15 @@ struct ToolCallAccum {
 
 #[async_trait::async_trait]
 pub trait ChatBackend: Send + Sync {
+    fn backend_name(&self) -> &'static str;
+
+    fn build_round_request_payload(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &Value,
+    ) -> Value;
+
     async fn chat_completion_stream(
         &self,
         model: &str,
@@ -116,6 +136,7 @@ pub trait ChatBackend: Send + Sync {
         ResponseMessage,
         Option<Usage>,
         Option<ApiCallRateLimitReport>,
+        ChatRoundTrace,
     )>;
 
     async fn fetch_model_info(&self, model: &str) -> Result<Option<ModelInfo>> {
@@ -209,6 +230,7 @@ impl ChatClient {
         ResponseMessage,
         Option<Usage>,
         Option<ApiCallRateLimitReport>,
+        ChatRoundTrace,
     )> {
         let body = serde_json::json!({
             "model": model,
@@ -219,11 +241,11 @@ impl ChatClient {
         });
 
         let mut response = self.build_request(&body).send().await?;
+        let response_status = response.status();
 
-        if !response.status().is_success() {
-            let status = response.status();
+        if !response_status.is_success() {
             let text = response.text().await?;
-            anyhow::bail!("API error {status}: {text}");
+            anyhow::bail!("API error {response_status}: {text}");
         }
 
         let mut buf: Vec<u8> = Vec::new();
@@ -339,13 +361,41 @@ impl ChatClient {
             },
             tool_calls,
         };
+        let trace = ChatRoundTrace {
+            backend: "chat_completions".to_string(),
+            request: body,
+            response: Some(serde_json::to_value(&message)?),
+            error: None,
+            http_status: Some(response_status.as_u16()),
+            usage: usage.clone(),
+            rate_limits: None,
+        };
 
-        Ok((message, usage, None))
+        Ok((message, usage, None, trace))
     }
 }
 
 #[async_trait::async_trait]
 impl ChatBackend for ChatClient {
+    fn backend_name(&self) -> &'static str {
+        "chat_completions"
+    }
+
+    fn build_round_request_payload(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &Value,
+    ) -> Value {
+        serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+            "stream": true,
+            "stream_options": { "include_usage": true },
+        })
+    }
+
     async fn chat_completion_stream(
         &self,
         model: &str,
@@ -357,6 +407,7 @@ impl ChatBackend for ChatClient {
         ResponseMessage,
         Option<Usage>,
         Option<ApiCallRateLimitReport>,
+        ChatRoundTrace,
     )> {
         self.chat_completion_stream(model, messages, tools, on_chunk, should_cancel.as_deref())
             .await

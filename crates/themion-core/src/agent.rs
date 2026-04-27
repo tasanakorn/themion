@@ -1,5 +1,5 @@
 use crate::agents_md;
-use crate::client::{ChatBackend, Message, ModelInfo};
+use crate::client::{ChatBackend, ChatRoundTrace, Message, ModelInfo};
 use crate::codex_cli_instruction::CODEX_CLI_WEB_SEARCH_INSTRUCTION;
 use crate::db::DbHandle;
 use crate::predefined_guardrails::PREDEFINED_GUARDRAILS;
@@ -11,7 +11,7 @@ use crate::workflow::{
     DEFAULT_PHASE, DEFAULT_WORKFLOW, LITE_WORKFLOW,
 };
 use anyhow::Result;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -91,6 +91,21 @@ pub struct Agent {
     #[cfg(feature = "stylos")]
     stylos_tool_invoker: Option<crate::tools::StylosToolInvoker>,
     system_inspection: Option<crate::tools::SystemInspectionResult>,
+    api_log_enabled: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ApiRoundLogArtifact {
+    pub session_id: String,
+    pub project_dir: String,
+    pub turn: u32,
+    pub round: u32,
+    pub provider: Option<String>,
+    pub backend: String,
+    pub model: String,
+    pub request: Value,
+    pub response: Option<Value>,
+    pub meta: Value,
 }
 
 impl Agent {
@@ -122,6 +137,7 @@ impl Agent {
             #[cfg(feature = "stylos")]
             stylos_tool_invoker: None,
             system_inspection: None,
+            api_log_enabled: false,
         }
     }
 
@@ -182,6 +198,7 @@ impl Agent {
             #[cfg(feature = "stylos")]
             stylos_tool_invoker: None,
             system_inspection: None,
+            api_log_enabled: false,
         }
     }
 
@@ -194,6 +211,90 @@ impl Agent {
         inspection: Option<crate::tools::SystemInspectionResult>,
     ) {
         self.system_inspection = inspection;
+    }
+
+    pub fn set_api_log_enabled(&mut self, enabled: bool) {
+        self.api_log_enabled = enabled;
+    }
+
+    fn build_api_round_log_artifact(
+        &self,
+        turn_seq: u32,
+        round: u32,
+        started_at_ms: u64,
+        finished_at_ms: u64,
+        trace: ChatRoundTrace,
+    ) -> ApiRoundLogArtifact {
+        let outcome = if trace.error.is_some() { "failed" } else { "ok" };
+        ApiRoundLogArtifact {
+            session_id: self.session_id.to_string(),
+            project_dir: self.project_dir.display().to_string(),
+            turn: turn_seq,
+            round,
+            provider: self.provider.clone(),
+            backend: trace.backend.clone(),
+            model: self.model.clone(),
+            request: trace.request,
+            response: trace.response,
+            meta: json!({
+                "started_at_ms": started_at_ms,
+                "finished_at_ms": finished_at_ms,
+                "duration_ms": finished_at_ms.saturating_sub(started_at_ms),
+                "http_status": trace.http_status,
+                "outcome": outcome,
+                "error": trace.error,
+                "usage": trace.usage,
+                "rate_limits": trace.rate_limits,
+            }),
+        }
+    }
+
+    fn write_api_round_log(&self, artifact: &ApiRoundLogArtifact) -> Result<()> {
+        let turn_dir = std::env::temp_dir()
+            .join("themion")
+            .join(&artifact.session_id)
+            .join(artifact.turn.to_string());
+        std::fs::create_dir_all(&turn_dir)?;
+        let path = turn_dir.join(format!("round_{}.json", artifact.round));
+        let body = serde_json::to_vec_pretty(artifact)?;
+        std::fs::write(path, body)?;
+        Ok(())
+    }
+
+    fn write_api_round_log_if_enabled(&self, artifact: ApiRoundLogArtifact) {
+        if let Err(err) = self.write_api_round_log(&artifact) {
+            self.emit_status(format!(
+                "warning: failed to write api log round {}: {}",
+                artifact.round, err
+            ));
+        }
+    }
+
+    fn build_failed_api_round_log_artifact(
+        &self,
+        turn_seq: u32,
+        round: u32,
+        started_at_ms: u64,
+        finished_at_ms: u64,
+        backend: &str,
+        request: Value,
+        error: &anyhow::Error,
+    ) -> ApiRoundLogArtifact {
+        self.build_api_round_log_artifact(
+            turn_seq,
+            round,
+            started_at_ms,
+            finished_at_ms,
+            ChatRoundTrace {
+                backend: backend.to_string(),
+                request,
+                response: None,
+                error: Some(error.to_string()),
+                http_status: None,
+                usage: None,
+                rate_limits: None,
+            },
+        )
     }
 
     #[cfg(feature = "stylos")]
@@ -830,6 +931,7 @@ impl Agent {
         let mut final_response = String::new();
 
         let mut llm_rounds = 0u32;
+        let mut round_index = 0u32;
         let mut tool_calls = 0u32;
         let mut tokens_in = 0u64;
         let mut tokens_out = 0u64;
@@ -929,8 +1031,19 @@ impl Agent {
             msgs_with_system.extend_from_slice(&self.messages[window_start..]);
 
             self.emit(AgentEvent::LlmStart);
+            round_index += 1;
+            let round_started_at_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
             let event_tx = self.event_tx.clone();
             let cancellation_for_stream = cancellation.clone();
+            let backend_name = self.client.backend_name();
+            let request_payload = self.client.build_round_request_payload(
+                &self.model,
+                &msgs_with_system,
+                &tool_defs,
+            );
             let response_result = self
                 .client
                 .chat_completion_stream(
@@ -955,7 +1068,7 @@ impl Agent {
                 )
                 .await;
 
-            let (response, usage, rate_limit_report) = match response_result {
+            let (response, usage, rate_limit_report, round_trace) = match response_result {
                 Ok(v) => v,
                 Err(err)
                     if cancellation.as_ref().is_some_and(|c| c.is_interrupted())
@@ -965,8 +1078,41 @@ impl Agent {
                     turn_end_reason = "interrupted".to_string();
                     break;
                 }
-                Err(err) => return Err(err),
+                Err(err) => {
+                    let round_finished_at_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(round_started_at_ms);
+                    if self.api_log_enabled {
+                        let artifact = self.build_failed_api_round_log_artifact(
+                            turn_seq,
+                            round_index,
+                            round_started_at_ms,
+                            round_finished_at_ms,
+                            &backend_name,
+                            request_payload.clone(),
+                            &err,
+                        );
+                        self.write_api_round_log_if_enabled(artifact);
+                    }
+                    return Err(err);
+                }
             };
+
+            let round_finished_at_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(round_started_at_ms);
+            if self.api_log_enabled {
+                let artifact = self.build_api_round_log_artifact(
+                    turn_seq,
+                    round_index,
+                    round_started_at_ms,
+                    round_finished_at_ms,
+                    round_trace,
+                );
+                self.write_api_round_log_if_enabled(artifact);
+            }
 
             if let Some(report) = rate_limit_report {
                 if let Ok(text) = serde_json::to_string(&report) {

@@ -654,6 +654,7 @@ pub struct App {
     stream_chars: u64,
     status_rate_limits: Option<ApiCallRateLimitReport>,
     status_model_info: Option<ModelInfo>,
+    api_log_enabled: bool,
     process_started_at: Instant,
     process_started_at_ms: u64,
     background_domain: DomainHandle,
@@ -699,6 +700,7 @@ impl App {
             #[cfg(feature = "stylos")]
             "main",
             None,
+            false,
         )
         .expect("failed to build agent");
         let initial_model_info = session.model_info.clone();
@@ -802,6 +804,7 @@ impl App {
             stream_chars: 0,
             status_rate_limits: None,
             status_model_info: initial_model_info,
+            api_log_enabled: false,
             process_started_at: Instant::now(),
             process_started_at_ms: unix_epoch_now_ms(),
             background_domain,
@@ -1634,6 +1637,30 @@ impl App {
             return self.debug_runtime_lines();
         }
 
+        if input == "/debug api-log enable" {
+            self.api_log_enabled = true;
+            if let Some(handle) = self.agents.iter_mut().find(|h| is_interactive_handle(h)) {
+                if let Some(agent) = handle.agent.as_mut() {
+                    agent.set_api_log_enabled(true);
+                }
+            }
+            return vec!["API call logging enabled for this session".to_string()];
+        }
+
+        if input == "/debug api-log disable" {
+            self.api_log_enabled = false;
+            if let Some(handle) = self.agents.iter_mut().find(|h| is_interactive_handle(h)) {
+                if let Some(agent) = handle.agent.as_mut() {
+                    agent.set_api_log_enabled(false);
+                }
+            }
+            return vec!["API call logging disabled for this session".to_string()];
+        }
+
+        if let Some(rest) = input.strip_prefix("/debug api-log ") {
+            return vec![format!("usage: /debug api-log <enable|disable>  (got '{}')", rest.trim())];
+        }
+
         if input == "/semantic-memory index" || input == "/semantic-memory reindex" {
             #[cfg(not(feature = "semantic-memory"))]
             {
@@ -1806,6 +1833,7 @@ impl App {
                             #[cfg(feature = "stylos")]
                             "main",
                             None,
+                            self.api_log_enabled,
                         ) {
                             Ok(new_agent) => {
                                 let db = self.db.clone();
@@ -1880,6 +1908,8 @@ impl App {
                 _ => {
                     out.push("commands:".to_string());
                     out.push("  /debug runtime                   show Themion process/thread/task activity".to_string());
+                    out.push("  /debug api-log enable            enable per-round API call logging for this session".to_string());
+                    out.push("  /debug api-log disable           disable per-round API call logging for this session".to_string());
                     out.push("  /semantic-memory index           build missing or pending semantic indexes".to_string());
                     out.push("  /semantic-memory index full      rebuild all stale or missing semantic indexes".to_string());
                     out.push(
@@ -1902,7 +1932,7 @@ impl App {
         }
 
         out.push(format!(
-            "unknown command '{}'.  try /config, /debug runtime, or /semantic-memory index",
+            "unknown command '{}'.  try /config, /debug runtime, /debug api-log enable, or /semantic-memory index",
             input
         ));
         out
@@ -2453,6 +2483,7 @@ impl App {
                     #[cfg(feature = "stylos")]
                     "main",
                     None,
+                    self.api_log_enabled,
                 ) {
                     Ok(mut new_agent) => {
                         new_agent.refresh_model_info().await;

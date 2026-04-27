@@ -348,6 +348,19 @@ Current behavior:
 
 This keeps persistence and board state durable while still reusing the normal harness turn path for actual agent work.
 
+## Session-scoped API call logging
+
+`themion-cli` now also exposes a CLI-local `/debug api-log` command family for provider round tracing.
+
+Current behavior:
+
+- `/debug api-log enable` enables logging for the active session only
+- `/debug api-log disable` disables logging for the active session only
+- invalid arguments keep the session state unchanged and return usage feedback
+- when enabled, each provider round in the harness loop writes one JSON file under the system temp root, typically `/tmp/themion/<session_id>/<turn>/round_<n>.json` on Unix-like systems
+- the artifact captures the translated backend request payload, the final accumulated assistant response/tool-call shape, HTTP/timing metadata when available, usage data when available, and explicit error metadata when present
+- the harness treats trace-write failures as non-fatal and emits a bounded warning instead of aborting the session
+
 ## Runtime debug command
 
 `themion-cli` now exposes `/debug runtime` as a CLI-local diagnostic command.
