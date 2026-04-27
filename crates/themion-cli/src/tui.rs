@@ -1677,6 +1677,90 @@ impl<'a> App<'a> {
             return self.debug_runtime_lines();
         }
 
+        if input == "/semantic-memory index" || input == "/semantic-memory reindex" {
+            #[cfg(not(feature = "semantic-memory"))]
+            {
+                return vec![
+                    "semantic-memory indexing is unavailable in this build; enable the semantic-memory feature"
+                        .to_string(),
+                ];
+            }
+            #[cfg(feature = "semantic-memory")]
+            {
+                if self.agent_busy {
+                    return vec!["busy, please wait".to_string()];
+                }
+                self.agent_busy = true;
+                self.set_agent_activity(AgentActivity::RunningTool(
+                    "semantic-memory index pending".to_string(),
+                ));
+                self.push(Entry::Assistant(
+                    "indexing missing or pending Project Memory semantic embeddings…".to_string(),
+                ));
+                let tx = app_tx.clone();
+                let db = self.db.clone();
+                self.background_domain().spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        db.memory_store().index_pending_embeddings(false)
+                    })
+                    .await;
+                    let text = match result {
+                        Ok(Ok(report)) => serde_json::to_string_pretty(&report)
+                            .unwrap_or_else(|err| format!("indexing report serialization failed: {}", err)),
+                        Ok(Err(err)) => format!("semantic-memory indexing failed: {}", err),
+                        Err(err) => format!("semantic-memory indexing task failed: {}", err),
+                    };
+                    let _ = tx.send(AppEvent::ShellComplete {
+                        output: text,
+                        exit_code: Some(0),
+                    });
+                });
+                return out;
+            }
+        }
+
+        if input == "/semantic-memory index full" || input == "/semantic-memory reindex full" {
+            #[cfg(not(feature = "semantic-memory"))]
+            {
+                return vec![
+                    "semantic-memory indexing is unavailable in this build; enable the semantic-memory feature"
+                        .to_string(),
+                ];
+            }
+            #[cfg(feature = "semantic-memory")]
+            {
+                if self.agent_busy {
+                    return vec!["busy, please wait".to_string()];
+                }
+                self.agent_busy = true;
+                self.set_agent_activity(AgentActivity::RunningTool(
+                    "semantic-memory full reindex".to_string(),
+                ));
+                self.push(Entry::Assistant(
+                    "rebuilding all stale or missing Project Memory semantic embeddings…".to_string(),
+                ));
+                let tx = app_tx.clone();
+                let db = self.db.clone();
+                self.background_domain().spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        db.memory_store().index_pending_embeddings(true)
+                    })
+                    .await;
+                    let text = match result {
+                        Ok(Ok(report)) => serde_json::to_string_pretty(&report)
+                            .unwrap_or_else(|err| format!("indexing report serialization failed: {}", err)),
+                        Ok(Err(err)) => format!("semantic-memory full reindex failed: {}", err),
+                        Err(err) => format!("semantic-memory full reindex task failed: {}", err),
+                    };
+                    let _ = tx.send(AppEvent::ShellComplete {
+                        output: text,
+                        exit_code: Some(0),
+                    });
+                });
+                return out;
+            }
+        }
+
         if input == "/clear" {
             if let Some(handle) = self.agents.iter_mut().find(|h| is_interactive_handle(h)) {
                 if let Some(agent) = handle.agent.as_mut() {
@@ -1839,6 +1923,8 @@ impl<'a> App<'a> {
                 _ => {
                     out.push("commands:".to_string());
                     out.push("  /debug runtime                   show Themion process/thread/task activity".to_string());
+                    out.push("  /semantic-memory index           build missing or pending semantic indexes".to_string());
+                    out.push("  /semantic-memory index full      rebuild all stale or missing semantic indexes".to_string());
                     out.push(
                         "  /config                          show current settings".to_string(),
                     );
@@ -1859,7 +1945,7 @@ impl<'a> App<'a> {
         }
 
         out.push(format!(
-            "unknown command '{}'.  try /config or /debug runtime",
+            "unknown command '{}'.  try /config, /debug runtime, or /semantic-memory index",
             input
         ));
         out

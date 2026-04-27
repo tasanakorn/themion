@@ -303,6 +303,8 @@ History and note persistence currently use these main tables:
 - `memory_nodes` — Project Memory knowledge-base nodes for concepts, components, files, tasks, decisions, facts, observations, troubleshooting records, people, and occasional narrative memory records; each row includes a `project_dir` context
 - `memory_node_hashtags` — normalized hashtag labels for memory nodes
 - `memory_edges` — typed directed links between knowledge-base nodes
+- `memory_node_embeddings` — feature-gated local semantic embeddings for Project Memory nodes, stored as embedding-model-tagged little-endian `f32` blobs plus source/index timestamps
+- `memory_embedding_queue` — feature-gated pending-index bookkeeping for nodes that need initial embedding generation or refresh after updates
 
 Machine-consumed note timestamps use explicit milliseconds fields such as `created_at_ms`, `updated_at_ms`, `injected_at_ms`, `completion_notified_at_ms`, and `blocked_until_ms`.
 
@@ -318,7 +320,7 @@ The model-visible tool family is:
 - `memory_update_node` — update node fields and replace hashtags when provided
 - `memory_link_nodes` / `memory_unlink_nodes` — add or remove typed directed graph edges
 - `memory_get_node` — read one node with immediate incoming and outgoing links
-- `memory_search` — search by title/content FTS query, hashtags, node type, optional `project_dir`, and optional relation filters
+- `memory_search` — search by explicit retrieval `mode` (`fts` or feature-gated `semantic`), query text, hashtags, node type, optional `project_dir`, and optional relation filters
 - `memory_open_graph` — return a bounded local neighborhood around one or more anchor nodes
 - `memory_delete_node` — delete a node and its hashtag/edge rows
 - `memory_list_hashtags` — inspect frequently used labels in the selected Project Memory context

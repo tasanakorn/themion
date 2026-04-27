@@ -1,11 +1,12 @@
 [package]
 name = "themion-core"
-version = "0.36.0"
+version = "0.37.0"
 edition = "2021"
 
 [features]
 default = []
 stylos = []
+semantic-memory = ["dep:fastembed"]
 
 [dependencies]
 async-trait.workspace = true
@@ -19,3 +20,4 @@ tokio.workspace = true
 rusqlite.workspace = true
 uuid.workspace = true
 chrono = { version = "0.4", default-features = true, features = ["clock"] }
+fastembed = { workspace = true, optional = true }

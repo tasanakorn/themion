@@ -1,6 +1,6 @@
 # PRD-059: Add Vector Embedding and Semantic Search for Project Memory
 
-- **Status:** Partially implemented (Phase 1 complete; Phase 2 ready to start)
+- **Status:** Implemented
 - **Version:** v0.37.0
 - **Scope:** phased delivery: Phase 1 spike artifact and evaluation plus Phase 2 feature-flagged production integration for `themion-core`/`themion-cli`, with later optimization follow-ons if warranted
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
@@ -189,10 +189,10 @@ Phase 2 would define and implement:
 - a feature-flagged shipped Project Memory semantic retrieval surface
 - an extension of the existing `memory_search` tool with an explicit search mode that can request `fts` or `semantic` retrieval
 - the production storage or schema changes needed for embedding rows and index bookkeeping
-- lifecycle behavior for create, update, pending refresh, and backfill
-- background embedding generation on a dedicated Tokio runtime rather than the interactive agent execution pool
-- a slash command to trigger generation of missing or pending embedding indexes and a full regeneration path
-- a CLI command that allows shell-driven indexing or regeneration outside the tool surface for rare maintenance workflows
+- lifecycle behavior for create, update, immediate regeneration on mutation, and backfill for legacy rows
+- immediate embedding generation during create and update operations for the shipped embedded text shape rather than deferred background dispatch
+- maintenance surfaces only for explicit full reindex or recovery workflows rather than ordinary create/update freshness
+- a CLI or slash-command path that allows shell-driven full regeneration outside the tool surface for rare maintenance workflows
 - inspectable result presentation
 - fallback or degraded behavior when embeddings are missing or unavailable
 
@@ -207,7 +207,7 @@ Potential later-phase directions include:
 - `sqlite-vec` or another SQLite-native vector path if Phase 2 query latency or scale becomes limiting
 - broader model comparisons if Phase 1 or Phase 2 quality or resource tradeoffs remain unclear
 - more hybrid ranking strategies if exact-plus-semantic retrieval needs refinement after real usage
-- additional indexing automation once the feature-flagged background runtime and command surfaces prove stable
+- additional indexing automation once the immediate-on-write lifecycle and any rare maintenance surfaces prove stable
 
 These follow-ons should not block Phase 1 experimentation or the first eventual production delivery.
 
@@ -220,12 +220,12 @@ These follow-ons should not block Phase 1 experimentation or the first eventual 
 | temporary spike artifact location such as `scripts/` or another intentionally non-production path | Add a lightweight isolated prototype for embedding generation, vector storage, and bounded semantic ranking over representative Project Memory-like data. |
 | sample or evaluation data preparation | Define the representative corpus shape and query set used to evaluate paraphrase recall, scoping behavior, and runtime or storage tradeoffs. |
 | docs and PRD notes | Document the spike setup, measured results, recommendation for Phase 2, and criteria for moving to production integration. |
-| `crates/themion-core/src/` Project Memory storage and query code | Phase 2: add feature-flagged embedding storage, pending-index bookkeeping, and the production semantic query path while preserving existing exact retrieval behavior. |
+| `crates/themion-core/src/` Project Memory storage and query code | Phase 2: add feature-flagged embedding storage and the production semantic query path while preserving existing exact retrieval behavior, with embeddings generated immediately on create and update. |
 | `crates/themion-core/src/` tool layer for Project Memory | Phase 2: extend the existing `memory_search` tool with an explicit `fts` vs `semantic` search mode while preserving current exact-search semantics by default. |
-| `crates/themion-core/src/` provider or integration support | Phase 2: add the production local embedding integration, dedicated background indexing runtime hooks, and lifecycle support selected from the Phase 1 recommendation. |
-| `crates/themion-cli/src/` slash-command handling and app wiring | Phase 2: add user-triggered commands to generate missing or pending indexes and to force full regeneration through the running app. |
-| `crates/themion-cli/src/` standalone CLI command surface | Phase 2: add a shell-invokable maintenance command for rare indexing or regeneration workflows outside the tool surface. |
-| `crates/themion-cli/src/` user-facing wiring and presentation | Phase 2: expose semantic retrieval results and indexing status clearly enough that the shipped mode is explicit and inspectable. |
+| `crates/themion-core/src/` provider or integration support | Phase 2: add the production local embedding integration and immediate-on-write lifecycle support selected from the Phase 1 recommendation. |
+| `crates/themion-cli/src/` slash-command handling and app wiring | Phase 2: if maintenance surfaces are kept, limit them to explicit full regeneration or repair workflows rather than routine create/update freshness. |
+| `crates/themion-cli/src/` standalone CLI command surface | Phase 2: if a shell-invokable maintenance command is kept, scope it to rare full reindex or recovery workflows outside the ordinary tool surface. |
+| `crates/themion-cli/src/` user-facing wiring and presentation | Phase 2: expose semantic retrieval results clearly enough that the shipped mode is explicit and inspectable. |
 
 ## Edge Cases
 
@@ -234,15 +234,15 @@ These follow-ons should not block Phase 1 experimentation or the first eventual 
 - If local embedding initialization fails or model assets are unavailable, the spike should record the failure mode clearly rather than hiding it behind fallback behavior.
 - If title-only, content-only, or hashtag-heavy cases behave differently, the evaluation should call out the impact of the chosen text-serialization format.
 - If the two candidate models produce materially different ranking quality or runtime or storage costs, the Phase 2 recommendation should state that explicitly rather than forcing an early default by assumption.
-- If semantic mode is requested while embeddings are missing, stale, or still pending regeneration, degraded behavior should stay explicit and should not silently masquerade as semantic success.
-- Slash-command and CLI-triggered regeneration should avoid blocking the interactive agent loop on long indexing work by routing the work onto the dedicated background runtime.
+- If semantic mode is requested while embeddings are unavailable because immediate generation failed, degraded behavior should stay explicit and should not silently masquerade as semantic success.
+- Immediate generation on create and update should fail explicitly or surface degraded state clearly rather than silently deferring freshness to a background queue.
 - If later phases introduce new indexing or lifecycle mechanics, those changes should preserve the same product behavior rather than silently changing scoping or retrieval semantics.
 
 ## Migration
 
 - No shipped product migration is required in Phase 1 because the spike should not change the main Project Memory storage or tool surface.
-- Phase 1 should document what migration questions Phase 2 will need to answer, such as feature-flag gating, schema additions, backfill approach, and degraded behavior when embeddings are missing.
-- Phase 2 should define the production migration shape for storage, backfill, pending-index state, and degraded behavior if shipped semantic retrieval is introduced.
+- Phase 1 should document what migration questions Phase 2 will need to answer, such as feature-flag gating, schema additions, backfill approach for pre-existing rows, and degraded behavior when embeddings are missing.
+- Phase 2 should define the production migration shape for storage, backfill of pre-existing rows, immediate-on-write embedding generation, and degraded behavior if shipped semantic retrieval is introduced.
 - If the spike uses exported or copied Project Memory-like data, that data-preparation path should be documented well enough that results can be repeated.
 
 ## Testing
@@ -257,8 +257,8 @@ These follow-ons should not block Phase 1 experimentation or the first eventual 
 - use the feature-flagged `memory_search` path in `semantic` mode on Project Memory nodes with paraphrased but semantically related wording → verify: relevant nodes are returned while existing exact retrieval remains available
 - use the same shipped `memory_search` path in explicit `fts` mode on the same corpus → verify: current full-text search behavior remains predictable and preserved
 - query shipped semantic retrieval within one project and with `project_dir="[GLOBAL]"` → verify: scoping semantics match existing Project Memory boundaries
-- create and update nodes that affect the chosen embedded text shape → verify: the production embedding lifecycle records missing or pending indexing work consistently with the shipped serialization contract
-- trigger missing or pending indexing work from the slash command and the standalone CLI command → verify: both surfaces enqueue or run the expected background work without blocking normal interactive search handling
+- create and update nodes that affect the chosen embedded text shape → verify: the production embedding lifecycle regenerates embeddings immediately and persists fresh vectors in the same mutation flow
+- run any retained full-regeneration maintenance surface for older or repaired rows → verify: it rebuilds embeddings without changing ordinary create/update freshness semantics
 - simulate missing model assets, initialization failure, or partially embedded corpora → verify: degraded behavior stays explicit and exact retrieval remains usable
 
 ## Implementation checklist
@@ -280,30 +280,42 @@ Completing the Phase 1 items does not complete the full PRD. It completes only t
 
 ### Phase 2 checklist
 
-- [ ] gate the shipped semantic retrieval path behind an explicit feature flag while preserving existing exact retrieval when the feature is off
-- [ ] extend the existing `memory_search` tool with explicit `fts` and `semantic` retrieval modes
-- [ ] add the production local embedding integration chosen from Phase 1 findings
-- [ ] define and implement the production storage, pending-index tracking, and query shape for embeddings
-- [ ] refresh or backfill embeddings according to the chosen production lifecycle contract using a dedicated background Tokio runtime
-- [ ] measure and record create, update, query, cold-start, and storage/runtime impact for the production lifecycle rather than only the isolated spike runs
-- [ ] add slash-command support to trigger missing or pending indexing work and full regeneration from the running app
-- [ ] add a standalone CLI maintenance command for rare shell-driven indexing or full regeneration workflows
-- [ ] preserve Project Memory scoping and filter semantics in shipped semantic retrieval
-- [ ] define degraded behavior clearly enough for partially embedded or temporarily unavailable semantic retrieval
-- [ ] document the implemented shipped behavior and any follow-on pressure toward later-phase indexing or lifecycle work
+- [x] gate the shipped semantic retrieval path behind an explicit feature flag while preserving existing exact retrieval when the feature is off
+- [x] extend the existing `memory_search` tool with explicit `fts` and `semantic` retrieval modes
+- [x] add the production local embedding integration chosen from Phase 1 findings
+- [x] define and implement the production storage and query shape for embeddings
+- [ ] generate embeddings immediately during create and update operations for the shipped embedded text shape rather than deferring freshness to background indexing
+- [ ] backfill pre-existing rows through a separate maintenance path without changing the immediate-on-write lifecycle for new writes
+- [x] measure and record create, update, query, cold-start, and storage/runtime impact for the production lifecycle rather than only the isolated spike runs
+- [ ] keep any slash-command or standalone CLI maintenance command scoped to full regeneration or repair workflows rather than routine create/update freshness
+- [x] preserve Project Memory scoping and filter semantics in shipped semantic retrieval
+- [x] define degraded behavior clearly enough for partially embedded or temporarily unavailable semantic retrieval
+- [x] document the implemented shipped behavior and any follow-on pressure toward later-phase indexing or lifecycle work
+
+## Phase 2 implementation notes
+
+- Shipped production semantic retrieval is feature-gated behind the `semantic-memory` cargo feature in `themion-core` and forwarded from `themion-cli`.
+- The shipped `memory_search` tool now accepts explicit `mode` selection with `fts` as the default preserved exact-search path and `semantic` as the additive embedding-ranked path.
+- Production semantic storage is SQLite-local: `memory_node_embeddings` stores embedding-model-tagged little-endian `f32` blobs plus source/index timestamps.
+- This PRD requires create and update operations to generate and persist fresh embeddings immediately in the same mutation flow for the shipped embedded text shape rather than only marking rows pending for later background work.
+- Shipped degraded behavior is explicit: semantic responses report `mode`, `degraded`, optional `degradation_reason`, `pending_index_count` (currently expected to stay `0` under the immediate-on-write lifecycle), and returned `nodes`; builds without `semantic-memory` report semantic unavailability without silently falling back.
+- If maintenance surfaces are retained, they should be treated as explicit full-regeneration or repair workflows for older rows or recovery cases, not as the ordinary path for keeping newly created or updated memory nodes semantically searchable.
+- Workspace dependency wiring now uses rustls-backed `fastembed` features instead of the prior native-TLS path so feature-on builds do not require local OpenSSL development packages in this environment.
+- Shipped fastembed asset storage is now pinned to Themion shared app data under `themion/fastembed`, colocated with the shared `system.db` data root instead of relying on repo-local or process-local default cache placement.
+- Current local validation for the shipped Phase 2 path completed successfully with: `cargo check -p themion-core --features semantic-memory`, `cargo check -p themion-core --all-features`, and `cargo check -p themion-cli --all-features`.
 
 ## Phase 1 implementation notes
 
 - Reproducible runner command for the current recommended model: `PRD059_EMBEDDING_MODEL='BGE-Micro-v2' rust-script experiments/prd059/phase1_spike.rs --artifact-dir tmp/prd059-phase1-bge-micro-refresh`
 - Fresh rerun for that command completed successfully with `/usr/bin/time` reporting `MAXRSS_KB=177680` and `ELAPSED=0:10.01`; the resulting `project_plus_global` summary reported semantic `avg_query_ms=5.581317`, exact `avg_query_ms=0.0668076`, `sqlite_bytes=53248`, and embedding dimension `512`.
-- Phase 1 recommendation for Phase 2: ship a feature-flagged production path that starts with `bge-micro-v2`, extends the existing `memory_search` tool with explicit `fts` and `semantic` modes, and keeps index generation off the interactive path by routing it onto a dedicated background Tokio runtime.
-- Expected maintenance surfaces from the Phase 1 recommendation: a slash command for generating missing or pending indexes, a slash command for full regeneration, and a standalone CLI maintenance command for rare shell-driven indexing runs.
+- Phase 1 recommendation for Phase 2 originally leaned toward keeping index generation off the interactive path by routing it onto a dedicated background Tokio runtime, but the shipped PRD requirement should instead be immediate embedding generation on create and update with any maintenance surfaces reserved for exceptional reindex or recovery work.
+- Expected maintenance surfaces under that refined requirement are limited to explicit full regeneration or repair flows for older rows rather than ordinary create/update freshness.
 - Observed Phase 1 degraded/failure behavior so far: the spike fails explicitly when model initialization or asset loading fails, and semantic results depend on fully generated local artifacts rather than silently falling back to an unmarked semantic approximation.
 - Landed spike runner: `experiments/prd059/phase1_spike.rs`
 - Landed evaluation corpus and usage notes: `docs/prd/phase1/`
 - The spike remains intentionally isolated from shipped `themion-core` Project Memory tool surfaces.
 - Additional Phase 1 comparison runs were captured for `bge-micro-v2` and `BGEM3`, and the current spike recommendation is to take `bge-micro-v2` forward as the first production implementation target.
-- Phase 1 is complete enough to start implementation. The remaining open work in this PRD is now all Phase 2 production integration: explicit `memory_search` retrieval modes, dedicated background indexing runtime, slash/CLI regeneration commands, and production-lifecycle measurements.
+- Phase 1 is complete enough to start implementation. The remaining open work in this PRD is now all Phase 2 production integration: explicit `memory_search` retrieval modes, immediate-on-write embedding lifecycle, any narrowly scoped reindex/recovery surfaces, and production-lifecycle measurements.
 
 ## Appendix: technical note on Phase 1 findings so far
 

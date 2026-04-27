@@ -186,10 +186,11 @@ fn memory_tool_definitions() -> Vec<Value> {
             "properties":{"node_id":{"type":"string"}},
             "required":["node_id"]
         })),
-        memory_tool("memory_search", "Search Project Memory knowledge-base nodes by FTS keyword query, hashtags, node type, project context, and optional relation filters. Defaults to the current project_dir only; use exact [GLOBAL] to search Global Knowledge only. Project searches do not silently include Global Knowledge.", json!({
+        memory_tool("memory_search", "Search Project Memory knowledge-base nodes by explicit retrieval mode, query/filter fields, project context, and optional relation filters. Defaults to fts mode in the current project_dir only; use exact [GLOBAL] to search Global Knowledge only. Project searches do not silently include Global Knowledge.", json!({
             "type":"object",
             "properties":{
-                "query":{"type":"string","description":"FTS5 query over title/content. If FTS5 is unavailable, other filters still work."},
+                "query":{"type":"string","description":"Query text for retrieval. In fts mode this is an FTS5 query over title/content; in semantic mode this is the semantic search text."},
+                "mode":{"type":"string","enum":["fts","semantic"],"description":"Retrieval mode. Defaults to fts. semantic is only available when Themion is built with semantic-memory support."},
                 "project_dir":{"type":"string","description":"Optional Project Memory context. Defaults to current project_dir only. Use exact [GLOBAL] for Global Knowledge only; it is virtual and not a filesystem path."},
                 "hashtags":{"type":"array","items":{"type":"string"}},
                 "hashtag_match":{"type":"string","enum":["any","all"],"description":"Defaults to any."},
@@ -1209,6 +1210,10 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 value => HashtagMatch::from_str(value)
                     .ok_or_else(|| anyhow::anyhow!("invalid hashtag_match"))?,
             };
+            let mode = match args["mode"].as_str().unwrap_or("fts") {
+                value => crate::memory::MemorySearchMode::from_str(value)
+                    .ok_or_else(|| anyhow::anyhow!("invalid memory search mode"))?,
+            };
             let nodes = ctx.db.memory_store().search_nodes(SearchNodesArgs {
                 query: args["query"].as_str().map(str::to_string),
                 project_dir: resolve_memory_project_dir(&args, ctx),
@@ -1218,6 +1223,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 relation_type: args["relation_type"].as_str().map(str::to_string),
                 linked_node_id: args["linked_node_id"].as_str().map(str::to_string),
                 limit: args["limit"].as_u64().map(|n| n as u32).unwrap_or(20),
+                mode,
             })?;
             Ok(serde_json::to_string(&nodes)?)
         }

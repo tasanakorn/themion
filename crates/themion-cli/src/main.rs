@@ -97,15 +97,19 @@ impl Session {
 fn print_usage(program_name: &str) {
     println!(
         "Usage:
-  {0}                     Start TUI mode
-  {0} --headless          Start long-running headless mode
-  {0} [--dir PATH] PROMPT Run one non-interactive prompt
-  {0} --help              Show this help
+  {0}                                Start TUI mode
+  {0} --headless                     Start long-running headless mode
+  {0} [--dir PATH] PROMPT            Run one non-interactive prompt
+  {0} --command semantic-memory index [--full] [--dir PATH]
+                                    Build missing/pending Project Memory semantic indexes
+  {0} --help                         Show this help
 
 Options:
-  --dir PATH   Override project directory
-  --headless   Start explicit long-running non-TUI mode
-  --help       Show this help",
+  --dir PATH    Override project directory
+  --headless    Start explicit long-running non-TUI mode
+  --command     Run an explicit non-prompt CLI command
+  --full        Rebuild semantic indexes for all stale or missing Project Memory nodes
+  --help        Show this help",
         program_name
     );
 }
@@ -125,9 +129,10 @@ fn main() -> anyhow::Result<()> {
 
     let cfg = Config::load()?;
 
-    let (project_dir_override, headless_mode, remaining_args) = {
+    let (project_dir_override, headless_mode, command_mode, remaining_args) = {
         let mut dir: Option<std::path::PathBuf> = None;
         let mut headless = false;
+        let mut command_mode = false;
         let mut rest = Vec::new();
         let mut i = 0;
         while i < args.len() {
@@ -138,13 +143,46 @@ fn main() -> anyhow::Result<()> {
                 }
             } else if args[i] == "--headless" {
                 headless = true;
+            } else if args[i] == "--command" {
+                command_mode = true;
             } else {
                 rest.push(args[i].clone());
             }
             i += 1;
         }
-        (dir, headless, rest)
+        (dir, headless, command_mode, rest)
     };
+
+    if command_mode {
+        if headless_mode {
+            anyhow::bail!("--command cannot be combined with --headless");
+        }
+        if let Some((force_full, rest_after_command)) = parse_semantic_memory_index_command(&remaining_args) {
+            if !rest_after_command.is_empty() {
+                anyhow::bail!("semantic-memory index does not accept extra arguments beyond --full");
+            }
+            #[cfg(not(feature = "semantic-memory"))]
+            {
+                let _ = force_full;
+                anyhow::bail!(
+                    "semantic-memory index requires building themion-cli with the semantic-memory feature"
+                );
+            }
+            #[cfg(feature = "semantic-memory")]
+            {
+                let app_runtime = AppState::for_headless(cfg, project_dir_override)?;
+                let runtime_domains = app_runtime.runtime_domains.clone();
+                return runtime_domains
+                    .background()
+                    .expect("background runtime available in headless mode")
+                    .block_on(headless_runner::run_semantic_memory_index(app_runtime, force_full));
+            }
+        }
+        anyhow::bail!(
+            "unknown command '{}'. Use --command semantic-memory index [--full]",
+            remaining_args.join(" ")
+        );
+    }
 
     if headless_mode {
         if !remaining_args.is_empty() {
@@ -175,4 +213,23 @@ fn main() -> anyhow::Result<()> {
         drop(runtime_domains);
         result
     }
+}
+
+fn parse_semantic_memory_index_command(args: &[String]) -> Option<(bool, Vec<String>)> {
+    let [domain, command, rest @ ..] = args else {
+        return None;
+    };
+    if domain != "semantic-memory" || command != "index" {
+        return None;
+    }
+    let mut force_full = false;
+    let mut trailing = Vec::new();
+    for arg in rest {
+        if arg == "--full" {
+            force_full = true;
+        } else {
+            trailing.push(arg.clone());
+        }
+    }
+    Some((force_full, trailing))
 }

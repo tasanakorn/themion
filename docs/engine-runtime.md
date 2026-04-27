@@ -56,7 +56,7 @@ Current phase-1 runtime domains:
 - `tui` — one-worker multi-thread runtime for TUI event intake, tick scheduling, frame scheduling, and TUI-side bridge tasks
 - `core` — multi-thread runtime for startup coordination, print-mode execution, and core harness orchestration paths
 - `network` — multi-thread runtime for long-lived Stylos networking tasks
-- `background` — reserved multi-thread runtime domain for lower-priority maintenance work in this phase
+- `background` — multi-thread runtime domain for lower-priority maintenance work such as Project Memory semantic index generation and CLI/TUI-triggered semantic reindex jobs
 
 Mode differences:
 
@@ -267,7 +267,10 @@ Current tool contracts:
 - `memory_link_nodes` accepts `from_node_id`, `to_node_id`, `relation_type`, and optional UUID `edge_id`. Both endpoint nodes must already exist.
 - `memory_unlink_nodes` removes an edge by `edge_id`, or by the exact `from_node_id`/`to_node_id`/`relation_type` tuple.
 - `memory_get_node` returns the node, including its `project_dir`, plus immediate `outgoing` and `incoming` edge arrays.
-- `memory_search` supports FTS5 keyword queries over title/content when FTS5 is available, project context filtering, hashtag filtering with `hashtag_match` of `any` or `all`, node type filtering, and optional relation filters. Omitted `project_dir` searches only the current session project; `[GLOBAL]` searches only Global Knowledge. If FTS5 is unavailable, non-keyword filters still work.
+- `memory_search` supports explicit `mode` selection. `mode="fts"` preserves current FTS5 keyword search over title/content when FTS5 is available, while `mode="semantic"` requests feature-gated embedding ranking over the same scoped and filtered candidate set. Semantic responses stay explicit and inspectable: they return the selected mode, `degraded` state, optional `degradation_reason`, `pending_index_count` (currently expected to stay `0` under the immediate-on-write lifecycle), and the matched `nodes`. Omitted `project_dir` searches only the current session project; `[GLOBAL]` searches only Global Knowledge. If FTS5 is unavailable, non-keyword filters still work in `fts` mode. If Themion is built without `semantic-memory`, semantic mode returns an explicit degraded response instead of silently changing behavior.
+- when the optional `semantic-memory` cargo feature is enabled, Project Memory persists embedding rows in `memory_node_embeddings`; create and update operations generate and store fresh embeddings in the same mutation flow rather than deferring freshness to a background queue
+- fastembed model/cache assets for semantic-memory now download into Themion shared app data under `themion/fastembed`, alongside the shared application data root that also contains `system.db`, so semantic model artifacts do not depend on repo-local cache placement
+- semantic indexing maintenance still has two user-facing triggers in `themion-cli`: slash commands `/semantic-memory index` and `/semantic-memory index full` inside the TUI, plus the standalone shell-invokable command `themion --command semantic-memory index [--full]`; under the immediate-on-write lifecycle these act as explicit repair or full-regeneration workflows rather than the ordinary path for newly created or updated nodes
 - `memory_open_graph` opens a bounded local neighborhood around `node_id` or `node_ids`; depth is clamped to 3 and node limit to 200.
 - `memory_delete_node` deletes one node and its directly owned hashtag and edge rows.
 - `memory_list_hashtags` returns hashtag usage counts for the selected project context, optionally by prefix. Omitted `project_dir` uses the current session project; `[GLOBAL]` lists only Global Knowledge tags.

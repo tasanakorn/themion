@@ -1,6 +1,6 @@
 [package]
 name = "themion-cli"
-version = "0.36.0"
+version = "0.37.0"
 edition = "2021"
 
 [[bin]]
@@ -17,6 +17,7 @@ stylos = [
     "dep:zenoh",
     "dep:serde_cbor",
 ]
+semantic-memory = ["themion-core/semantic-memory"]
 
 [dependencies]
 anyhow.workspace = true

@@ -99,7 +99,7 @@ impl RuntimeDomains {
     }
 
     pub fn for_print_mode() -> Result<Self> {
-        Self::build(false, false)
+        Self::build(false, true)
     }
 
     fn build(include_tui: bool, include_background: bool) -> Result<Self> {

@@ -69,6 +69,7 @@ When adding code:
 - Preserve streaming behavior and tool-call handling when editing client code.
 - Be careful with async trait/object boundaries; do not introduce unnecessary lifetime complexity.
 - This workspace uses feature flags; when editing feature-gated code, ensure both default builds and relevant opt-in feature builds still compile.
+- When validation is needed after code changes, check the narrowest useful target first, then also run an `--all-features` build for each touched crate before considering the task done.
 - Do not reference feature-gated modules, types, or helpers from always-on code paths unless the reference is guarded consistently.
 
 ## Tools and file edits
@@ -91,15 +92,18 @@ After code changes, run the narrowest useful validation first.
 Typical checks:
 
 - `cargo check -p themion-core -p themion-cli`
+- `cargo check --all-features -p themion-core -p themion-cli`
 - `cargo test -p themion-core`
 - `cargo test -p themion-cli`
 
 If you changed only one crate, prefer checking that crate first.
+Before considering the task complete, also run `cargo check --all-features` for each touched crate, even if the primary change was not feature-gated.
 If you changed feature-gated code or code that references feature-gated modules, also run the relevant feature-on and feature-off build checks for the affected crate.
 Typical feature checks for `themion-cli`:
 
 - `cargo check -p themion-cli`
 - `cargo check -p themion-cli --features stylos`
+- `cargo check -p themion-cli --all-features`
 
 ## When writing PRDs
 
@@ -163,7 +167,7 @@ When implementing an existing PRD, do not consider the task complete until you h
 - Keep debug and protocol text formats consistent across producers, consumers, and tests; if you choose a structured format, reuse it everywhere.
 - For low-level or debug-oriented message headers, prefer explicit `key=value` fields with a stable type tag such as `type=peer_message` rather than positional text.
 - If asked to commit, keep commits scoped unless the user explicitly requests committing all pending changes.
-- Feature-flag regressions are easy to miss; when touching gated code, verify the crate still builds with the feature enabled and disabled as relevant.
+- Feature-flag regressions are easy to miss; when touching gated code, verify the crate still builds with the feature enabled and disabled as relevant, and finish with an `--all-features` check for each touched crate.
 - When editing code, avoid leaving newly introduced warnings behind; either fix them in the touched area or call them out clearly if blocked.
 - When bumping crate versions, do not stop at editing `Cargo.toml`; explicitly check `git status` for `Cargo.lock` and include it in the same commit when it changed.
 - When implementing a PRD, automatically consider whether the work should include a version bump, and if the PRD already names a target version, treat bumping to that version as the default expectation.
