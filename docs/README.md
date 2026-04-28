@@ -74,3 +74,5 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-060 | [Replace `tui-textarea` with a Themion-Owned Composer Text Buffer Inspired by `codex-rs`](prd/prd-060-replace-tui-textarea-with-local-composer-buffer.md) | Implemented | v0.38.0 | `themion-cli`, docs |
 | PRD-061 | [Session-Level API Call Logging Toggle with Per-Round JSON Capture](prd/prd-061-session-level-api-call-logging-toggle.md) | Implemented | v0.39.0 | `themion-core`, `themion-cli`, docs |
 | PRD-062 | [Prompt Guidance for Summarizing Useful Tool-Learned Information into Chat](prd/prd-062-summarize-useful-tool-findings-into-chat.md) | Implemented | v0.40.0 | `themion-core`, docs |
+| PRD-063 | [Prefer `note_slug` in `board_move_note` User-Facing Chat Labels](prd/prd-063-prefer-note-slug-in-board-move-note-chat-labels.md) | Implemented | v0.40.1 | `themion-cli`, docs |
+| PRD-064 | [Core-Resolved Board Note Display Metadata for Tool-Call Labels](prd/prd-064-core-resolved-board-note-display-metadata-for-tool-call-labels.md) | Implemented | v0.40.1 | `themion-core`, `themion-cli`, docs |

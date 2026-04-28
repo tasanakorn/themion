@@ -245,7 +245,7 @@ Each call to `run_loop(user_input)`:
 4. Stream tokens to TUI via `AgentEvent::AssistantChunk`; accumulate full response.
 5. Push `role="assistant"` response to history; persist to `agent_messages`.
 6. If response has no `tool_calls` → break.
-7. For each tool call: emit `ToolStart` with raw tool name plus arguments JSON for the frontend to format, execute via `call_tool`, push `role="tool"` result; persist each.
+7. For each tool call: emit `ToolStart` with raw tool name plus raw arguments JSON and optional display-enriched arguments JSON for frontend formatting, execute via `call_tool`, push `role="tool"` result; persist each.
 8. Repeat from step 3 until the assistant returns with no more tool calls or another existing runtime stop condition ends the turn.
 9. Finalize the DB turn row with token stats; emit `TurnDone`.
 
@@ -302,7 +302,7 @@ Themion also exposes `system_inspect_local`, a read-only aggregate local inspect
 
 Durable note operations are exposed as `board_*` tools. These board tools manipulate local SQLite-backed note state for create/list/read/move/update-result operations. Stylos remains the transport and intake layer for remote note delivery and related mesh behavior.
 
-Tool contracts now distinguish reads from writes more explicitly: detailed inspection stays on read/query tools, while several mutation tools now return compact structured acknowledgements by default. In particular, `board_create_note`, `board_move_note`, `board_update_note_result`, `memory_create_node`, `memory_update_node`, `memory_link_nodes`, and `fs_write_file` no longer use full-record or plain-text success returns for their normal mutation path.
+Tool contracts now distinguish reads from writes more explicitly: detailed inspection stays on read/query tools, while several mutation tools now return compact structured acknowledgements by default. In particular, `board_create_note`, `board_move_note`, `board_update_note_result`, `memory_create_node`, `memory_update_node`, `memory_link_nodes`, and `fs_write_file` no longer use full-record or plain-text success returns for their normal mutation path. In the TUI, user-facing board note chat labels prefer `note_slug`; for tool-call labels, `themion-core` may resolve display metadata before emitting `ToolStart`, while the actual move/read/update contracts still use canonical `note_id`.
 
 ## Persistent History (db.rs)
 

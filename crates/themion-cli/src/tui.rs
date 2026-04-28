@@ -115,6 +115,15 @@ fn self_session_id_fallback() -> String {
 fn split_tool_call_detail(name: &str, args_json: &str) -> (String, Option<String>) {
     let args: serde_json::Value = serde_json::from_str(args_json).unwrap_or_default();
     let t = |key: &str| center_trim(args[key].as_str().unwrap_or("?"), TOOL_DETAIL_MAX_CHARS);
+    let board_note_display = || {
+        center_trim(
+            args["note_slug"]
+                .as_str()
+                .or_else(|| args["note_id"].as_str())
+                .unwrap_or("?"),
+            TOOL_DETAIL_MAX_CHARS,
+        )
+    };
     let reason = args["reason"]
         .as_str()
         .map(str::trim)
@@ -199,11 +208,11 @@ fn split_tool_call_detail(name: &str, args_json: &str) -> (String, Option<String
             ),
             None,
         ),
-        "board_read_note" => (format!("board_read_note {}", t("note_id")), None),
+        "board_read_note" => (format!("board_read_note {}", board_note_display()), None),
         "board_move_note" => (
             format!(
                 "board_move_note {} -> {}",
-                t("note_id"),
+                board_note_display(),
                 center_trim(
                     args["column"].as_str().unwrap_or("?"),
                     TOOL_DETAIL_MAX_CHARS
@@ -211,7 +220,7 @@ fn split_tool_call_detail(name: &str, args_json: &str) -> (String, Option<String
             ),
             None,
         ),
-        "board_update_note_result" => (format!("board_update_note_result {}", t("note_id")), None),
+        "board_update_note_result" => (format!("board_update_note_result {}", board_note_display()), None),
         "memory_create_node" => (format!("memory_create_node {}", t("title")), None),
         "memory_update_node" => (format!("memory_update_node {}", t("node_id")), None),
         "memory_link_nodes" => (
@@ -1191,9 +1200,11 @@ impl App {
             AgentEvent::ToolStart {
                 name,
                 arguments_json,
+                display_arguments_json,
             } => {
                 self.streaming_idx = None;
-                let (detail, reason) = split_tool_call_detail(&name, &arguments_json);
+                let display_args_json = display_arguments_json.as_deref().unwrap_or(&arguments_json);
+                let (detail, reason) = split_tool_call_detail(&name, display_args_json);
                 let activity_detail = match &reason {
                     Some(reason) => format!("{detail} — {reason}"),
                     None => detail.clone(),

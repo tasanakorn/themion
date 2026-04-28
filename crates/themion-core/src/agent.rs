@@ -37,6 +37,7 @@ pub enum AgentEvent {
     ToolStart {
         name: String,
         arguments_json: String,
+        display_arguments_json: Option<String>,
     },
     ToolEnd,
     Status(String),
@@ -67,6 +68,39 @@ impl TurnCancellation {
 }
 
 const MEMORY_KB_GUIDANCE: &str = "Project Memory guidance: memory_* tools are for intentional durable Project Memory knowledge that should outlive the current session, not routine transcript logging or disposable task tracking. Project Memory stores durable knowledge for the current project by default. Use project_dir=\"[GLOBAL]\" only for Global Knowledge: reusable cross-project facts, preferences, conventions, provider/tool behavior, or troubleshooting patterns. Global Knowledge is an explicitly selected context inside Project Memory, not a separate system. When unsure, keep knowledge project-local and promote later only when cross-project usefulness is clear. Prefer knowledge-base shaped entries: concepts, components, files, tasks, decisions, facts, observations, troubleshooting records, and typed links between them. Use node_type values such as concept, component, file, task, decision, fact, observation, troubleshooting, or person. Use node_type=memory only for genuinely narrative long-term capture when a more specific knowledge-base type is not yet known. Add hashtags for retrieval, and link related nodes when the relationship is useful. Keep ordinary conversation history in session history and coordination work in board notes rather than duplicating it into Project Memory.";
+
+const TOOL_START_BOARD_NOTE_DISPLAY_TOOLS: &[&str] = &[
+    "board_read_note",
+    "board_move_note",
+    "board_update_note_result",
+];
+
+fn build_tool_start_display_arguments_json(
+    db: &DbHandle,
+    tool_name: &str,
+    arguments_json: &str,
+) -> Option<String> {
+    if !TOOL_START_BOARD_NOTE_DISPLAY_TOOLS.contains(&tool_name) {
+        return None;
+    }
+    let mut args: Value = serde_json::from_str(arguments_json).ok()?;
+    let args_obj = args.as_object_mut()?;
+    let needs_note_slug = args_obj
+        .get("note_slug")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_none_or(str::is_empty);
+    if !needs_note_slug {
+        return None;
+    }
+    let note_id = args_obj.get("note_id")?.as_str()?.trim();
+    if note_id.is_empty() {
+        return None;
+    }
+    let note = db.get_board_note(note_id).ok().flatten()?;
+    args_obj.insert("note_slug".to_string(), Value::String(note.note_slug));
+    serde_json::to_string(&args).ok()
+}
 
 pub struct Agent {
     client: Box<dyn ChatBackend + Send + Sync>,
@@ -1333,9 +1367,15 @@ impl Agent {
                     break;
                 }
 
+                let display_arguments_json = build_tool_start_display_arguments_json(
+                    self.db.as_ref(),
+                    &tc.function.name,
+                    &tc.function.arguments,
+                );
                 self.emit(AgentEvent::ToolStart {
                     name: tc.function.name.clone(),
                     arguments_json: tc.function.arguments.clone(),
+                    display_arguments_json,
                 });
                 let tool_ctx = crate::tools::ToolCtx {
                     db: self.db.clone(),
