@@ -28,7 +28,7 @@ This separation is intentional: reusable harness/runtime and provider behavior b
 - **Event-driven TUI** — `Agent` emits `AgentEvent` variants over an `mpsc` channel; the TUI renders each event as it arrives, giving streaming token display without blocking the input loop.
 - **Provider abstraction** — the core harness speaks through a `ChatBackend` trait so different transports and wire formats can be swapped at runtime.
 - **Separated prompt inputs** — the base system prompt, predefined coding guardrails, a predefined Codex CLI web-search instruction, and contextual instruction files such as `AGENTS.md` are treated as distinct prompt inputs rather than merged into a single message.
-- **Built-in coding guardrails stay minimal** — the predefined guardrail layer covers default coding behavior such as assumption transparency, simple solutions, targeted edits, narrow validation, and brief specific commit messages naming the actual change when the user explicitly asks for a commit.
+- **Built-in coding guardrails stay minimal** — the predefined guardrail layer covers default coding behavior such as assumption transparency, simple solutions, targeted edits, narrow validation, preserving important tool-learned findings in ordinary assistant chat text with concise 1–2 sentence summaries by default, and brief specific commit messages naming the actual change when the user explicitly asks for a commit.
 - **One process can describe multiple agents** — the CLI runtime stores agent descriptors in a vector, and Stylos status publishes process-level metadata plus an `agents` list rather than flattening one effective agent into top-level fields.
 
 ## Component Map

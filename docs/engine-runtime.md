@@ -28,7 +28,7 @@ A single user turn follows this shape:
 3. The harness records a new turn and persists the user message. New `agent_turns` rows also capture optional turn-level runtime attribution in `agent_turns.meta` as compact JSON, currently including `app_version`, `profile`, `provider`, and `model` when available.
 4. The harness builds the model input from:
    - the base system prompt
-   - predefined built-in coding guardrails
+   - predefined built-in coding guardrails, including guidance to preserve important tool-learned findings in ordinary assistant chat text with concise 1–2 sentence summaries by default when that information matters
    - predefined Codex CLI web-search instruction
    - injected contextual instructions such as `AGENTS.md`
    - workflow context and phase instructions
@@ -40,6 +40,8 @@ A single user turn follows this shape:
 8. Workflow tools may also inspect or mutate the current workflow state between model calls.
 9. This repeats until the model returns a normal assistant response with no more tool calls, or another existing runtime stop condition ends the turn.
 10. The turn is finalized in SQLite with message, workflow, token, and turn-level runtime metadata.
+
+The predefined guardrail layer is also where Themion now tells the model to preserve user-useful information learned from tools in normal assistant chat text rather than relying only on raw tool results. That guidance is intentionally concise: the default preservation summary is 1–2 sentences, with longer explanation reserved for findings that are materially important or complex. Routine mechanical acknowledgements usually do not need separate narration.
 
 ## Agent identity boundary
 
