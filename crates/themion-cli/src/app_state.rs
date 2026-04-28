@@ -254,35 +254,6 @@ pub async fn start_stylos(app_state: &AppState) -> anyhow::Result<crate::stylos:
 #[cfg(feature = "stylos")]
 #[cfg(feature = "stylos")]
 #[cfg(feature = "stylos")]
-pub async fn create_done_mention_via_bridge(
-    bridge: &crate::stylos::StylosToolBridge,
-    from_agent_id: &str,
-    request: &DoneMentionRequest,
-) -> anyhow::Result<String> {
-    let body = format!(
-        "Done: delegated note completed.\n\nOriginal note: {} ({})\nCompleted by: {} / {}\nResult:\n{}",
-        request.note_id,
-        request.note_slug,
-        request.completed_by_instance,
-        request.completed_by_agent_id,
-        request.result_summary,
-    );
-    bridge
-        .invoke(
-            Some(from_agent_id),
-            "board_create_note",
-            serde_json::json!({
-                "to_instance": request.from_instance,
-                "to_agent_id": request.from_agent_id,
-                "body": body,
-                "note_kind": "done_mention",
-                "origin_note_id": request.note_id,
-            }),
-        )
-        .await
-}
-
-#[cfg(feature = "stylos")]
 pub fn create_done_mention_locally(
     db: &DbHandle,
     request: &DoneMentionRequest,

@@ -149,10 +149,12 @@ In the current implementation:
 - Stylos queryables are registered in `crates/themion-cli/src/stylos.rs` and their long-lived serving/publishing/subscription tasks now run on the CLI-owned `network` runtime domain
 - query handlers read the current exported process snapshot from a snapshot provider published from the CLI-local app/TUI state path
 - accepted `talk`, durable `notes/request`, and `tasks/request` queries are converted into `IncomingPromptRequest` values or persisted note records and sent over an in-process/local-runtime path
+- in Stylos-enabled TUI mode, CLI-local board-note coordination for pending note injection and note-completion follow-up now lives in `crates/themion-cli/src/board_runtime.rs` rather than inline in `tui.rs`
 - the TUI event loop receives those requests as `AppEvent::IncomingPrompt`
 - the TUI either rejects the request immediately if the current local execution path is already busy, or submits the prompt through the same local turn path used for normal input
 
 This means Stylos does not bypass the harness loop, call providers directly, or move history/tool execution into the transport layer. It only injects new work into the existing local input path.
+For durable board notes in TUI mode, `board_runtime.rs` is now the CLI-local coordination boundary for selecting the next pending note, mutating note injection/completion state, and resolving post-turn follow-up into typed actions that the TUI displays or submits.
 
 ## Snapshot-driven request decisions
 

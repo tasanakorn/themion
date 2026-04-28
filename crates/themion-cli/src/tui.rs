@@ -1,6 +1,9 @@
 use crate::chat_composer::{ChatComposer, InputAction};
 use crate::config::{save_profiles, ProfileConfig};
 use crate::runtime_domains::DomainHandle;
+use crate::app_runtime::{build_replacement_main_agent, build_system_inspection_snapshot, AgentReplacementParams};
+#[cfg(feature = "stylos")]
+use crate::board_runtime::{BoardTurnFollowUp, resolve_completed_note_follow_up, resolve_pending_board_note_injection};
 #[cfg(feature = "stylos")]
 use crate::stylos::{
     tool_bridge, IncomingPromptRequest, StylosHandle, StylosRuntimeState, StylosToolBridge,
@@ -1415,100 +1418,16 @@ impl App {
     }
 
     fn system_inspection_snapshot(&self) -> themion_core::tools::SystemInspectionResult {
-        let runtime_lines = self.debug_runtime_lines();
-        let rate_limits = self.status_rate_limits.as_ref().map(|report| {
-            themion_core::tools::SystemInspectionRateLimits {
-                api_call: report.api_call.clone(),
-                source: report.source.clone(),
-                http_status: report.http_status,
-                active_limit: report.active_limit.clone(),
-                snapshot_count: report.snapshots.len(),
-            }
-        });
-        let mut provider = themion_core::tools::SystemInspectionProvider {
-            status: "ok".to_string(),
-            active_profile: Some(self.session.active_profile.clone()),
-            provider: Some(self.session.provider.clone()),
-            model: Some(self.session.model.clone()),
-            auth_configured: Some(match self.session.provider.as_str() {
-                "openai-codex" => crate::auth_store::load().ok().flatten().is_some(),
-                _ => self
-                    .session
-                    .api_key
-                    .as_ref()
-                    .map(|v| !v.is_empty())
-                    .unwrap_or(false),
-            }),
-            base_url_present: Some(!self.session.base_url.trim().is_empty()),
-            rate_limits,
-            warnings: Vec::new(),
-            issues: Vec::new(),
-        };
-        if provider.auth_configured == Some(false) {
-            provider.status = "degraded".to_string();
-            provider
-                .issues
-                .push("provider authentication is not configured".to_string());
-        }
-        if provider.base_url_present == Some(false) {
-            provider.status = "degraded".to_string();
-            provider
-                .issues
-                .push("provider base_url is empty".to_string());
-        }
-
-        let tool_names = themion_core::tools::tool_definitions()
-            .as_array()
-            .into_iter()
-            .flat_map(|defs| defs.iter())
-            .filter_map(|entry| entry.get("function")?.get("name")?.as_str())
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        let tools = themion_core::tools::SystemInspectionTools {
-            status: "ok".to_string(),
-            tool_count: tool_names.len(),
-            available_names: tool_names,
-            warnings: Vec::new(),
-            issues: Vec::new(),
-        };
-        let runtime = themion_core::tools::SystemInspectionRuntime {
-            status: "ok".to_string(),
-            pid: Some(std::process::id()),
-            now_ms: unix_epoch_now_ms(),
-            session_id: self
-                .agents
-                .first()
-                .map(|h| h.session_id.to_string())
-                .unwrap_or_else(|| self.session.id.to_string()),
-            project_dir: self.project_dir.display().to_string(),
-            workflow_name: Some(self.workflow_state.workflow_name.clone()),
-            phase_name: Some(self.workflow_state.phase_name.clone()),
-            workflow_status: Some(format!("{:?}", self.workflow_state.status)),
-            debug_runtime_lines: runtime_lines,
-            task_runtime: Some(self.task_runtime_snapshot()),
-            warnings: Vec::new(),
-            issues: Vec::new(),
-        };
-        let mut warnings = Vec::new();
-        let issues = provider.issues.clone();
-        if provider.status != "ok" {
-            warnings.push("provider readiness is degraded".to_string());
-        }
-        let overall_status = if issues.is_empty() { "ok" } else { "degraded" }.to_string();
-        let summary = if overall_status == "ok" {
-            "local inspection snapshot available, including /debug runtime coverage".to_string()
-        } else {
-            format!("local inspection found {} issue(s)", issues.len())
-        };
-        themion_core::tools::SystemInspectionResult {
-            overall_status,
-            summary,
-            runtime,
-            tools,
-            provider,
-            warnings,
-            issues,
-        }
+        build_system_inspection_snapshot(
+            &self.session,
+            self.session.id,
+            self.agents.first().map(|h| h.session_id),
+            &self.project_dir,
+            &self.workflow_state,
+            self.status_rate_limits.as_ref(),
+            self.task_runtime_snapshot(),
+            self.debug_runtime_lines(),
+        )
     }
 
     fn refresh_main_agent_system_inspection(&mut self) {
@@ -1831,25 +1750,18 @@ impl App {
                         {
                             out.push(format!("warning: {}", e));
                         }
-                        let new_session_id = Uuid::new_v4();
-                        match crate::app_state::build_agent(
-                            &self.session,
-                            new_session_id,
-                            self.project_dir.clone(),
-                            self.db.clone(),
+                        match build_replacement_main_agent(AgentReplacementParams {
+                            session: &self.session,
+                            project_dir: &self.project_dir,
+                            db: &self.db,
                             #[cfg(feature = "stylos")]
-                            self.stylos_tool_bridge.clone(),
+                            stylos_tool_bridge: self.stylos_tool_bridge.clone(),
                             #[cfg(feature = "stylos")]
-                            self.local_stylos_instance.as_deref(),
-                            #[cfg(feature = "stylos")]
-                            "main",
-                            None,
-                            self.api_log_enabled,
-                        ) {
-                            Ok(new_agent) => {
-                                let db = self.db.clone();
-                                let pdir = self.project_dir.clone();
-                                let _ = db.insert_session(new_session_id, &pdir, true);
+                            local_stylos_instance: self.local_stylos_instance.as_deref(),
+                            api_log_enabled: self.api_log_enabled,
+                            insert_session: true,
+                        }) {
+                            Ok((new_agent, new_session_id)) => {
                                 self.status_model_info = new_agent.model_info().cloned();
                                 self.agents = vec![AgentHandle {
                                     agent: Some(new_agent),
@@ -2180,40 +2092,12 @@ impl App {
         let Some(agent_id) = interactive_agent_id.or(main_agent_id) else {
             return;
         };
-        let Ok(Some(note)) = self.db.next_board_note_for_injection(&instance, &agent_id) else {
+        let Some(action) = resolve_pending_board_note_injection(&self.db, &instance, &agent_id) else {
             return;
         };
-        let _ = self.db.mark_board_note_injected(&note.note_id);
-        let prompt = crate::stylos::build_board_note_prompt(
-            &note.note_id,
-            &note.note_slug,
-            note.note_kind,
-            note.origin_note_id.as_deref(),
-            note.from_instance.as_deref(),
-            note.from_agent_id.as_deref(),
-            &note.to_instance,
-            &note.to_agent_id,
-            note.column,
-            &note.body,
-        );
-        self.push(Entry::RemoteEvent(format!(
-            "Board note injection note_slug={} to={} to_agent_id={} column={}",
-            note.note_slug,
-            note.to_instance,
-            note.to_agent_id,
-            note.column.as_str()
-        )));
-        self.active_incoming_prompt = Some(IncomingPromptRequest {
-            prompt: prompt.clone(),
-            agent_id: Some(note.to_agent_id.clone()),
-            task_id: None,
-            request_id: None,
-            from: note.from_instance.clone(),
-            from_agent_id: note.from_agent_id.clone(),
-            to: Some(note.to_instance.clone()),
-            to_agent_id: Some(note.to_agent_id.clone()),
-        });
-        self.submit_text(prompt, app_tx);
+        self.push(Entry::RemoteEvent(action.log_line));
+        self.active_incoming_prompt = Some(action.request.clone());
+        self.submit_text(action.request.prompt, app_tx);
     }
 
     #[cfg(feature = "stylos")]
@@ -2224,98 +2108,17 @@ impl App {
         let Some(remote) = self.active_incoming_prompt.as_ref().cloned() else {
             return;
         };
-        if !remote.prompt.starts_with("type=stylos_note ") {
-            return;
-        }
-        let header = remote.prompt.lines().next().unwrap_or_default();
-        let note_id = header
-            .split_whitespace()
-            .find_map(|part| part.strip_prefix("note_id="));
-        let Some(note_id) = note_id else {
-            return;
-        };
-        let Ok(Some(note)) = self.db.get_board_note(note_id) else {
-            return;
-        };
-        if note.column != themion_core::db::NoteColumn::Done {
-            let prompt = format!(
-                "This turn ended but note {} is still in {}. You still have a pending board task. Continue handling this note now. Decide from the note context whether any real action remains. If no further action is needed, move the note to done in this turn. Otherwise keep progressing it through the board workflow and do not end the turn while it is still pending.",
-                note.note_slug,
-                note.column.as_str(),
-            );
-            self.active_incoming_prompt = Some(remote);
-            self.submit_text(prompt, app_tx);
-            return;
-        }
-        if note.note_kind != themion_core::db::NoteKind::WorkRequest {
-            return;
-        }
-        if note.completion_notified_at_ms.is_some() {
-            return;
-        }
-        let (Some(to_instance), Some(to_agent_id)) =
-            (note.from_instance.clone(), note.from_agent_id.clone())
-        else {
-            return;
-        };
-        let result_summary = note
-            .result_text
-            .clone()
-            .unwrap_or_else(|| "completed with no explicit stored result".to_string());
-        let request = crate::app_state::DoneMentionRequest {
-            note_id: note.note_id.clone(),
-            note_slug: note.note_slug.clone(),
-            from_instance: to_instance.clone(),
-            from_agent_id: to_agent_id.clone(),
-            completed_by_instance: note.to_instance.clone(),
-            completed_by_agent_id: note.to_agent_id.clone(),
-            result_summary,
-        };
-
-        let create_reply = if let Some(bridge) = self.stylos_tool_bridge.as_ref().cloned() {
-            let app_tx_done = app_tx.clone();
-            let from_agent_id = note.to_agent_id.clone();
-            self.background_domain().spawn(async move {
-                let result = crate::app_state::create_done_mention_via_bridge(
-                    &bridge,
-                    &from_agent_id,
-                    &request,
-                )
-                .await;
-                let output = match result {
-                    Ok(output) => output,
-                    Err(err) => format!("error: {}", err),
-                };
-                let _ = app_tx_done.send(AppEvent::Agent(AgentEvent::Status(output)));
-            });
-            return;
-        } else {
-            crate::app_state::create_done_mention_locally(&self.db, &request)
-        };
-
-        match create_reply {
-            Ok(reply) => {
-                let created_note_slug = serde_json::from_str::<serde_json::Value>(&reply)
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .get("note_slug")
-                            .or_else(|| value.get("note_id"))
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string)
-                    })
-                    .unwrap_or_else(|| "unknown".to_string());
-                let _ = self.db.mark_board_note_completion_notified(&note.note_id);
-                self.push(Entry::RemoteEvent(format!(
-                    "Board done mention note_slug={} origin_note_slug={} to={} to_agent_id={}",
-                    created_note_slug, note.note_slug, to_instance, to_agent_id,
-                )));
+        match resolve_completed_note_follow_up(&self.db, &remote) {
+            BoardTurnFollowUp::None => {}
+            BoardTurnFollowUp::ContinueCurrentNote { request, prompt } => {
+                self.active_incoming_prompt = Some(request);
+                self.submit_text(prompt, app_tx);
             }
-            Err(err) => {
-                self.push(Entry::Status(format!(
-                    "done mention create failed for note_id={}: {}",
-                    note.note_id, err
-                )));
+            BoardTurnFollowUp::EmitDoneMention { log_line } => {
+                self.push(Entry::RemoteEvent(log_line));
+            }
+            BoardTurnFollowUp::EmitDoneMentionError { status_line } => {
+                self.push(Entry::Status(status_line));
             }
         }
     }
@@ -2481,26 +2284,19 @@ impl App {
                         e
                     )));
                 }
-                let new_session_id = Uuid::new_v4();
-                match crate::app_state::build_agent(
-                    &self.session,
-                    new_session_id,
-                    self.project_dir.clone(),
-                    self.db.clone(),
+                match build_replacement_main_agent(AgentReplacementParams {
+                    session: &self.session,
+                    project_dir: &self.project_dir,
+                    db: &self.db,
                     #[cfg(feature = "stylos")]
-                    self.stylos_tool_bridge.clone(),
+                    stylos_tool_bridge: self.stylos_tool_bridge.clone(),
                     #[cfg(feature = "stylos")]
-                    self.local_stylos_instance.as_deref(),
-                    #[cfg(feature = "stylos")]
-                    "main",
-                    None,
-                    self.api_log_enabled,
-                ) {
-                    Ok(mut new_agent) => {
+                    local_stylos_instance: self.local_stylos_instance.as_deref(),
+                    api_log_enabled: self.api_log_enabled,
+                    insert_session: true,
+                }) {
+                    Ok((mut new_agent, new_session_id)) => {
                         new_agent.refresh_model_info().await;
-                        let _ = self
-                            .db
-                            .insert_session(new_session_id, &self.project_dir, true);
                         self.status_model_info = new_agent.model_info().cloned();
                         self.workflow_state = new_agent.workflow_state().clone();
                         self.agents = vec![AgentHandle {

@@ -1,4 +1,5 @@
 mod app_state;
+mod app_runtime;
 mod auth_store;
 mod config;
 mod chat_composer;
@@ -8,6 +9,8 @@ mod paste_burst;
 mod runtime_domains;
 #[cfg(feature = "stylos")]
 mod stylos;
+#[cfg(feature = "stylos")]
+mod board_runtime;
 mod textarea;
 mod tui;
 mod tui_runner;
