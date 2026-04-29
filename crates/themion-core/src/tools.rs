@@ -135,20 +135,20 @@ fn memory_tool(name: &str, description: &str, parameters: Value) -> Value {
 
 fn memory_tool_definitions() -> Vec<Value> {
     vec![
-        memory_tool("memory_create_node", "Create an intentional Project Memory knowledge-base node. Defaults to the current project; use project_dir=\"[GLOBAL]\" only for Global Knowledge: reusable cross-project facts, preferences, conventions, provider/tool behavior, or troubleshooting patterns. When unsure, keep knowledge project-local. Prefer specific KB node types such as concept, component, file, task, decision, fact, observation, troubleshooting, or person; use memory only for narrative capture when no more specific type fits. Returns a compact creation acknowledgement by default.", json!({
+        memory_tool("memory_create_node", "Create a Project Memory node. Defaults to the current project; use project_dir=\"[GLOBAL]\" only for cross-project knowledge.", json!({
             "type":"object",
             "properties":{
                 "node_id":{"type":"string","description":"Optional UUID. Generated when omitted."},
-                "project_dir":{"type":"string","description":"Optional Project Memory context. Defaults to the current session project_dir. Use exact [GLOBAL] for Global Knowledge, the virtual cross-project context; it is not a filesystem path."},
-                "node_type":{"type":"string","description":"Knowledge-base node kind such as concept, component, file, task, decision, fact, observation, troubleshooting, person, or memory. Defaults to observation for lightweight capture."},
+                "project_dir":{"type":"string","description":"Project context. Default: current project; use [GLOBAL] for cross-project knowledge."},
+                "node_type":{"type":"string","description":"Node kind. Default: observation."},
                 "title":{"type":"string"},
                 "content":{"type":"string","description":"Optional descriptive/body text."},
-                "hashtags":{"type":"array","items":{"type":"string"},"description":"Flat labels such as #rust or #provider. Case-insensitive; stored normalized with leading #."},
+                "hashtags":{"type":"array","items":{"type":"string"},"description":"Flat labels such as #rust or #provider. Stored normalized."},
                 "metadata":{"type":"object","description":"Optional lightweight JSON metadata."}
             },
             "required":["title"]
         })),
-        memory_tool("memory_update_node", "Update title, content, type, hashtags, or metadata for a Project Memory knowledge-base node. Returns a compact update acknowledgement by default.", json!({
+        memory_tool("memory_update_node", "Update a Project Memory node. Returns a compact acknowledgement.", json!({
             "type":"object",
             "properties":{
                 "node_id":{"type":"string"},
@@ -160,7 +160,7 @@ fn memory_tool_definitions() -> Vec<Value> {
             },
             "required":["node_id"]
         })),
-        memory_tool("memory_link_nodes", "Create a typed directed relationship between any two Project Memory knowledge-base nodes. Returns a compact acknowledgement by default.", json!({
+        memory_tool("memory_link_nodes", "Create a typed directed link between two Project Memory nodes. Returns a compact acknowledgement.", json!({
             "type":"object",
             "properties":{
                 "edge_id":{"type":"string","description":"Optional UUID. Generated when omitted."},
@@ -186,12 +186,12 @@ fn memory_tool_definitions() -> Vec<Value> {
             "properties":{"node_id":{"type":"string"}},
             "required":["node_id"]
         })),
-        memory_tool("memory_search", "Search Project Memory knowledge-base nodes by explicit retrieval mode, query/filter fields, project context, and optional relation filters. Defaults to fts mode in the current project_dir only; use exact [GLOBAL] to search Global Knowledge only. Project searches do not silently include Global Knowledge.", json!({
+        memory_tool("memory_search", "Search Project Memory nodes by mode, query, project context, hashtags, type, and optional relation filters. Defaults to fts in the current project only; [GLOBAL] searches Global Knowledge only.", json!({
             "type":"object",
             "properties":{
-                "query":{"type":"string","description":"Query text for retrieval. In fts mode this is an FTS5 query over title/content; in semantic mode this is the semantic search text."},
-                "mode":{"type":"string","enum":["fts","semantic"],"description":"Retrieval mode. Defaults to fts. semantic is only available when Themion is built with semantic-memory support."},
-                "project_dir":{"type":"string","description":"Optional Project Memory context. Defaults to current project_dir only. Use exact [GLOBAL] for Global Knowledge only; it is virtual and not a filesystem path."},
+                "query":{"type":"string","description":"Query text."},
+                "mode":{"type":"string","enum":["fts","semantic"],"description":"Retrieval mode. Default: fts."},
+                "project_dir":{"type":"string","description":"Project context. Default: current project; use [GLOBAL] for Global Knowledge."},
                 "hashtags":{"type":"array","items":{"type":"string"}},
                 "hashtag_match":{"type":"string","enum":["any","all"],"description":"Defaults to any."},
                 "node_type":{"type":"string"},
@@ -216,10 +216,10 @@ fn memory_tool_definitions() -> Vec<Value> {
             "properties":{"node_id":{"type":"string"}},
             "required":["node_id"]
         })),
-        memory_tool("memory_list_hashtags", "List hashtags used by Project Memory knowledge-base nodes in one project context, optionally filtered by prefix. Defaults to the current project_dir only; use exact [GLOBAL] for Global Knowledge only.", json!({
+        memory_tool("memory_list_hashtags", "List Project Memory hashtags, optionally filtered by prefix. Defaults to the current project; [GLOBAL] means Global Knowledge.", json!({
             "type":"object",
             "properties":{
-                "project_dir":{"type":"string","description":"Optional Project Memory context. Defaults to current project_dir only. Use exact [GLOBAL] for Global Knowledge only; it is virtual and not a filesystem path."},
+                "project_dir":{"type":"string","description":"Project context. Default: current project; use [GLOBAL] for Global Knowledge."},
                 "prefix":{"type":"string"},
                 "limit":{"type":"integer","description":"Default 50, max 200."}
             },
@@ -479,15 +479,15 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "fs_read_file",
-                "description": "Read file contents. Strongly prefer including a short concrete `reason` when it helps explain why this file is being read; the field remains optional.",
+                "description": "Read file contents.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "File path to read" },
-                        "mode": { "type": "string", "enum": ["raw", "base64"], "description": "Response encoding mode. Defaults to base64." },
-                        "offset": { "type": "integer", "description": "Byte offset to start reading from. Defaults to 0." },
-                        "limit": { "type": "integer", "description": "Maximum bytes to read. Defaults to 131072 and max 2097152." }
-                        ,"reason": { "type": "string", "description": "Optional short concrete reason for reading this file." }
+                        "mode": { "type": "string", "enum": ["raw", "base64"], "description": "Encoding. Default: base64." },
+                        "offset": { "type": "integer", "description": "Offset. Default: 0." },
+                        "limit": { "type": "integer", "description": "Max bytes to read. Default: 131072, max: 2097152." }
+                        ,"reason": { "type": "string", "description": "Optional reason." }
                     },
                     "required": ["path"]
                 }
@@ -497,14 +497,14 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "fs_write_file",
-                "description": "Write content to a file. Strongly prefer including a short concrete `reason` when it helps explain why this file is being written; the field remains optional.",
+                "description": "Write content to a file.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "File path to write" },
                         "content": { "type": "string", "description": "Content to write" },
-                        "mode": { "type": "string", "enum": ["raw", "base64"], "description": "Content encoding mode. Defaults to base64." }
-                        ,"reason": { "type": "string", "description": "Optional short concrete reason for writing this file." }
+                        "mode": { "type": "string", "enum": ["raw", "base64"], "description": "Encoding. Default: base64." }
+                        ,"reason": { "type": "string", "description": "Optional reason." }
                     },
                     "required": ["path", "content"]
                 }
@@ -514,12 +514,12 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "fs_list_directory",
-                "description": "List directory entries. Strongly prefer including a short concrete `reason` when it helps explain why this directory is being inspected; the field remains optional.",
+                "description": "List directory entries.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "Directory path to list" }
-                        ,"reason": { "type": "string", "description": "Optional short concrete reason for listing this directory." }
+                        ,"reason": { "type": "string", "description": "Optional reason." }
                     },
                     "required": ["path"]
                 }
@@ -529,14 +529,14 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "shell_run_command",
-                "description": "Run a shell command, returns stdout+stderr. Strongly prefer including a short concrete `reason` when it helps explain why this command is being run; the field remains optional.",
+                "description": "Run a shell command and return stdout+stderr.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "command": { "type": "string", "description": "Shell command to run" },
-                        "result_limit": { "type": "integer", "description": "Maximum returned stdout+stderr bytes. Defaults to 16384." },
-                        "timeout_ms": { "type": "integer", "description": "Command timeout in milliseconds. Defaults to 300000." }
-                        ,"reason": { "type": "string", "description": "Optional short concrete reason for running this command." }
+                        "result_limit": { "type": "integer", "description": "Max returned stdout+stderr bytes. Default: 16384." },
+                        "timeout_ms": { "type": "integer", "description": "Timeout in ms. Default: 300000." }
+                        ,"reason": { "type": "string", "description": "Optional reason." }
                     },
                     "required": ["command"]
                 }
@@ -546,7 +546,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "system_inspect_local",
-                "description": "Inspect the current local Themion process and active agent context in a no-surprise, read-only way. Returns a structured snapshot of runtime state, available tools, and provider readiness using already-available local data plus bounded cheap checks. Does not mutate workflow/config/history, does not run shell commands, and does not perform expensive live probes by default.",
+                "description": "Inspect the current local Themion process and active agent context. Returns a bounded read-only runtime, tool, and provider snapshot.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -562,7 +562,7 @@ pub fn tool_definitions() -> Value {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "ms": { "type": "integer", "description": "Milliseconds to sleep. Max 30000." }
+                        "ms": { "type": "integer", "description": "Milliseconds to sleep. Max: 30000." }
                     },
                     "required": ["ms"]
                 }
@@ -577,7 +577,7 @@ pub fn tool_definitions() -> Value {
                     "type": "object",
                     "properties": {
                         "session_id": { "type": "string", "description": "Optional session selector. Omit for the active session, pass \"*\" for all sessions in the current project, or pass one session UUID in the current project." },
-                        "limit": { "type": "integer", "description": "Max messages (default 20, max 200)." },
+                        "limit": { "type": "integer", "description": "Max messages. Default: 20, max: 200." },
                         "direction": { "type": "string", "enum": ["newest", "oldest"] }
                     },
                     "required": []
@@ -594,7 +594,7 @@ pub fn tool_definitions() -> Value {
                     "properties": {
                         "query": { "type": "string", "description": "FTS5 search query." },
                         "session_id": { "type": "string", "description": "Optional session selector. Omit for the active session, pass \"*\" for all sessions in the current project, or pass one session UUID in the current project." },
-                        "limit": { "type": "integer", "description": "Max results (default 10, max 100)." }
+                        "limit": { "type": "integer", "description": "Max results. Default: 10, max: 100." }
                     },
                     "required": ["query"]
                 }
@@ -604,7 +604,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "workflow_get_state",
-                "description": "Return the current workflow, phase, status, phase result, and allowed next transitions.",
+                "description": "Return the current workflow, phase, status, phase result, and allowed transitions.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -616,11 +616,11 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "workflow_set_active",
-                "description": "Activate a named built-in workflow. Resets the current phase to that workflow's start phase.",
+                "description": "Activate a built-in workflow and reset to its start phase.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "workflow": { "type": "string", "description": "Built-in workflow name, such as NORMAL or LITE." },
+                        "workflow": { "type": "string", "description": "Built-in workflow name." },
                         "reason": { "type": "string", "description": "Reason for switching workflows." }
                     },
                     "required": ["workflow"]
@@ -631,11 +631,11 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "workflow_set_phase",
-                "description": "Request a phase transition within the currently active workflow.",
+                "description": "Request a phase transition in the active workflow.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "phase": { "type": "string", "description": "Next phase within the active workflow." },
+                        "phase": { "type": "string", "description": "Next workflow phase." },
                         "reason": { "type": "string", "description": "Reason for changing phase." }
                     },
                     "required": ["phase"]
@@ -646,7 +646,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "workflow_set_phase_result",
-                "description": "Set the current phase result to passed, failed, or user_feedback_required before transitioning or completing the workflow.",
+                "description": "Set the current phase result.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -661,20 +661,20 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "board_create_note",
-                "description": "Create a durable board note targeted to an instance and agent. Use the exact magic keyword SELF for to_instance and to_agent_id when creating a note for yourself; the runtime will replace SELF with the current local instance and local agent id. When Stylos is enabled, creation uses the Stylos receiver-intake flow rather than direct local DB insertion.",
+                "description": "Create a durable board note for a target instance and agent. Use SELF for the current local instance or agent.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "to_instance": { "type": "string", "description": "Target instance id, or SELF to target the current local instance." },
-                        "to_agent_id": { "type": "string", "description": "Target agent id, or SELF to target the current local agent id." },
+                        "to_instance": { "type": "string", "description": "Target instance id or SELF." },
+                        "to_agent_id": { "type": "string", "description": "Target agent id or SELF." },
                         "body": { "type": "string" },
-                        "note_kind": { "type": "string", "enum": ["work_request", "done_mention"], "description": "Optional note semantics. Defaults to work_request." },
-                        "origin_note_id": { "type": "string", "description": "Optional original note reference, used for done mentions." },
+                        "note_kind": { "type": "string", "enum": ["work_request", "done_mention"], "description": "Note kind. Default: work_request." },
+                        "origin_note_id": { "type": "string", "description": "Original note id for done mentions." },
                         "from_instance": { "type": "string" },
                         "from_agent_id": { "type": "string" },
-                        "request_id": { "type": "string", "description": "Optional request identifier for Stylos-mediated creation." },
-                        "note_id": { "type": "string", "description": "Optional UUID note identifier. When omitted, one is generated by the receiver or local DB path as applicable." },
-                        "column": { "type": "string", "enum": ["todo", "blocked"], "description": "Optional initial board column. Defaults to todo. Use blocked only for waiting-first follow-up notes." }
+                        "request_id": { "type": "string", "description": "Optional Stylos request id." },
+                        "note_id": { "type": "string", "description": "Optional note id." },
+                        "column": { "type": "string", "enum": ["todo", "blocked"], "description": "Initial column. Default: todo." }
                     },
                     "required": ["to_instance", "to_agent_id", "body"]
                 }
@@ -684,7 +684,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "board_list_notes",
-                "description": "List durable local board notes, optionally filtered by target instance, agent, or column.",
+                "description": "List durable board notes, optionally filtered by target or column.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -700,7 +700,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "board_read_note",
-                "description": "Read one durable local board note by note_id.",
+                "description": "Read one board note by note_id.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -714,7 +714,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "board_move_note",
-                "description": "Move a durable local board note between todo, in_progress, blocked, and done.",
+                "description": "Move a board note between todo, in_progress, blocked, and done.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -729,7 +729,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "board_update_note_result",
-                "description": "Attach or update result text on a durable local board note.",
+                "description": "Set or update result text on a board note.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -749,7 +749,7 @@ pub fn tool_definitions() -> Value {
                     "type": "object",
                     "properties": {
                         "outcome": { "type": "string", "enum": ["completed", "failed"] },
-                        "reason": { "type": "string", "description": "Reason for completion/failure." }
+                        "reason": { "type": "string", "description": "Reason." }
                     },
                     "required": ["outcome"]
                 }
@@ -774,46 +774,46 @@ pub fn tool_definitions() -> Value {
 #[cfg(feature = "stylos")]
 fn stylos_tool_definitions() -> Vec<Value> {
     vec![
-        stylos_tool("stylos_query_agents_alive", "Ask which Themion instances and agents are currently alive.", json!({
+        stylos_tool("stylos_query_agents_alive", "Query which instances and agents are alive.", json!({
             "type":"object",
             "properties":{
-                "exclude_self":{"type":"boolean","description":"Whether to exclude the current Themion instance from discovery results. Defaults to true."}
+                "exclude_self":{"type":"boolean","description":"Exclude the current instance from discovery results. Default: true."}
             },
             "required":[]
         })),
-        stylos_tool("stylos_query_agents_free", "Ask which agents are currently free for new work.", json!({
+        stylos_tool("stylos_query_agents_free", "Query which agents are free.", json!({
             "type":"object",
             "properties":{
-                "exclude_self":{"type":"boolean","description":"Whether to exclude the current Themion instance from discovery results. Defaults to true."}
+                "exclude_self":{"type":"boolean","description":"Exclude the current instance from discovery results. Default: true."}
             },
             "required":[]
         })),
-        stylos_tool("stylos_query_agents_git", "Ask which agents are attached to git repositories, optionally matching a specific repo identity. Prefer remote in normalized form like <host>/<owner>/<repo> when you can infer it safely, for example github.com/tasanakorn/stele. If the user names a supported forge explicitly, you may normalize before calling. If the host is omitted and there is no documented safe default, ask for clarification instead of guessing. Do not rely on responders to parse conversational phrases.", json!({
+        stylos_tool("stylos_query_agents_git", "Query agents attached to git repositories, optionally filtered by normalized remote <host>/<owner>/<repo>. If the forge or host is ambiguous, ask for clarification instead of guessing.", json!({
             "type":"object","properties":{
-                "remote":{"type":"string","description":"Optional git selector. Prefer normalized comparable identity like <host>/<owner>/<repo>; raw remotes are also accepted when needed."},
-                "exclude_self":{"type":"boolean","description":"Whether to exclude the current Themion instance from discovery results. Defaults to true."}
+                "remote":{"type":"string","description":"Optional git selector. Prefer normalized <host>/<owner>/<repo>."},
+                "exclude_self":{"type":"boolean","description":"Exclude the current instance from discovery results. Default: true."}
             },"required":[]
         })),
-        stylos_tool("stylos_query_nodes", "Ask which Themion nodes are visible on the Stylos network.", json!({"type":"object","properties":{},"required":[]})),
-        stylos_tool("stylos_query_status", "Ask one instance for its current process and agent status. Optional agent_id and role filters may be provided independently or together.", json!({
+        stylos_tool("stylos_query_nodes", "Query visible Themion nodes on the Stylos network.", json!({"type":"object","properties":{},"required":[]})),
+        stylos_tool("stylos_query_status", "Query one instance for current process and agent status.", json!({
             "type":"object","properties":{"instance":{"type":"string"},"agent_id":{"type":"string"},"role":{"type":"string"}},"required":["instance"]
         })),
-        stylos_tool("stylos_request_talk", "Submit a sender-aware user-style message to one target instance. Sender identity is resolved automatically by the app; do not pass sender fields. Optional to_agent_id selects the target local agent and defaults to main.", json!({
+        stylos_tool("stylos_request_talk", "Send a user-style message to one target instance. Sender identity is resolved automatically; to_agent_id is optional and defaults to main.", json!({
             "type":"object","properties":{
-                "instance":{"type":"string","description":"Target instance identifier in exact <hostname>:<pid> form."},
-                "to_agent_id":{"type":"string","description":"Optional target agent id on the remote instance. Defaults to main."},
+                "instance":{"type":"string","description":"Target instance in <hostname>:<pid> form."},
+                "to_agent_id":{"type":"string","description":"Target agent id. Default: main."},
                 "message":{"type":"string"},
                 "request_id":{"type":"string"},
-                "wait_for_idle_timeout_ms":{"type":"integer","description":"Optional bounded wait in milliseconds for target availability."}
+                "wait_for_idle_timeout_ms":{"type":"integer","description":"Optional bounded wait in ms for target availability."}
             },"required":["instance","message"]
         })),
-        stylos_tool("stylos_request_task", "Submit a structured task request for local agent routing.", json!({
+        stylos_tool("stylos_request_task", "Submit a task request for local agent routing.", json!({
             "type":"object","properties":{"instance":{"type":"string"},"task":{"type":"string"},"preferred_agent_id":{"type":"string"},"required_roles":{"type":"array","items":{"type":"string"}},"require_git_repo":{"type":"boolean"},"request_id":{"type":"string"}},"required":["instance","task"]
         })),
-        stylos_tool("stylos_query_task_status", "Look up the current lifecycle state of a submitted task.", json!({
+        stylos_tool("stylos_query_task_status", "Query a submitted task state.", json!({
             "type":"object","properties":{"instance":{"type":"string"},"task_id":{"type":"string"}},"required":["instance","task_id"]
         })),
-        stylos_tool("stylos_query_task_result", "Wait for or retrieve the result of a submitted task.", json!({
+        stylos_tool("stylos_query_task_result", "Wait for or retrieve a task result.", json!({
             "type":"object","properties":{"instance":{"type":"string"},"task_id":{"type":"string"},"wait_timeout_ms":{"type":"integer"}},"required":["instance","task_id"]
         })),
     ]
