@@ -1,11 +1,12 @@
 use crate::paste_burst::{CharDecision, FlushResult, PasteBurst};
-use crate::textarea::{clamp_to_char_boundary, TextArea};
+use crate::textarea::{clamp_to_char_boundary, TextArea, TextAreaState};
 use crossterm::event::{self, KeyCode, KeyModifiers};
 use std::time::Instant;
 
 #[derive(Default)]
 pub(crate) struct ChatComposer {
     pub(crate) input: TextArea,
+    pub(crate) input_state: TextAreaState,
     pub(crate) paste_burst: PasteBurst,
     pub(crate) history: Vec<String>,
     pub(crate) history_pos: Option<usize>,
@@ -50,6 +51,7 @@ impl ChatComposer {
         self.history_pos = None;
         self.history_draft.clear();
         self.input = TextArea::default();
+        self.input_state = TextAreaState::default();
         Some(text)
     }
 
@@ -66,7 +68,7 @@ impl ChatComposer {
             Some(i) => i - 1,
         };
         self.history_pos = Some(new_pos);
-        set_input_text(&mut self.input, &self.history[new_pos].clone());
+        set_input_text(&mut self.input, &mut self.input_state, &self.history[new_pos].clone());
     }
 
     pub(crate) fn history_down(&mut self) {
@@ -75,18 +77,18 @@ impl ChatComposer {
             Some(i) if i + 1 < self.history.len() => {
                 self.history_pos = Some(i + 1);
                 let text = self.history[i + 1].clone();
-                set_input_text(&mut self.input, &text);
+                set_input_text(&mut self.input, &mut self.input_state, &text);
             }
             Some(_) => {
                 self.history_pos = None;
                 let draft = self.history_draft.clone();
-                set_input_text(&mut self.input, &draft);
+                set_input_text(&mut self.input, &mut self.input_state, &draft);
             }
         }
     }
 
     pub(crate) fn handle_paste_event(&mut self, text: String) {
-        commit_pasted_input(&mut self.input, &mut self.paste_burst, text);
+        commit_pasted_input(&mut self.input, &mut self.input_state, &mut self.paste_burst, text);
     }
 
     pub(crate) fn handle_key_event(
@@ -98,7 +100,7 @@ impl ChatComposer {
         let now = Instant::now();
         match self.paste_burst.flush_if_due(now) {
             FlushResult::Paste(text) => {
-                commit_pasted_input(&mut self.input, &mut self.paste_burst, text);
+                commit_pasted_input(&mut self.input, &mut self.input_state, &mut self.paste_burst, text);
                 return InputAction::RequestDraw;
             }
             FlushResult::Typed(ch) => {
@@ -141,7 +143,12 @@ impl ChatComposer {
                             ) {
                                 let kept =
                                     format!("{}{}", &text[..grab.start_byte], &text[safe_cursor..]);
-                                set_input_text_and_cursor(&mut self.input, &kept, grab.start_byte);
+                                set_input_text_and_cursor(
+                                    &mut self.input,
+                                    &mut self.input_state,
+                                    &kept,
+                                    grab.start_byte,
+                                );
                                 self.paste_burst.append_char_to_buffer(ch, now);
                                 return InputAction::None;
                             }
@@ -151,13 +158,13 @@ impl ChatComposer {
             }
 
             if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-                commit_pasted_input(&mut self.input, &mut self.paste_burst, pasted);
+                commit_pasted_input(&mut self.input, &mut self.input_state, &mut self.paste_burst, pasted);
             }
         }
 
         if !matches!(key.code, KeyCode::Char(_) | KeyCode::Enter) {
             if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-                commit_pasted_input(&mut self.input, &mut self.paste_burst, pasted);
+                commit_pasted_input(&mut self.input, &mut self.input_state, &mut self.paste_burst, pasted);
             }
         }
 
@@ -179,7 +186,7 @@ impl ChatComposer {
             }
             (KeyCode::Enter, KeyModifiers::SHIFT) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
                 if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-                    commit_pasted_input(&mut self.input, &mut self.paste_burst, pasted);
+                    commit_pasted_input(&mut self.input, &mut self.input_state, &mut self.paste_burst, pasted);
                 }
                 self.input.insert_newline();
                 InputAction::RequestDraw
@@ -229,26 +236,38 @@ impl ChatComposer {
 
     fn handle_non_ascii_char(&mut self, key: event::KeyEvent) {
         if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-            commit_pasted_input(&mut self.input, &mut self.paste_burst, pasted);
+            commit_pasted_input(&mut self.input, &mut self.input_state, &mut self.paste_burst, pasted);
         }
         self.input.input(key);
     }
 }
 
-fn commit_pasted_input(input: &mut TextArea, paste_burst: &mut PasteBurst, pasted: String) {
+fn commit_pasted_input(
+    input: &mut TextArea,
+    input_state: &mut TextAreaState,
+    paste_burst: &mut PasteBurst,
+    pasted: String,
+) {
     insert_pasted_text(input, &pasted);
+    *input_state = TextAreaState::default();
     paste_burst.clear_after_explicit_paste();
 }
 
-fn set_input_text(input: &mut TextArea, text: &str) {
+fn set_input_text(input: &mut TextArea, input_state: &mut TextAreaState, text: &str) {
     *input = TextArea::default();
+    *input_state = TextAreaState::default();
     if !text.is_empty() {
         input.insert_str(text);
     }
 }
 
-fn set_input_text_and_cursor(input: &mut TextArea, text: &str, cursor_byte: usize) {
-    set_input_text(input, text);
+fn set_input_text_and_cursor(
+    input: &mut TextArea,
+    input_state: &mut TextAreaState,
+    text: &str,
+    cursor_byte: usize,
+) {
+    set_input_text(input, input_state, text);
     let cursor_byte = clamp_to_char_boundary(text, cursor_byte);
     let mut row = 0usize;
     let mut col = 0usize;

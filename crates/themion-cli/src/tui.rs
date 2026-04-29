@@ -29,7 +29,6 @@ use themion_core::workflow::WorkflowState;
 use themion_core::ModelInfo;
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc};
-use crate::textarea::TextAreaState;
 use uuid::Uuid;
 
 pub(crate) enum AppEvent {
@@ -2813,7 +2812,6 @@ fn review_area(area: Rect) -> Rect {
 
 pub(crate) fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
-    let input_text = app.composer.input.lines().join("\n");
 
     let input_block = Block::default()
         .borders(Borders::ALL)
@@ -2822,11 +2820,6 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
 
     let input_inner = input_block.inner(area);
     let input_inner_width = input_inner.width.max(1);
-    let (cursor_col, cursor_row) = app
-        .composer
-        .input
-        .cursor_pos_with_state(input_inner_width, TextAreaState);
-
     let input_height = (app.composer.input.desired_height(input_inner_width) + 2).clamp(3, 8);
 
     let chunks = Layout::default()
@@ -2856,17 +2849,36 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
     f.render_widget(conv_base.scroll((scroll, 0)), chunks[0]);
 
     f.render_widget(Clear, chunks[1]);
-    let display_input = input_text.clone();
-    let input_para = Paragraph::new(display_input)
-        .wrap(Wrap { trim: false })
-        .block(input_block);
-    f.render_widget(input_para, chunks[1]);
+    f.render_widget(input_block.clone(), chunks[1]);
+    let input_inner = input_block.inner(chunks[1]);
+    let mut input_state = app.composer.input_state;
+    app.composer
+        .input
+        .render_with_state(input_inner, f.buffer_mut(), &mut input_state);
+
+    let overflow = app
+        .composer
+        .input.overflow_state(input_inner.width.max(1), input_inner.height, input_state);
+    if overflow.hidden_above && input_inner.height > 0 {
+        let x = chunks[1].right().saturating_sub(2);
+        let y = chunks[1].y + 1;
+        if x < chunks[1].right() && y < chunks[1].bottom() {
+            f.buffer_mut()[(x, y)].set_char('↑');
+        }
+    }
+    if overflow.hidden_below && input_inner.height > 0 {
+        let x = chunks[1].right().saturating_sub(2);
+        let y = chunks[1].bottom().saturating_sub(2);
+        if x < chunks[1].right() && y < chunks[1].bottom() {
+            f.buffer_mut()[(x, y)].set_char('↓');
+        }
+    }
 
     if app.review_mode == ReviewMode::Closed {
-        let cursor_x = chunks[1].x + 2 + cursor_col;
-        let cursor_y = chunks[1].y + 1 + cursor_row;
-        if cursor_y < chunks[1].bottom() && cursor_x < chunks[1].right() {
-            f.set_cursor_position((cursor_x, cursor_y));
+        if let Some((cursor_x, cursor_y)) = app.composer.input.cursor_pos_with_state(input_inner, input_state) {
+            if cursor_y < chunks[1].bottom() && cursor_x < chunks[1].right() {
+                f.set_cursor_position((cursor_x, cursor_y));
+            }
         }
     }
 

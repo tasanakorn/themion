@@ -1,9 +1,13 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthChar;
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct TextAreaState;
+pub(crate) struct TextAreaState {
+    scroll: u16,
+}
 
 #[allow(dead_code)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -73,12 +77,59 @@ impl TextArea {
     }
 
     pub(crate) fn desired_height(&self, width: u16) -> u16 {
-        layout_metrics(&self.text, self.cursor_byte, width).visual_lines
+        wrapped_lines(&self.text, width).len() as u16
     }
 
-    pub(crate) fn cursor_pos_with_state(&self, width: u16, _state: TextAreaState) -> (u16, u16) {
-        let metrics = layout_metrics(&self.text, self.cursor_byte, width);
-        (metrics.cursor_col, metrics.cursor_row)
+    pub(crate) fn cursor_pos_with_state(&self, area: Rect, state: TextAreaState) -> Option<(u16, u16)> {
+        let lines = wrapped_lines(&self.text, area.width);
+        if lines.is_empty() {
+            return Some((area.x, area.y));
+        }
+        let effective_scroll = effective_scroll(self.cursor_byte, area.height, &lines, state.scroll);
+        let cursor_line_idx = wrapped_line_index_by_start(&lines, self.cursor_byte).unwrap_or(0) as u16;
+        let line = &lines[cursor_line_idx as usize];
+        let col = display_width(&self.text[line.start..self.cursor_byte]);
+        let screen_row = cursor_line_idx.saturating_sub(effective_scroll);
+        Some((area.x + col, area.y + screen_row))
+    }
+
+    pub(crate) fn overflow_state(&self, width: u16, area_height: u16, state: TextAreaState) -> OverflowState {
+        let lines = wrapped_lines(&self.text, width);
+        overflow_state_for_lines(self.cursor_byte, area_height, &lines, state.scroll)
+    }
+
+    pub(crate) fn render_with_state(&self, area: Rect, buf: &mut Buffer, state: &mut TextAreaState) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let lines = wrapped_lines(&self.text, area.width);
+        if lines.is_empty() {
+            return;
+        }
+        let scroll = effective_scroll(self.cursor_byte, area.height, &lines, state.scroll);
+        state.scroll = scroll;
+        let start = scroll as usize;
+        let end = (scroll + area.height).min(lines.len() as u16) as usize;
+
+        for (screen_row, line_range) in lines[start..end].iter().enumerate() {
+            let mut col = 0u16;
+            for ch in self.text[line_range.clone()].chars() {
+                if col >= area.width {
+                    break;
+                }
+                let width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1) as u16;
+                if col + width > area.width {
+                    break;
+                }
+                buf[(area.x + col, area.y + screen_row as u16)].set_char(ch);
+                for extra in 1..width {
+                    if col + extra < area.width {
+                        buf[(area.x + col + extra, area.y + screen_row as u16)].set_char(' ');
+                    }
+                }
+                col += width;
+            }
+        }
     }
 
     fn backspace(&mut self) {
@@ -128,57 +179,92 @@ impl TextArea {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
-struct LayoutMetrics {
-    visual_lines: u16,
-    cursor_row: u16,
-    cursor_col: u16,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct OverflowState {
+    pub(crate) hidden_above: bool,
+    pub(crate) hidden_below: bool,
 }
 
-#[allow(dead_code)]
-fn layout_metrics(text: &str, cursor_byte: usize, width: u16) -> LayoutMetrics {
+fn display_width(text: &str) -> u16 {
+    let mut col = 0u16;
+    for ch in text.chars() {
+        col = col.saturating_add(UnicodeWidthChar::width(ch).unwrap_or(0).max(1) as u16);
+    }
+    col
+}
+
+fn wrapped_lines(text: &str, width: u16) -> Vec<std::ops::Range<usize>> {
     let width = width.max(1);
-    let cursor_byte = clamp_to_char_boundary(text, cursor_byte);
-    let mut visual_lines = 1u16;
-    let mut cursor_row = 0u16;
-    let mut cursor_col = 0u16;
-    let mut row = 0u16;
+    let mut lines = Vec::new();
+    let mut line_start = 0usize;
     let mut col = 0u16;
 
     for (byte_idx, ch) in text.char_indices() {
-        if byte_idx == cursor_byte {
-            cursor_row = row;
-            cursor_col = col;
-        }
-
         if ch == '\n' {
-            row = row.saturating_add(1);
-            visual_lines = visual_lines.max(row.saturating_add(1));
+            lines.push(line_start..byte_idx);
+            line_start = byte_idx + ch.len_utf8();
             col = 0;
             continue;
         }
 
         let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1) as u16;
-        if col.saturating_add(ch_width) > width {
-            row = row.saturating_add(1);
-            visual_lines = visual_lines.max(row.saturating_add(1));
+        if col > 0 && col.saturating_add(ch_width) > width {
+            lines.push(line_start..byte_idx);
+            line_start = byte_idx;
             col = 0;
         }
         col = col.saturating_add(ch_width);
     }
 
-    if cursor_byte == text.len() {
-        cursor_row = row;
-        cursor_col = col;
+    lines.push(line_start..text.len());
+    lines
+}
+
+fn wrapped_line_index_by_start(lines: &[std::ops::Range<usize>], pos: usize) -> Option<usize> {
+    let idx = lines.partition_point(|r| r.start <= pos);
+    if idx == 0 { None } else { Some(idx - 1) }
+}
+
+fn effective_scroll(
+    cursor_byte: usize,
+    area_height: u16,
+    lines: &[std::ops::Range<usize>],
+    current_scroll: u16,
+) -> u16 {
+    if area_height == 0 {
+        return current_scroll;
+    }
+    let total_lines = lines.len() as u16;
+    if area_height >= total_lines {
+        return 0;
     }
 
-    visual_lines = visual_lines.max(cursor_row.saturating_add(1));
+    let cursor_line_idx = wrapped_line_index_by_start(lines, cursor_byte).unwrap_or(0) as u16;
+    let max_scroll = total_lines.saturating_sub(area_height);
+    let mut scroll = current_scroll.min(max_scroll);
 
-    LayoutMetrics {
-        visual_lines,
-        cursor_row,
-        cursor_col,
+    if cursor_line_idx < scroll {
+        scroll = cursor_line_idx;
+    } else if cursor_line_idx >= scroll + area_height {
+        scroll = cursor_line_idx + 1 - area_height;
+    }
+    scroll
+}
+
+fn overflow_state_for_lines(
+    cursor_byte: usize,
+    area_height: u16,
+    lines: &[std::ops::Range<usize>],
+    current_scroll: u16,
+) -> OverflowState {
+    if area_height == 0 || lines.is_empty() {
+        return OverflowState::default();
+    }
+    let scroll = effective_scroll(cursor_byte, area_height, lines, current_scroll);
+    let total_lines = lines.len() as u16;
+    OverflowState {
+        hidden_above: scroll > 0,
+        hidden_below: scroll.saturating_add(area_height) < total_lines,
     }
 }
 
@@ -243,6 +329,8 @@ fn cursor_byte_from_row_col(text: &str, target_row: usize, target_col: usize) ->
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
 
     #[test]
     fn cursor_tracks_multiline_row_and_col() {
@@ -286,7 +374,8 @@ mod tests {
         let mut area = TextArea::default();
         area.insert_str("abcdef");
         assert_eq!(area.desired_height(4), 2);
-        assert_eq!(area.cursor_pos_with_state(4, TextAreaState), (2, 1));
+        let pos = area.cursor_pos_with_state(Rect::new(0, 0, 4, 2), TextAreaState::default());
+        assert_eq!(pos, Some((2, 1)));
     }
 
     #[test]
@@ -294,7 +383,8 @@ mod tests {
         let mut area = TextArea::default();
         area.insert_str("hello\n");
         assert_eq!(area.desired_height(20), 2);
-        assert_eq!(area.cursor_pos_with_state(20, TextAreaState), (0, 1));
+        let pos = area.cursor_pos_with_state(Rect::new(0, 0, 20, 2), TextAreaState::default());
+        assert_eq!(pos, Some((0, 1)));
     }
 
     #[test]
@@ -302,5 +392,25 @@ mod tests {
         let text = "a界b";
         let inside_wide = 2;
         assert_eq!(clamp_to_char_boundary(text, inside_wide), 1);
+    }
+
+    #[test]
+    fn cursor_pos_with_state_scrolls_to_keep_cursor_visible() {
+        let mut area = TextArea::default();
+        area.insert_str("line1\nline2\nline3\nline4");
+        let pos = area.cursor_pos_with_state(Rect::new(0, 0, 20, 2), TextAreaState::default());
+        assert_eq!(pos, Some((5, 1)));
+    }
+
+    #[test]
+    fn render_with_state_shows_bottom_slice_when_scrolled() {
+        let mut area = TextArea::default();
+        area.insert_str("a\nb\nc\nd");
+        let rect = Rect::new(0, 0, 4, 2);
+        let mut buf = Buffer::empty(rect);
+        let mut state = TextAreaState::default();
+        area.render_with_state(rect, &mut buf, &mut state);
+        assert_eq!(buf[(0, 0)].symbol(), "c");
+        assert_eq!(buf[(0, 1)].symbol(), "d");
     }
 }

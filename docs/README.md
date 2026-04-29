@@ -79,3 +79,4 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-065 | [Reduce Non-TUI Responsibilities in the TUI Layer](prd/prd-065-reduce-non-tui-responsibilities-in-the-tui-layer.md) | Implemented | v0.41.0 | `themion-cli`, `themion-core`, docs |
 | PRD-066 | [Guide Model Instructions for Human Response Length and Chunking](prd/prd-066-guide-model-instructions-for-human-response-length-and-chunking.md) | Implemented | v0.42.0 | `themion-core`, docs |
 | PRD-067 | [Manage Prompt Context to Stay Within Effective Coding-Model Budgets](prd/prd-067-manage-prompt-context-to-stay-within-effective-coding-model-budgets.md) | Implemented | v0.43.0 | `themion-core`, docs |
+| PRD-068 | [Keep the TUI Chat Composer Usable When Input Exceeds the Visible Height](prd/prd-068-keep-the-tui-chat-composer-usable-when-input-exceeds-the-visible-height.md) | Implemented | v0.44.0 | `themion-cli`, docs |
