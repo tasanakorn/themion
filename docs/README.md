@@ -78,3 +78,4 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-064 | [Core-Resolved Board Note Display Metadata for Tool-Call Labels](prd/prd-064-core-resolved-board-note-display-metadata-for-tool-call-labels.md) | Implemented | v0.40.1 | `themion-core`, `themion-cli`, docs |
 | PRD-065 | [Reduce Non-TUI Responsibilities in the TUI Layer](prd/prd-065-reduce-non-tui-responsibilities-in-the-tui-layer.md) | Implemented | v0.41.0 | `themion-cli`, `themion-core`, docs |
 | PRD-066 | [Guide Model Instructions for Human Response Length and Chunking](prd/prd-066-guide-model-instructions-for-human-response-length-and-chunking.md) | Implemented | v0.42.0 | `themion-core`, docs |
+| PRD-067 | [Manage Prompt Context to Stay Within Effective Coding-Model Budgets](prd/prd-067-manage-prompt-context-to-stay-within-effective-coding-model-budgets.md) | Implemented | v0.43.0 | `themion-core`, docs |

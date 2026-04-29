@@ -33,7 +33,7 @@ A single user turn follows this shape:
    - injected contextual instructions such as `AGENTS.md`
    - workflow context and phase instructions
    - an optional history recall hint
-   - the recent conversation window
+   - a budget-aware replay of recent conversation history rather than only a fixed recent-turn window
 5. The active backend streams the assistant response.
 6. If the model requests tools, the harness executes them and appends tool results to the conversation.
 7. The harness calls the model again with the updated conversation.
@@ -44,6 +44,8 @@ A single user turn follows this shape:
 The predefined guardrail layer is also where Themion now tells the model how to shape ordinary human-facing responses by default: prefer the smallest clear answer shape, prefer plain direct prose for simple answers, use 1–2 sentences when that fully answers the user, add bullets, headings, or tables only when that extra structure materially improves scanning or comparison, otherwise organize the reply into about 4±1 meaningful chunks, count each major section or comparison unit as part of that chunk budget, and expand toward about 7±2 chunks only when the user explicitly asks for a fuller explanation that does not fit the smaller structure. When the user mainly needs a recommendation or next action, the answer should lead with that answer first and keep supporting analysis secondary. These are readability heuristics rather than exact quotas, so correctness and user intent still win.
 
 That same guardrail layer also tells the model to preserve user-useful information learned from tools in normal assistant chat text rather than relying only on raw tool results. That guidance is intentionally concise: the default preservation summary is 1–2 sentences, with longer explanation reserved for findings that are materially important or complex. Routine mechanical acknowledgements usually do not need separate narration.
+
+Prompt replay now uses a narrowed budget-aware PRD-067 policy instead of relying only on a strict fixed-turn window. `themion-core` estimates prompt-visible history cost with a rough `chars / 4` heuristic, keeps the active turn (`T0`) as the highest-priority replay unit, degrades `T-1` through `T-5` into assistant-style pure-message replay when `T0` alone exceeds the normal 170K target, and omits prior turns when `T0` alone exceeds the 250K spike ceiling or when older-turn inclusion would exceed that ceiling. Calibration, `CompactSummary`, and a broader compaction ladder are intentionally out of scope for this PRD revision.
 
 ## Agent identity boundary
 

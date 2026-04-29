@@ -253,7 +253,7 @@ Each call to `run_loop(user_input)`:
 
 ## Context Windowing
 
-`Agent.window_turns` (default 5) controls how much history is sent to the API. On each LLM round:
+Prompt replay is now budget-aware rather than purely fixed by `Agent.window_turns`. The current PRD-067 implementation still keeps `window_turns` as a compatibility field, but replay in `themion-core` now preserves the active turn first, downgrades `T-1` through `T-5` into pure-message form when `T0` alone exceeds the normal 170K target, and omits older turns once replay would exceed the 250K ceiling. Durable history remains stored in SQLite even when replay is reduced. On each LLM round:
 
 ```text
 [system_prompt]

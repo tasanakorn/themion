@@ -21,6 +21,98 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+const EFFECTIVE_PROMPT_BUDGET_TOKENS: usize = 170_000;
+const EFFECTIVE_PROMPT_SPIKE_TOKENS: usize = 250_000;
+const RECENT_PRIOR_TURN_BAND: usize = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayForm {
+    Full,
+    PureMessage,
+}
+
+fn estimate_message_chars(msg: &Message) -> usize {
+    let mut total = msg.role.len();
+    if let Some(content) = &msg.content {
+        total += content.len();
+    }
+    if let Some(tool_call_id) = &msg.tool_call_id {
+        total += tool_call_id.len();
+    }
+    if let Some(tool_calls) = &msg.tool_calls {
+        for tc in tool_calls {
+            total += tc.id.len();
+            total += tc.function.name.len();
+            total += tc.function.arguments.len();
+        }
+    }
+    total
+}
+
+fn estimate_messages_tokens(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .map(estimate_message_chars)
+        .sum::<usize>()
+        .div_ceil(4)
+}
+
+fn summarize_tool_calls(tool_calls: &[crate::client::ToolCall]) -> String {
+    let mut parts = Vec::new();
+    for tc in tool_calls {
+        let mut line = format!("tool call: {}", tc.function.name);
+        if let Ok(value) = serde_json::from_str::<Value>(&tc.function.arguments) {
+            if let Some(reason) = value.get("reason").and_then(Value::as_str) {
+                let reason = reason.trim();
+                if !reason.is_empty() {
+                    line.push_str(&format!("\nreason: {}", reason));
+                }
+            }
+        }
+        parts.push(line);
+    }
+    parts.join("\n")
+}
+
+fn build_pure_message_turn(turn_messages: &[Message]) -> Vec<Message> {
+    let mut out = Vec::new();
+    for msg in turn_messages {
+        match msg.role.as_str() {
+            "assistant" => {
+                let mut parts = Vec::new();
+                if let Some(content) = &msg.content {
+                    let content = content.trim();
+                    if !content.is_empty() {
+                        parts.push(content.to_string());
+                    }
+                }
+                if let Some(tool_calls) = &msg.tool_calls {
+                    let summary = summarize_tool_calls(tool_calls);
+                    if !summary.is_empty() {
+                        parts.push(summary);
+                    }
+                }
+                if !parts.is_empty() {
+                    out.push(Message {
+                        role: "assistant".to_string(),
+                        content: Some(parts.join("\n")),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    });
+                }
+            }
+            "tool" => {}
+            _ => out.push(Message {
+                role: msg.role.clone(),
+                content: msg.content.clone(),
+                tool_calls: None,
+                tool_call_id: None,
+            }),
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 pub struct TurnStats {
     pub llm_rounds: u32,
@@ -1047,22 +1139,68 @@ impl Agent {
 
             msgs_with_system.extend(self.build_workflow_context_messages(activation_source));
 
-            let window_start = if self.turn_boundaries.len() > self.window_turns {
-                let omitted = self.turn_boundaries.len() - self.window_turns;
+            let history_prefix = msgs_with_system.clone();
+            let prompt_overhead_tokens = estimate_messages_tokens(&history_prefix);
+            let recent_turn_count = self.turn_boundaries.len();
+            let mut included_history = Vec::new();
+            let mut omitted_turns = 0usize;
+
+            if recent_turn_count > 0 {
+                let t0_index = recent_turn_count - 1;
+                let t0_start = self.turn_boundaries[t0_index];
+                let t0_messages = &self.messages[t0_start..];
+                let t0_tokens = estimate_messages_tokens(t0_messages);
+                included_history.extend_from_slice(t0_messages);
+                let mut used_tokens = prompt_overhead_tokens + t0_tokens;
+
+                if t0_tokens <= EFFECTIVE_PROMPT_SPIKE_TOKENS {
+                    for older_idx in (0..t0_index).rev() {
+                        let start = self.turn_boundaries[older_idx];
+                        let end = self
+                            .turn_boundaries
+                            .get(older_idx + 1)
+                            .copied()
+                            .unwrap_or(self.messages.len());
+                        let age_from_t0 = t0_index - older_idx;
+                        let replay_form = if t0_tokens > EFFECTIVE_PROMPT_BUDGET_TOKENS
+                            && age_from_t0 <= RECENT_PRIOR_TURN_BAND
+                        {
+                            ReplayForm::PureMessage
+                        } else {
+                            ReplayForm::Full
+                        };
+                        let candidate = match replay_form {
+                            ReplayForm::Full => self.messages[start..end].to_vec(),
+                            ReplayForm::PureMessage => {
+                                build_pure_message_turn(&self.messages[start..end])
+                            }
+                        };
+                        let candidate_tokens = estimate_messages_tokens(&candidate);
+                        if used_tokens + candidate_tokens > EFFECTIVE_PROMPT_SPIKE_TOKENS {
+                            omitted_turns = older_idx + 1;
+                            break;
+                        }
+                        used_tokens += candidate_tokens;
+                        included_history.splice(0..0, candidate);
+                    }
+                } else {
+                    omitted_turns = t0_index;
+                }
+            }
+
+            msgs_with_system = history_prefix;
+            if omitted_turns > 0 {
                 msgs_with_system.push(Message {
                     role: "system".to_string(),
                     content: Some(format!(
-                        "Note: {} earlier turn(s) (seq 1–{}) are stored in history. Use history_recall or history_search without session_id for the current session, or pass session_id=\"*\" to search across all sessions in the current project.",
-                        omitted, omitted
+                        "Note: {} earlier turn(s) are stored in history. Use history_recall or history_search without session_id for the current session, or pass session_id=\"*\" to search across all sessions in the current project.",
+                        omitted_turns
                     )),
                     tool_calls: None,
                     tool_call_id: None,
                 });
-                self.turn_boundaries[self.turn_boundaries.len() - self.window_turns]
-            } else {
-                0
-            };
-            msgs_with_system.extend_from_slice(&self.messages[window_start..]);
+            }
+            msgs_with_system.extend(included_history);
 
             self.emit(AgentEvent::LlmStart);
             round_index += 1;
@@ -1598,4 +1736,88 @@ impl Agent {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+    use crate::client::{FunctionCall, Message, ToolCall};
+    use serde_json::json;
+
+    fn msg(role: &str, content: &str) -> Message {
+        Message {
+            role: role.to_string(),
+            content: Some(content.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn pure_message_turn_keeps_assistant_text_and_summarizes_tool_reason() {
+        let tool_calls = vec![ToolCall {
+            id: "call-1".to_string(),
+            function: FunctionCall {
+                name: "shell_run_command".to_string(),
+                arguments: json!({
+                    "command": "cargo check",
+                    "reason": "validate touched crate"
+                })
+                .to_string(),
+            },
+        }];
+        let turn = vec![
+            msg("user", "please validate it"),
+            Message {
+                role: "assistant".to_string(),
+                content: Some("I will run validation.".to_string()),
+                tool_calls: Some(tool_calls),
+                tool_call_id: None,
+            },
+            Message {
+                role: "tool".to_string(),
+                content: Some("finished".to_string()),
+                tool_calls: None,
+                tool_call_id: Some("call-1".to_string()),
+            },
+        ];
+
+        let pure = build_pure_message_turn(&turn);
+        assert_eq!(pure.len(), 2);
+        assert_eq!(pure[0].role, "user");
+        let assistant = &pure[1];
+        assert_eq!(assistant.role, "assistant");
+        let content = assistant.content.as_deref().unwrap();
+        assert!(content.contains("I will run validation."));
+        assert!(content.contains("tool call: shell_run_command"));
+        assert!(content.contains("reason: validate touched crate"));
+        assert!(assistant.tool_calls.is_none());
+        assert!(assistant.tool_call_id.is_none());
+    }
+
+    #[test]
+    fn pure_message_turn_omits_tool_messages() {
+        let turn = vec![
+            msg("user", "read the file"),
+            Message {
+                role: "assistant".to_string(),
+                content: Some("Reading it now.".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            Message {
+                role: "tool".to_string(),
+                content: Some("file contents".to_string()),
+                tool_calls: None,
+                tool_call_id: Some("tool-1".to_string()),
+            },
+        ];
+
+        let pure = build_pure_message_turn(&turn);
+        assert_eq!(pure.len(), 2);
+        assert!(pure.iter().all(|m| m.role != "tool"));
+    }
+
+    #[test]
+    fn estimate_messages_tokens_uses_char_div_ceil_four() {
+        let messages = vec![msg("user", "12345678")];
+        assert_eq!(estimate_messages_tokens(&messages), 3);
+    }
+}
