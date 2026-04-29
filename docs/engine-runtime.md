@@ -28,7 +28,7 @@ A single user turn follows this shape:
 3. The harness records a new turn and persists the user message. New `agent_turns` rows also capture optional turn-level runtime attribution in `agent_turns.meta` as compact JSON, currently including `app_version`, `profile`, `provider`, and `model` when available.
 4. The harness builds the model input from:
    - the base system prompt
-   - predefined built-in coding guardrails, including guidance to preserve important tool-learned findings in ordinary assistant chat text with concise 1–2 sentence summaries by default when that information matters
+   - predefined built-in coding guardrails, including guidance to prefer the smallest clear answer shape, prefer plain direct prose for simple answers, answer in 1–2 sentences when that is enough, add bullets/headings/tables only when that extra structure materially helps scanning or comparison, otherwise organize replies into about 4±1 meaningful chunks by default, allow expansion toward about 7±2 chunks only for user-requested fuller explanation, and preserve important tool-learned findings in ordinary assistant chat text with concise 1–2 sentence summaries by default when that information matters
    - predefined Codex CLI web-search instruction
    - injected contextual instructions such as `AGENTS.md`
    - workflow context and phase instructions
@@ -41,7 +41,9 @@ A single user turn follows this shape:
 9. This repeats until the model returns a normal assistant response with no more tool calls, or another existing runtime stop condition ends the turn.
 10. The turn is finalized in SQLite with message, workflow, token, and turn-level runtime metadata.
 
-The predefined guardrail layer is also where Themion now tells the model to preserve user-useful information learned from tools in normal assistant chat text rather than relying only on raw tool results. That guidance is intentionally concise: the default preservation summary is 1–2 sentences, with longer explanation reserved for findings that are materially important or complex. Routine mechanical acknowledgements usually do not need separate narration.
+The predefined guardrail layer is also where Themion now tells the model how to shape ordinary human-facing responses by default: prefer the smallest clear answer shape, prefer plain direct prose for simple answers, use 1–2 sentences when that fully answers the user, add bullets, headings, or tables only when that extra structure materially improves scanning or comparison, otherwise organize the reply into about 4±1 meaningful chunks, count each major section or comparison unit as part of that chunk budget, and expand toward about 7±2 chunks only when the user explicitly asks for a fuller explanation that does not fit the smaller structure. When the user mainly needs a recommendation or next action, the answer should lead with that answer first and keep supporting analysis secondary. These are readability heuristics rather than exact quotas, so correctness and user intent still win.
+
+That same guardrail layer also tells the model to preserve user-useful information learned from tools in normal assistant chat text rather than relying only on raw tool results. That guidance is intentionally concise: the default preservation summary is 1–2 sentences, with longer explanation reserved for findings that are materially important or complex. Routine mechanical acknowledgements usually do not need separate narration.
 
 ## Agent identity boundary
 
