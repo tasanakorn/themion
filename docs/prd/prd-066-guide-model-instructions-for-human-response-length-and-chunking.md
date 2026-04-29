@@ -351,12 +351,15 @@ Rollout guidance:
 
 ## Implementation checklist
 
-- [ ] update `crates/themion-core/src/predefined_guardrails.rs` with explicit three-tier response-sizing guidance
-- [ ] ensure the final wording remains close to the PRD's proposed guardrail text or preserves the same semantics clearly
-- [ ] ensure the wording clearly says the counts are heuristics, not exact quotas
-- [ ] keep prompt assembly unchanged in `crates/themion-core/src/agent.rs`
-- [ ] confirm the existing tool-summary guidance remains compatible and intact
-- [ ] update `docs/engine-runtime.md` and `docs/architecture.md`
-- [ ] update `docs/README.md` and this PRD status/version when the feature lands
-- [ ] run `cargo check -p themion-core`
-- [ ] run `cargo check -p themion-core --all-features`
+- [x] update `crates/themion-core/src/predefined_guardrails.rs` with explicit three-tier response-sizing guidance
+- [x] ensure the final wording remains close to the PRD's proposed guardrail text or preserves the same semantics clearly
+- [x] ensure the wording clearly says the counts are heuristics, not exact quotas
+- [x] keep prompt assembly unchanged in `crates/themion-core/src/agent.rs`
+- [x] confirm the existing tool-summary guidance remains compatible and intact
+- [x] update `docs/engine-runtime.md` and `docs/architecture.md`
+- [x] update `docs/README.md` and this PRD status/version when the feature lands
+- [x] run `cargo check -p themion-core`
+- [x] run `cargo check -p themion-core --all-features`
+- [x] run `cargo check -p themion-cli`
+- [x] run `cargo check -p themion-cli --features stylos`
+- [x] run `cargo check -p themion-cli --all-features`
