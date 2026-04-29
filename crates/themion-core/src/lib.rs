@@ -14,7 +14,10 @@ pub mod workflow;
 pub use auth::CodexAuth;
 pub use client::{ChatBackend, ModelInfo};
 pub use client_codex::{ApiCallRateLimitReport, ExtractedLimitWindow, ExtractedRateLimitSnapshot};
-pub use context_report::{HistoryTurnReport, PromptContextReport, PromptSectionKind, PromptSectionReport, ReplayForm};
+pub use context_report::{
+    EstimateMode, HistoryTurnReport, PromptContextReport, PromptSectionKind, PromptSectionReport,
+    ReplayForm, TokenizerResolutionSource,
+};
 pub use db::DbHandle;
 pub use workflow::{
     WorkflowState, WorkflowStatus, DEFAULT_AGENT, DEFAULT_PHASE, DEFAULT_WORKFLOW, LITE_WORKFLOW,

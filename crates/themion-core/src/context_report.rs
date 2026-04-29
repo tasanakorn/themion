@@ -6,7 +6,19 @@ pub enum ReplayForm {
     PureMessage,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EstimateMode {
+    Tokenizer,
+    RoughFallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenizerResolutionSource {
+    ExactModelMatch,
+    TrustedFallbackMapping,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptSectionKind {
     SystemPrompt,
     CodingGuardrails,
@@ -53,6 +65,9 @@ pub struct PromptContextReport {
     pub total_tokens_estimate: usize,
     pub t0_exceeds_normal_budget: bool,
     pub t0_exceeds_spike_budget: bool,
+    pub estimate_mode: EstimateMode,
+    pub tokenizer_name: Option<String>,
+    pub tokenizer_resolution_source: Option<TokenizerResolutionSource>,
 }
 
 pub fn estimate_message_chars(msg: &Message) -> usize {
@@ -80,7 +95,6 @@ pub fn estimate_messages_chars(messages: &[Message]) -> usize {
 pub fn estimate_messages_tokens(messages: &[Message]) -> usize {
     estimate_messages_chars(messages).div_ceil(4)
 }
-
 
 pub fn estimate_text_tokens(text: &str) -> usize {
     text.len().div_ceil(4)

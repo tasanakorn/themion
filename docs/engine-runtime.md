@@ -45,9 +45,9 @@ The predefined guardrail layer is also where Themion now tells the model how to 
 
 That same guardrail layer also tells the model to preserve user-useful information learned from tools in normal assistant chat text rather than relying only on raw tool results. That guidance is intentionally concise: the default preservation summary is 1–2 sentences, with longer explanation reserved for findings that are materially important or complex. Routine mechanical acknowledgements usually do not need separate narration.
 
-Prompt replay now uses a narrowed budget-aware PRD-067 policy instead of relying only on a strict fixed-turn window. `themion-core` estimates prompt-visible history cost with a rough `chars / 4` heuristic, keeps the active turn (`T0`) as the highest-priority replay unit, degrades `T-1` through `T-5` into assistant-style pure-message replay when `T0` alone exceeds the normal 170K target, and omits prior turns when `T0` alone exceeds the 250K spike ceiling or when older-turn inclusion would exceed that ceiling. Calibration, `CompactSummary`, and a broader compaction ladder are intentionally out of scope for this PRD revision.
+Prompt replay now uses a narrowed budget-aware PRD-067 policy instead of relying only on a strict fixed-turn window. `themion-core` now prefers tokenizer-backed local token estimation through `tiktoken-rs` when the active model resolves through an exact upstream model mapping, otherwise falls back through a short explicit trusted tokenizer mapping for selected known aliases, and finally degrades to the rough `chars / 4` estimator when no tokenizer path is trusted. The replay policy still keeps the active turn (`T0`) as the highest-priority replay unit, degrades `T-1` through `T-5` into assistant-style pure-message replay when `T0` alone exceeds the normal 170K target, and omits prior turns when `T0` alone exceeds the 250K spike ceiling or when older-turn inclusion would exceed that ceiling. Calibration, `CompactSummary`, and a broader compaction ladder are intentionally out of scope for this PRD revision.
 
-That same core prompt-analysis path now also powers the TUI-local `/context` command. `themion-core` constructs a structured prompt-context report describing prompt sections, rough `chars / 4` token estimates, turn replay modes, and omission boundaries, and `themion-cli` only formats that report for transcript display. This keeps the user-facing inspection path aligned with the real next-round prompt assembly logic rather than relying on a separate TUI-only estimator.
+That same core prompt-analysis path now also powers the TUI-local `/context` command. `themion-core` constructs a structured prompt-context report describing prompt sections, tokenizer-backed or fallback token estimates, estimate mode, tokenizer path when available, turn replay modes, and omission boundaries, and `themion-cli` only formats that report for transcript display. This keeps the user-facing inspection path aligned with the real next-round prompt assembly logic rather than relying on a separate TUI-only estimator.
 
 ## Agent identity boundary
 
@@ -384,8 +384,10 @@ Current behavior:
 
 - `/context` runs locally and does not call the model
 - it reports the prompt-visible context that the next provider round would use, based on the same shared core prompt-analysis path used by live prompt assembly
-- it shows a section-by-section size breakdown including prompt layers such as system prompt, guardrails, Codex CLI instruction, injected contextual instructions, workflow context, optional history recall hint, and replayed history
-- it reports both raw character counts and rough token estimates using the same `chars / 4` heuristic used by current budget-aware replay
+- it shows a section-by-section size breakdown including prompt layers such as system prompt, guardrails, Codex CLI instruction, injected contextual instructions, workflow context, tool definitions, optional history recall hint, and replayed history
+- it reports both raw character counts and estimated token counts from the same estimator path used by live replay budgeting
+- it shows an explicit estimate mode such as tokenizer-backed or rough fallback
+- when tokenizer-backed estimation is active, it also shows which tokenizer path was used, including exact model match versus trusted fallback mapping
 - it shows turn-oriented history replay status including total turns, replayed turns, reduced turns, omitted turns, and per-turn `full` versus `reduced` replay form
 - when older turns are omitted, it makes the omission boundary and recall-hint inclusion visible in the user-facing output
 - when `T0` alone exceeds the normal or spike budget thresholds, it explains that replay state explicitly rather than leaving the user to infer it from totals alone

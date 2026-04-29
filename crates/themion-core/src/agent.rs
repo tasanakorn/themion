@@ -2,8 +2,9 @@ use crate::agents_md;
 use crate::client::{ChatBackend, ChatRoundTrace, Message, ModelInfo};
 use crate::codex_cli_instruction::CODEX_CLI_WEB_SEARCH_INSTRUCTION;
 use crate::context_report::{
-    estimate_messages_chars, estimate_messages_tokens, estimate_text_tokens,
+    estimate_messages_chars, estimate_messages_tokens, estimate_text_tokens, EstimateMode,
     HistoryTurnReport, PromptContextReport, PromptSectionKind, PromptSectionReport, ReplayForm,
+    TokenizerResolutionSource,
 };
 use crate::db::DbHandle;
 use crate::predefined_guardrails::PREDEFINED_GUARDRAILS;
@@ -28,6 +29,105 @@ use uuid::Uuid;
 const EFFECTIVE_PROMPT_BUDGET_TOKENS: usize = 170_000;
 const EFFECTIVE_PROMPT_SPIKE_TOKENS: usize = 250_000;
 const RECENT_PRIOR_TURN_BAND: usize = 5;
+
+
+#[derive(Clone)]
+struct TokenEstimateContext {
+    estimate_mode: EstimateMode,
+    tokenizer_name: Option<String>,
+    tokenizer_resolution_source: Option<TokenizerResolutionSource>,
+}
+
+impl TokenEstimateContext {
+    fn rough_fallback() -> Self {
+        Self {
+            estimate_mode: EstimateMode::RoughFallback,
+            tokenizer_name: None,
+            tokenizer_resolution_source: None,
+        }
+    }
+
+    fn estimate_text(&self, text: &str) -> usize {
+        match self.tokenizer_name.as_deref() {
+            Some("o200k_base") => tiktoken_rs::o200k_base_singleton()
+                .encode_with_special_tokens(text)
+                .len(),
+            Some("cl100k_base") => tiktoken_rs::cl100k_base_singleton()
+                .encode_with_special_tokens(text)
+                .len(),
+            Some("p50k_base") => tiktoken_rs::p50k_base_singleton()
+                .encode_with_special_tokens(text)
+                .len(),
+            Some("p50k_edit") => tiktoken_rs::p50k_edit_singleton()
+                .encode_with_special_tokens(text)
+                .len(),
+            Some("r50k_base") => tiktoken_rs::r50k_base_singleton()
+                .encode_with_special_tokens(text)
+                .len(),
+            Some("o200k_harmony") => tiktoken_rs::o200k_harmony_singleton()
+                .encode_with_special_tokens(text)
+                .len(),
+            _ => estimate_text_tokens(text),
+        }
+    }
+
+    fn estimate_messages(&self, messages: &[Message]) -> usize {
+        match self.estimate_mode {
+            EstimateMode::Tokenizer => messages
+                .iter()
+                .map(|msg| {
+                    let mut total = self.estimate_text(&msg.role);
+                    if let Some(content) = &msg.content {
+                        total += self.estimate_text(content);
+                    }
+                    if let Some(tool_call_id) = &msg.tool_call_id {
+                        total += self.estimate_text(tool_call_id);
+                    }
+                    if let Some(tool_calls) = &msg.tool_calls {
+                        for tc in tool_calls {
+                            total += self.estimate_text(&tc.id);
+                            total += self.estimate_text(&tc.function.name);
+                            total += self.estimate_text(&tc.function.arguments);
+                        }
+                    }
+                    total
+                })
+                .sum(),
+            EstimateMode::RoughFallback => estimate_messages_tokens(messages),
+        }
+    }
+}
+
+fn trusted_tokenizer_name_for_model(model: &str) -> Option<(&'static str, TokenizerResolutionSource)> {
+    if let Some(tokenizer) = tiktoken_rs::tokenizer::get_tokenizer(model) {
+        return Some((match tokenizer {
+            tiktoken_rs::tokenizer::Tokenizer::O200kBase => "o200k_base",
+            tiktoken_rs::tokenizer::Tokenizer::O200kHarmony => "o200k_harmony",
+            tiktoken_rs::tokenizer::Tokenizer::Cl100kBase => "cl100k_base",
+            tiktoken_rs::tokenizer::Tokenizer::P50kBase => "p50k_base",
+            tiktoken_rs::tokenizer::Tokenizer::P50kEdit => "p50k_edit",
+            tiktoken_rs::tokenizer::Tokenizer::R50kBase => "r50k_base",
+            tiktoken_rs::tokenizer::Tokenizer::Gpt2 => "r50k_base",
+        }, TokenizerResolutionSource::ExactModelMatch));
+    }
+
+    let trusted = [
+        ("gpt-4o", "o200k_base"),
+        ("gpt-4.1", "o200k_base"),
+        ("gpt-5", "o200k_base"),
+        ("o1", "o200k_base"),
+        ("o3", "o200k_base"),
+        ("o4", "o200k_base"),
+        ("gpt-4", "cl100k_base"),
+        ("gpt-3.5-turbo", "cl100k_base"),
+    ];
+    for (prefix, tokenizer) in trusted {
+        if model == prefix || model.starts_with(&format!("{prefix}-")) {
+            return Some((tokenizer, TokenizerResolutionSource::TrustedFallbackMapping));
+        }
+    }
+    None
+}
 
 fn summarize_tool_calls(tool_calls: &[crate::client::ToolCall]) -> String {
     let mut parts = Vec::new();
@@ -412,6 +512,13 @@ impl Agent {
 
 
     fn build_prompt_context_report(&self, activation_source: &str) -> PromptContextReport {
+        let token_ctx = trusted_tokenizer_name_for_model(&self.model)
+            .map(|(tokenizer_name, resolution_source)| TokenEstimateContext {
+                estimate_mode: EstimateMode::Tokenizer,
+                tokenizer_name: Some(tokenizer_name.to_string()),
+                tokenizer_resolution_source: Some(resolution_source),
+            })
+            .unwrap_or_else(TokenEstimateContext::rough_fallback);
         let mut sections = Vec::new();
 
         let system_prompt = vec![Message {
@@ -424,7 +531,7 @@ impl Agent {
             kind: PromptSectionKind::SystemPrompt,
             label: "system prompt".to_string(),
             chars: estimate_messages_chars(&system_prompt),
-            tokens_estimate: estimate_messages_tokens(&system_prompt),
+            tokens_estimate: token_ctx.estimate_messages(&system_prompt),
             messages: system_prompt,
             extra_text: None,
         });
@@ -439,7 +546,7 @@ impl Agent {
             kind: PromptSectionKind::CodingGuardrails,
             label: "coding guardrails".to_string(),
             chars: estimate_messages_chars(&coding_guardrails),
-            tokens_estimate: estimate_messages_tokens(&coding_guardrails),
+            tokens_estimate: token_ctx.estimate_messages(&coding_guardrails),
             messages: coding_guardrails,
             extra_text: None,
         });
@@ -464,7 +571,7 @@ impl Agent {
             kind: PromptSectionKind::BoardGuidance,
             label: "board guidance".to_string(),
             chars: estimate_messages_chars(&board_guidance),
-            tokens_estimate: estimate_messages_tokens(&board_guidance),
+            tokens_estimate: token_ctx.estimate_messages(&board_guidance),
             messages: board_guidance,
             extra_text: None,
         });
@@ -479,7 +586,7 @@ impl Agent {
             kind: PromptSectionKind::MemoryGuidance,
             label: "memory guidance".to_string(),
             chars: estimate_messages_chars(&memory_guidance),
-            tokens_estimate: estimate_messages_tokens(&memory_guidance),
+            tokens_estimate: token_ctx.estimate_messages(&memory_guidance),
             messages: memory_guidance,
             extra_text: None,
         });
@@ -494,7 +601,7 @@ impl Agent {
             kind: PromptSectionKind::CodexCliWebSearch,
             label: "codex cli web-search instruction".to_string(),
             chars: estimate_messages_chars(&codex_instruction),
-            tokens_estimate: estimate_messages_tokens(&codex_instruction),
+            tokens_estimate: token_ctx.estimate_messages(&codex_instruction),
             messages: codex_instruction,
             extra_text: None,
         });
@@ -510,7 +617,7 @@ impl Agent {
                 kind: PromptSectionKind::AgentsMd,
                 label: "AGENTS.md instructions".to_string(),
                 chars: estimate_messages_chars(&agents_md),
-                tokens_estimate: estimate_messages_tokens(&agents_md),
+                tokens_estimate: token_ctx.estimate_messages(&agents_md),
                 messages: agents_md,
                 extra_text: None,
             });
@@ -521,7 +628,7 @@ impl Agent {
             kind: PromptSectionKind::WorkflowContext,
             label: "workflow context".to_string(),
             chars: estimate_messages_chars(&workflow_messages),
-            tokens_estimate: estimate_messages_tokens(&workflow_messages),
+            tokens_estimate: token_ctx.estimate_messages(&workflow_messages),
             messages: workflow_messages,
             extra_text: None,
         });
@@ -534,7 +641,7 @@ impl Agent {
             messages: Vec::new(),
             extra_text: Some(tool_defs_text.clone()),
             chars: tool_defs_text.len(),
-            tokens_estimate: estimate_text_tokens(&tool_defs_text),
+            tokens_estimate: token_ctx.estimate_text(&tool_defs_text),
         });
 
         let prompt_overhead_tokens = sections.iter().map(|s| s.tokens_estimate).sum::<usize>();
@@ -549,7 +656,7 @@ impl Agent {
             let t0_index = recent_turn_count - 1;
             let t0_start = self.turn_boundaries[t0_index];
             let t0_messages = &self.messages[t0_start..];
-            let t0_tokens = estimate_messages_tokens(t0_messages);
+            let t0_tokens = token_ctx.estimate_messages(t0_messages);
             t0_exceeds_normal_budget = t0_tokens > EFFECTIVE_PROMPT_BUDGET_TOKENS;
             t0_exceeds_spike_budget = t0_tokens > EFFECTIVE_PROMPT_SPIKE_TOKENS;
             included_history.extend_from_slice(t0_messages);
@@ -586,7 +693,7 @@ impl Agent {
                         ReplayForm::Full => self.messages[start..end].to_vec(),
                         ReplayForm::PureMessage => build_pure_message_turn(&self.messages[start..end]),
                     };
-                    let candidate_tokens = estimate_messages_tokens(&candidate);
+                    let candidate_tokens = token_ctx.estimate_messages(&candidate);
                     let candidate_chars = estimate_messages_chars(&candidate);
                     let turn_label = format!("T-{}", age_from_t0);
                     if used_tokens + candidate_tokens > EFFECTIVE_PROMPT_SPIKE_TOKENS {
@@ -648,7 +755,7 @@ impl Agent {
                 kind: PromptSectionKind::HistoryRecallHint,
                 label: "history recall hint".to_string(),
                 chars: estimate_messages_chars(&recall_hint),
-                tokens_estimate: estimate_messages_tokens(&recall_hint),
+                tokens_estimate: token_ctx.estimate_messages(&recall_hint),
                 messages: recall_hint,
                 extra_text: None,
             });
@@ -658,7 +765,7 @@ impl Agent {
             kind: PromptSectionKind::HistoryReplay,
             label: "history replay".to_string(),
             chars: estimate_messages_chars(&included_history),
-            tokens_estimate: estimate_messages_tokens(&included_history),
+            tokens_estimate: token_ctx.estimate_messages(&included_history),
             messages: included_history,
             extra_text: None,
         });
@@ -682,6 +789,9 @@ impl Agent {
             total_tokens_estimate,
             t0_exceeds_normal_budget,
             t0_exceeds_spike_budget,
+            estimate_mode: token_ctx.estimate_mode,
+            tokenizer_name: token_ctx.tokenizer_name.clone(),
+            tokenizer_resolution_source: token_ctx.tokenizer_resolution_source,
         }
     }
 
@@ -1327,131 +1437,12 @@ impl Agent {
                 break;
             }
 
-            let mut msgs_with_system = vec![Message {
-                role: "system".to_string(),
-                content: Some(self.system_prompt.clone()),
-                tool_calls: None,
-                tool_call_id: None,
-            }];
-
-            msgs_with_system.push(Message {
-                role: "system".to_string(),
-                content: Some(PREDEFINED_GUARDRAILS.to_string()),
-                tool_calls: None,
-                tool_call_id: None,
-            });
-
-            #[cfg(feature = "stylos")]
-            msgs_with_system.push(Message {
-                role: "system".to_string(),
-                content: Some({
-                    let self_instance = self.local_instance_id.as_deref().unwrap_or("unknown");
-                    let self_agent_id = self.local_agent_id.as_deref().unwrap_or("main");
-                    format!(
-                        "Board guidance: simple direct Q&A without tools usually should not create a self-note. If the task needs tools, edits, validation, or durable follow-up tracking, consider creating a durable board note for yourself to help keep track of the work. Your exact self-note target in this session is to_instance={self_instance} to_agent_id={self_agent_id}. For self-notes, you may also call board_create_note with the exact magic keyword SELF for both to_instance and to_agent_id, and the runtime will replace SELF with those exact values. Do not invent placeholders or guesses other than the exact SELF keyword. Multi-agent collaboration guidance: prefer durable board notes over stylos_request_talk when delegating asynchronous or non-urgent work to another agent. Treat stylos_request_talk as an interrupting realtime path for urgent coordination or brief clarification. When you receive a done-mention note, treat it as an informational completion notification rather than a fresh work request."
-                    )
-                }),
-                tool_calls: None,
-                tool_call_id: None,
-            });
-
-            msgs_with_system.push(Message {
-                role: "system".to_string(),
-                content: Some(MEMORY_KB_GUIDANCE.to_string()),
-                tool_calls: None,
-                tool_call_id: None,
-            });
-
-            #[cfg(not(feature = "stylos"))]
-            msgs_with_system.push(Message {
-                role: "system".to_string(),
-                content: Some(
-                    "Board guidance: simple direct Q&A without tools usually should not create a self-note. If the task needs tools, edits, validation, or durable follow-up tracking, consider creating a durable board note for yourself to help keep track of the work. For self-notes in this session, use your local board context rather than inventing remote identifiers. Multi-agent collaboration guidance: prefer durable board notes over stylos_request_talk when delegating asynchronous or non-urgent work to another agent. Treat stylos_request_talk as an interrupting realtime path for urgent coordination or brief clarification. When you receive a done-mention note, treat it as an informational completion notification rather than a fresh work request.".to_string(),
-                ),
-                tool_calls: None,
-                tool_call_id: None,
-            });
-
-            msgs_with_system.push(Message {
-                role: "system".to_string(),
-                content: Some(CODEX_CLI_WEB_SEARCH_INSTRUCTION.to_string()),
-                tool_calls: None,
-                tool_call_id: None,
-            });
-
-            if let Some(agents_md_message) = agents_md::build_agents_md_message(&self.project_dir) {
-                msgs_with_system.push(Message {
-                    role: "user".to_string(),
-                    content: Some(agents_md_message),
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
-            }
-
-            msgs_with_system.extend(self.build_workflow_context_messages(activation_source));
-
-            let history_prefix = msgs_with_system.clone();
-            let prompt_overhead_tokens = estimate_messages_tokens(&history_prefix);
-            let recent_turn_count = self.turn_boundaries.len();
-            let mut included_history = Vec::new();
-            let mut omitted_turns = 0usize;
-
-            if recent_turn_count > 0 {
-                let t0_index = recent_turn_count - 1;
-                let t0_start = self.turn_boundaries[t0_index];
-                let t0_messages = &self.messages[t0_start..];
-                let t0_tokens = estimate_messages_tokens(t0_messages);
-                included_history.extend_from_slice(t0_messages);
-                let mut used_tokens = prompt_overhead_tokens + t0_tokens;
-
-                if t0_tokens <= EFFECTIVE_PROMPT_SPIKE_TOKENS {
-                    for older_idx in (0..t0_index).rev() {
-                        let start = self.turn_boundaries[older_idx];
-                        let end = self
-                            .turn_boundaries
-                            .get(older_idx + 1)
-                            .copied()
-                            .unwrap_or(self.messages.len());
-                        let age_from_t0 = t0_index - older_idx;
-                        let replay_form = if t0_tokens > EFFECTIVE_PROMPT_BUDGET_TOKENS
-                            && age_from_t0 <= RECENT_PRIOR_TURN_BAND
-                        {
-                            ReplayForm::PureMessage
-                        } else {
-                            ReplayForm::Full
-                        };
-                        let candidate = match replay_form {
-                            ReplayForm::Full => self.messages[start..end].to_vec(),
-                            ReplayForm::PureMessage => {
-                                build_pure_message_turn(&self.messages[start..end])
-                            }
-                        };
-                        let candidate_tokens = estimate_messages_tokens(&candidate);
-                        if used_tokens + candidate_tokens > EFFECTIVE_PROMPT_SPIKE_TOKENS {
-                            omitted_turns = older_idx + 1;
-                            break;
-                        }
-                        used_tokens += candidate_tokens;
-                        included_history.splice(0..0, candidate);
-                    }
-                } else {
-                    omitted_turns = t0_index;
-                }
-            }
-
-            msgs_with_system = history_prefix;
-            if omitted_turns > 0 {
-                msgs_with_system.push(Message {
-                    role: "system".to_string(),
-                    content: Some(format!(
-                        "Note: {} earlier turn(s) are stored in history. Use history_recall or history_search without session_id for the current session, or pass session_id=\"*\" to search across all sessions in the current project.",
-                        omitted_turns
-                    )),
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
-            }
-            msgs_with_system.extend(included_history);
+            let prompt_report = self.build_prompt_context_report(activation_source);
+            let msgs_with_system = prompt_report
+                .sections
+                .iter()
+                .flat_map(|section| section.messages.clone())
+                .collect::<Vec<_>>();
 
             self.emit(AgentEvent::LlmStart);
             round_index += 1;

@@ -81,4 +81,4 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-067 | [Manage Prompt Context to Stay Within Effective Coding-Model Budgets](prd/prd-067-manage-prompt-context-to-stay-within-effective-coding-model-budgets.md) | Implemented | v0.43.0 | `themion-core`, docs |
 | PRD-068 | [Keep the TUI Chat Composer Usable When Input Exceeds the Visible Height](prd/prd-068-keep-the-tui-chat-composer-usable-when-input-exceeds-the-visible-height.md) | Implemented | v0.44.0 | `themion-cli`, docs |
 | PRD-069 | [Add a `/context` Command for Prompt-Budget Breakdown and History-Replay Visibility](prd/prd-069-context-command-prompt-budget-breakdown.md) | Implemented | v0.45.0 | `themion-core`, `themion-cli`, docs |
-| PRD-070 | [Improve `/context` and Prompt-Budget Estimation with `tiktoken-rs`](prd/prd-070-improve-context-token-estimation-with-tiktoken-rs.md) | Draft | >v0.45.0 +minor | `themion-core`, `themion-cli`, docs |
+| PRD-070 | [Improve `/context` and Prompt-Budget Estimation with `tiktoken-rs`](prd/prd-070-improve-context-token-estimation-with-tiktoken-rs.md) | Implemented | v0.46.0 | `themion-core`, `themion-cli`, docs |

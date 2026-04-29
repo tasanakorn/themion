@@ -26,7 +26,7 @@ use themion_core::agent::{Agent, AgentEvent, TurnCancellation, TurnStats};
 use themion_core::client_codex::ApiCallRateLimitReport;
 use themion_core::db::DbHandle;
 use themion_core::workflow::WorkflowState;
-use themion_core::{PromptContextReport, PromptSectionKind, ReplayForm};
+use themion_core::{EstimateMode, PromptContextReport, PromptSectionKind, ReplayForm, TokenizerResolutionSource};
 use themion_core::ModelInfo;
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc};
@@ -131,6 +131,29 @@ fn format_context_report(report: &PromptContextReport) -> Vec<String> {
         format_count(report.total_chars),
         format_count(report.total_tokens_estimate)
     ));
+    match report.estimate_mode {
+        EstimateMode::Tokenizer => {
+            out.push("estimate mode: tokenizer".to_string());
+            let tokenizer_label = match (
+                report.tokenizer_name.as_deref(),
+                report.tokenizer_resolution_source,
+            ) {
+                (Some(name), Some(TokenizerResolutionSource::ExactModelMatch)) => {
+                    format!("tokenizer: {} (exact model match)", name)
+                }
+                (Some(name), Some(TokenizerResolutionSource::TrustedFallbackMapping)) => {
+                    format!("tokenizer: {} (trusted fallback mapping)", name)
+                }
+                (Some(name), None) => format!("tokenizer: {}", name),
+                _ => "tokenizer: unavailable".to_string(),
+            };
+            out.push(tokenizer_label);
+        }
+        EstimateMode::RoughFallback => {
+            out.push("estimate mode: rough fallback".to_string());
+            out.push("tokenizer: unavailable".to_string());
+        }
+    }
     out.push(format!(
         "turns: total={} replayed={} reduced={} omitted={}",
         report.total_turns, report.replayed_turns, report.reduced_turns, report.omitted_turns
