@@ -25,7 +25,7 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-011 | [Softer, More Verbose Harness Status Events](prd/archive/prd-011-softer-more-verbose-harness-status-events.md) | Implemented | v0.6.0 | `themion-core`, `themion-cli`, docs      |
 | PRD-012 | [Human-Friendly Statusline Token Units](prd/archive/prd-012-human-friendly-statusline-token-units.md) | Implemented | v0.6.1 | `themion-cli`, docs      |
 | PRD-013 | [Minimal Karpathy-Inspired Predefined Coding Guardrails](prd/archive/prd-013-minimal-karpathy-inspired-system-prompt-guardrails.md) | Implemented | v0.7.0 | `themion-core`, docs |
-| PRD-014 | [Codex CLI Web-Search Instruction Injection](prd/archive/prd-014-codex-cli-web-search-instruction-injection.md) | Implemented | v0.8.0 | `themion-core`, docs |
+| PRD-014 | [Codex CLI Web-Search Instruction Injection](prd/archive/prd-014-codex-cli-web-search-instruction.md) | Implemented | v0.8.0 | `themion-core`, docs |
 | PRD-015 | [User-Feedback-Required Phase Result](prd/archive/prd-015-user-feedback-required-phase-result.md) | Implemented | v0.8.0 | `themion-core`, `themion-cli`, docs |
 | PRD-016 | [Commit-When-Asked Guardrail for Useful Brief Commit Messages](prd/archive/prd-016-commit-when-asked-brief-summary-guardrail.md) | Implemented | v0.8.1 | `themion-core`, docs |
 | PRD-017 | [Press `Esc` to Interrupt an In-Progress Agent Turn](prd/archive/prd-017-press-esc-to-interrupt-agent.md) | Implemented | v0.9.0 | `themion-cli`, `themion-core`, docs |
@@ -80,3 +80,5 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-066 | [Guide Model Instructions for Human Response Length and Chunking](prd/prd-066-guide-model-instructions-for-human-response-length-and-chunking.md) | Implemented | v0.42.0 | `themion-core`, docs |
 | PRD-067 | [Manage Prompt Context to Stay Within Effective Coding-Model Budgets](prd/prd-067-manage-prompt-context-to-stay-within-effective-coding-model-budgets.md) | Implemented | v0.43.0 | `themion-core`, docs |
 | PRD-068 | [Keep the TUI Chat Composer Usable When Input Exceeds the Visible Height](prd/prd-068-keep-the-tui-chat-composer-usable-when-input-exceeds-the-visible-height.md) | Implemented | v0.44.0 | `themion-cli`, docs |
+| PRD-069 | [Add a `/context` Command for Prompt-Budget Breakdown and History-Replay Visibility](prd/prd-069-context-command-prompt-budget-breakdown.md) | Implemented | v0.45.0 | `themion-core`, `themion-cli`, docs |
+| PRD-070 | [Improve `/context` and Prompt-Budget Estimation with `tiktoken-rs`](prd/prd-070-improve-context-token-estimation-with-tiktoken-rs.md) | Draft | >v0.45.0 +minor | `themion-core`, `themion-cli`, docs |

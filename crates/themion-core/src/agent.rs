@@ -1,6 +1,10 @@
 use crate::agents_md;
 use crate::client::{ChatBackend, ChatRoundTrace, Message, ModelInfo};
 use crate::codex_cli_instruction::CODEX_CLI_WEB_SEARCH_INSTRUCTION;
+use crate::context_report::{
+    estimate_messages_chars, estimate_messages_tokens, estimate_text_tokens,
+    HistoryTurnReport, PromptContextReport, PromptSectionKind, PromptSectionReport, ReplayForm,
+};
 use crate::db::DbHandle;
 use crate::predefined_guardrails::PREDEFINED_GUARDRAILS;
 use crate::tools;
@@ -24,38 +28,6 @@ use uuid::Uuid;
 const EFFECTIVE_PROMPT_BUDGET_TOKENS: usize = 170_000;
 const EFFECTIVE_PROMPT_SPIKE_TOKENS: usize = 250_000;
 const RECENT_PRIOR_TURN_BAND: usize = 5;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReplayForm {
-    Full,
-    PureMessage,
-}
-
-fn estimate_message_chars(msg: &Message) -> usize {
-    let mut total = msg.role.len();
-    if let Some(content) = &msg.content {
-        total += content.len();
-    }
-    if let Some(tool_call_id) = &msg.tool_call_id {
-        total += tool_call_id.len();
-    }
-    if let Some(tool_calls) = &msg.tool_calls {
-        for tc in tool_calls {
-            total += tc.id.len();
-            total += tc.function.name.len();
-            total += tc.function.arguments.len();
-        }
-    }
-    total
-}
-
-fn estimate_messages_tokens(messages: &[Message]) -> usize {
-    messages
-        .iter()
-        .map(estimate_message_chars)
-        .sum::<usize>()
-        .div_ceil(4)
-}
 
 fn summarize_tool_calls(tool_calls: &[crate::client::ToolCall]) -> String {
     let mut parts = Vec::new();
@@ -436,6 +408,285 @@ impl Agent {
     #[cfg(feature = "stylos")]
     pub fn set_local_instance_id(&mut self, instance_id: Option<String>) {
         self.local_instance_id = instance_id;
+    }
+
+
+    fn build_prompt_context_report(&self, activation_source: &str) -> PromptContextReport {
+        let mut sections = Vec::new();
+
+        let system_prompt = vec![Message {
+            role: "system".to_string(),
+            content: Some(self.system_prompt.clone()),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        sections.push(PromptSectionReport {
+            kind: PromptSectionKind::SystemPrompt,
+            label: "system prompt".to_string(),
+            chars: estimate_messages_chars(&system_prompt),
+            tokens_estimate: estimate_messages_tokens(&system_prompt),
+            messages: system_prompt,
+            extra_text: None,
+        });
+
+        let coding_guardrails = vec![Message {
+            role: "system".to_string(),
+            content: Some(PREDEFINED_GUARDRAILS.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        sections.push(PromptSectionReport {
+            kind: PromptSectionKind::CodingGuardrails,
+            label: "coding guardrails".to_string(),
+            chars: estimate_messages_chars(&coding_guardrails),
+            tokens_estimate: estimate_messages_tokens(&coding_guardrails),
+            messages: coding_guardrails,
+            extra_text: None,
+        });
+
+        #[cfg(feature = "stylos")]
+        let board_guidance_text = {
+            let self_instance = self.local_instance_id.as_deref().unwrap_or("unknown");
+            let self_agent_id = self.local_agent_id.as_deref().unwrap_or("main");
+            format!(
+                "Board guidance: simple direct Q&A without tools usually should not create a self-note. If the task needs tools, edits, validation, or durable follow-up tracking, consider creating a durable board note for yourself to help keep track of the work. Your exact self-note target in this session is to_instance={self_instance} to_agent_id={self_agent_id}. For self-notes, you may also call board_create_note with the exact magic keyword SELF for both to_instance and to_agent_id, and the runtime will replace SELF with those exact values. Do not invent placeholders or guesses other than the exact SELF keyword. Multi-agent collaboration guidance: prefer durable board notes over stylos_request_talk when delegating asynchronous or non-urgent work to another agent. Treat stylos_request_talk as an interrupting realtime path for urgent coordination or brief clarification. When you receive a done-mention note, treat it as an informational completion notification rather than a fresh work request."
+            )
+        };
+        #[cfg(not(feature = "stylos"))]
+        let board_guidance_text = "Board guidance: simple direct Q&A without tools usually should not create a self-note. If the task needs tools, edits, validation, or durable follow-up tracking, consider creating a durable board note for yourself to help keep track of the work. For self-notes in this session, use your local board context rather than inventing remote identifiers. Multi-agent collaboration guidance: prefer durable board notes over stylos_request_talk when delegating asynchronous or non-urgent work to another agent. Treat stylos_request_talk as an interrupting realtime path for urgent coordination or brief clarification. When you receive a done-mention note, treat it as an informational completion notification rather than a fresh work request.".to_string();
+        let board_guidance = vec![Message {
+            role: "system".to_string(),
+            content: Some(board_guidance_text),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        sections.push(PromptSectionReport {
+            kind: PromptSectionKind::BoardGuidance,
+            label: "board guidance".to_string(),
+            chars: estimate_messages_chars(&board_guidance),
+            tokens_estimate: estimate_messages_tokens(&board_guidance),
+            messages: board_guidance,
+            extra_text: None,
+        });
+
+        let memory_guidance = vec![Message {
+            role: "system".to_string(),
+            content: Some(MEMORY_KB_GUIDANCE.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        sections.push(PromptSectionReport {
+            kind: PromptSectionKind::MemoryGuidance,
+            label: "memory guidance".to_string(),
+            chars: estimate_messages_chars(&memory_guidance),
+            tokens_estimate: estimate_messages_tokens(&memory_guidance),
+            messages: memory_guidance,
+            extra_text: None,
+        });
+
+        let codex_instruction = vec![Message {
+            role: "system".to_string(),
+            content: Some(CODEX_CLI_WEB_SEARCH_INSTRUCTION.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        sections.push(PromptSectionReport {
+            kind: PromptSectionKind::CodexCliWebSearch,
+            label: "codex cli web-search instruction".to_string(),
+            chars: estimate_messages_chars(&codex_instruction),
+            tokens_estimate: estimate_messages_tokens(&codex_instruction),
+            messages: codex_instruction,
+            extra_text: None,
+        });
+
+        if let Some(agents_md_message) = agents_md::build_agents_md_message(&self.project_dir) {
+            let agents_md = vec![Message {
+                role: "user".to_string(),
+                content: Some(agents_md_message),
+                tool_calls: None,
+                tool_call_id: None,
+            }];
+            sections.push(PromptSectionReport {
+                kind: PromptSectionKind::AgentsMd,
+                label: "AGENTS.md instructions".to_string(),
+                chars: estimate_messages_chars(&agents_md),
+                tokens_estimate: estimate_messages_tokens(&agents_md),
+                messages: agents_md,
+                extra_text: None,
+            });
+        }
+
+        let workflow_messages = self.build_workflow_context_messages(activation_source);
+        sections.push(PromptSectionReport {
+            kind: PromptSectionKind::WorkflowContext,
+            label: "workflow context".to_string(),
+            chars: estimate_messages_chars(&workflow_messages),
+            tokens_estimate: estimate_messages_tokens(&workflow_messages),
+            messages: workflow_messages,
+            extra_text: None,
+        });
+
+        let tool_defs = tools::tool_definitions();
+        let tool_defs_text = serde_json::to_string(&tool_defs).unwrap_or_default();
+        sections.push(PromptSectionReport {
+            kind: PromptSectionKind::ToolDefinitions,
+            label: "tool definitions".to_string(),
+            messages: Vec::new(),
+            extra_text: Some(tool_defs_text.clone()),
+            chars: tool_defs_text.len(),
+            tokens_estimate: estimate_text_tokens(&tool_defs_text),
+        });
+
+        let prompt_overhead_tokens = sections.iter().map(|s| s.tokens_estimate).sum::<usize>();
+        let recent_turn_count = self.turn_boundaries.len();
+        let mut included_history = Vec::new();
+        let mut history_turns = Vec::new();
+        let mut omitted_turns = 0usize;
+        let mut t0_exceeds_normal_budget = false;
+        let mut t0_exceeds_spike_budget = false;
+
+        if recent_turn_count > 0 {
+            let t0_index = recent_turn_count - 1;
+            let t0_start = self.turn_boundaries[t0_index];
+            let t0_messages = &self.messages[t0_start..];
+            let t0_tokens = estimate_messages_tokens(t0_messages);
+            t0_exceeds_normal_budget = t0_tokens > EFFECTIVE_PROMPT_BUDGET_TOKENS;
+            t0_exceeds_spike_budget = t0_tokens > EFFECTIVE_PROMPT_SPIKE_TOKENS;
+            included_history.extend_from_slice(t0_messages);
+            history_turns.push(HistoryTurnReport {
+                turn_label: "T0".to_string(),
+                replay_form: ReplayForm::Full,
+                omitted: false,
+                chars: estimate_messages_chars(t0_messages),
+                tokens_estimate: t0_tokens,
+                messages: t0_messages.to_vec(),
+                note: if t0_exceeds_spike_budget {
+                    Some("T0 alone exceeds spike budget; prior turns are not replayed".to_string())
+                } else {
+                    None
+                },
+            });
+            let mut used_tokens = prompt_overhead_tokens + t0_tokens;
+
+            if !t0_exceeds_spike_budget {
+                for older_idx in (0..t0_index).rev() {
+                    let start = self.turn_boundaries[older_idx];
+                    let end = self
+                        .turn_boundaries
+                        .get(older_idx + 1)
+                        .copied()
+                        .unwrap_or(self.messages.len());
+                    let age_from_t0 = t0_index - older_idx;
+                    let replay_form = if t0_exceeds_normal_budget && age_from_t0 <= RECENT_PRIOR_TURN_BAND {
+                        ReplayForm::PureMessage
+                    } else {
+                        ReplayForm::Full
+                    };
+                    let candidate = match replay_form {
+                        ReplayForm::Full => self.messages[start..end].to_vec(),
+                        ReplayForm::PureMessage => build_pure_message_turn(&self.messages[start..end]),
+                    };
+                    let candidate_tokens = estimate_messages_tokens(&candidate);
+                    let candidate_chars = estimate_messages_chars(&candidate);
+                    let turn_label = format!("T-{}", age_from_t0);
+                    if used_tokens + candidate_tokens > EFFECTIVE_PROMPT_SPIKE_TOKENS {
+                        omitted_turns = older_idx + 1;
+                        history_turns.push(HistoryTurnReport {
+                            turn_label,
+                            replay_form,
+                            omitted: true,
+                            chars: 0,
+                            tokens_estimate: 0,
+                            messages: Vec::new(),
+                            note: Some("omitted to stay within spike budget".to_string()),
+                        });
+                        break;
+                    }
+                    used_tokens += candidate_tokens;
+                    included_history.splice(0..0, candidate.clone());
+                    history_turns.push(HistoryTurnReport {
+                        turn_label,
+                        replay_form,
+                        omitted: false,
+                        chars: candidate_chars,
+                        tokens_estimate: candidate_tokens,
+                        messages: candidate,
+                        note: if replay_form == ReplayForm::PureMessage {
+                            Some("reduced pure-message replay; raw tool payloads omitted".to_string())
+                        } else {
+                            None
+                        },
+                    });
+                }
+            } else {
+                omitted_turns = t0_index;
+            }
+        }
+
+        history_turns.sort_by_key(|turn| {
+            if turn.turn_label == "T0" {
+                0usize
+            } else {
+                turn.turn_label
+                    .strip_prefix("T-")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(usize::MAX)
+            }
+        });
+
+        if omitted_turns > 0 {
+            let recall_hint = vec![Message {
+                role: "system".to_string(),
+                content: Some(format!(
+                    "Note: {} earlier turn(s) are stored in history. Use history_recall or history_search without session_id for the current session, or pass session_id=\"*\" to search across all sessions in the current project.",
+                    omitted_turns
+                )),
+                tool_calls: None,
+                tool_call_id: None,
+            }];
+            sections.push(PromptSectionReport {
+                kind: PromptSectionKind::HistoryRecallHint,
+                label: "history recall hint".to_string(),
+                chars: estimate_messages_chars(&recall_hint),
+                tokens_estimate: estimate_messages_tokens(&recall_hint),
+                messages: recall_hint,
+                extra_text: None,
+            });
+        }
+
+        sections.push(PromptSectionReport {
+            kind: PromptSectionKind::HistoryReplay,
+            label: "history replay".to_string(),
+            chars: estimate_messages_chars(&included_history),
+            tokens_estimate: estimate_messages_tokens(&included_history),
+            messages: included_history,
+            extra_text: None,
+        });
+
+        let total_chars = sections.iter().map(|s| s.chars).sum();
+        let total_tokens_estimate = sections.iter().map(|s| s.tokens_estimate).sum();
+        let replayed_turns = history_turns.iter().filter(|t| !t.omitted).count();
+        let reduced_turns = history_turns
+            .iter()
+            .filter(|t| !t.omitted && t.replay_form == ReplayForm::PureMessage)
+            .count();
+
+        PromptContextReport {
+            sections,
+            history_turns,
+            total_turns: recent_turn_count,
+            replayed_turns,
+            omitted_turns,
+            reduced_turns,
+            total_chars,
+            total_tokens_estimate,
+            t0_exceeds_normal_budget,
+            t0_exceeds_spike_budget,
+        }
+    }
+
+    pub fn prompt_context_report(&self) -> PromptContextReport {
+        self.build_prompt_context_report("session_state")
     }
 
     fn current_turn_meta(&self) -> crate::db::TurnMeta {

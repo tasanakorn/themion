@@ -26,6 +26,7 @@ use themion_core::agent::{Agent, AgentEvent, TurnCancellation, TurnStats};
 use themion_core::client_codex::ApiCallRateLimitReport;
 use themion_core::db::DbHandle;
 use themion_core::workflow::WorkflowState;
+use themion_core::{PromptContextReport, PromptSectionKind, ReplayForm};
 use themion_core::ModelInfo;
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc};
@@ -108,6 +109,85 @@ fn center_trim(s: &str, max: usize) -> String {
     let prefix: String = chars[..prefix_len].iter().collect();
     let suffix: String = chars[chars.len() - suffix_len..].iter().collect();
     format!("{}{}{}", prefix, TOOL_DETAIL_CENTER_TRIM_MARKER, suffix)
+}
+
+
+fn format_count(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
+fn format_context_report(report: &PromptContextReport) -> Vec<String> {
+    let mut out = Vec::new();
+    out.push(format!(
+        "prompt estimate: {} chars ≈ {} tokens",
+        format_count(report.total_chars),
+        format_count(report.total_tokens_estimate)
+    ));
+    out.push(format!(
+        "turns: total={} replayed={} reduced={} omitted={}",
+        report.total_turns, report.replayed_turns, report.reduced_turns, report.omitted_turns
+    ));
+    if report.t0_exceeds_spike_budget {
+        out.push("history mode: T0 alone exceeds spike budget; prior turns not replayed".to_string());
+    } else if report.t0_exceeds_normal_budget {
+        out.push("history mode: recent prior turns reduced because T0 exceeds normal budget".to_string());
+    }
+    out.push("sections:".to_string());
+    for section in &report.sections {
+        if section.kind == PromptSectionKind::HistoryReplay && report.total_turns == 0 {
+            out.push("  history replay: 0 chars ≈ 0 tokens".to_string());
+            continue;
+        }
+        out.push(format!(
+            "  {}: {} chars ≈ {} tokens",
+            section.label,
+            format_count(section.chars),
+            format_count(section.tokens_estimate)
+        ));
+    }
+    if !report.history_turns.is_empty() {
+        out.push("history turns:".to_string());
+        for turn in &report.history_turns {
+            if turn.omitted {
+                out.push(format!(
+                    "  {}: omitted{}",
+                    turn.turn_label,
+                    turn
+                        .note
+                        .as_deref()
+                        .map(|note| format!(" ({})", note))
+                        .unwrap_or_default()
+                ));
+            } else {
+                let mode = match turn.replay_form {
+                    ReplayForm::Full => "full",
+                    ReplayForm::PureMessage => "reduced",
+                };
+                let note = turn
+                    .note
+                    .as_deref()
+                    .map(|note| format!(" ({})", note))
+                    .unwrap_or_default();
+                out.push(format!(
+                    "  {}: {} {} chars ≈ {} tokens{}",
+                    turn.turn_label,
+                    mode,
+                    format_count(turn.chars),
+                    format_count(turn.tokens_estimate),
+                    note
+                ));
+            }
+        }
+    }
+    out
 }
 
 fn self_session_id_fallback() -> String {
@@ -1566,6 +1646,15 @@ impl App {
             return self.debug_runtime_lines();
         }
 
+        if input == "/context" {
+            if let Some(handle) = self.agents.iter().find(|h| is_interactive_handle(h)) {
+                if let Some(agent) = handle.agent.as_ref() {
+                    return format_context_report(&agent.prompt_context_report());
+                }
+            }
+            return vec!["context report unavailable".to_string()];
+        }
+
         if input == "/debug api-log enable" {
             self.api_log_enabled = true;
             if let Some(handle) = self.agents.iter_mut().find(|h| is_interactive_handle(h)) {
@@ -1830,6 +1919,7 @@ impl App {
                 _ => {
                     out.push("commands:".to_string());
                     out.push("  /debug runtime                   show Themion process/thread/task activity".to_string());
+                    out.push("  /context                         show prompt-budget and history replay breakdown".to_string());
                     out.push("  /debug api-log enable            enable per-round API call logging for this session".to_string());
                     out.push("  /debug api-log disable           disable per-round API call logging for this session".to_string());
                     out.push("  /semantic-memory index           build missing or pending semantic indexes".to_string());
@@ -1854,7 +1944,7 @@ impl App {
         }
 
         out.push(format!(
-            "unknown command '{}'.  try /config, /debug runtime, /debug api-log enable, or /semantic-memory index",
+            "unknown command '{}'.  try /context, /config, /debug runtime, /debug api-log enable, or /semantic-memory index",
             input
         ));
         out

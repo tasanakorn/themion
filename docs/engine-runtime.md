@@ -47,6 +47,8 @@ That same guardrail layer also tells the model to preserve user-useful informati
 
 Prompt replay now uses a narrowed budget-aware PRD-067 policy instead of relying only on a strict fixed-turn window. `themion-core` estimates prompt-visible history cost with a rough `chars / 4` heuristic, keeps the active turn (`T0`) as the highest-priority replay unit, degrades `T-1` through `T-5` into assistant-style pure-message replay when `T0` alone exceeds the normal 170K target, and omits prior turns when `T0` alone exceeds the 250K spike ceiling or when older-turn inclusion would exceed that ceiling. Calibration, `CompactSummary`, and a broader compaction ladder are intentionally out of scope for this PRD revision.
 
+That same core prompt-analysis path now also powers the TUI-local `/context` command. `themion-core` constructs a structured prompt-context report describing prompt sections, rough `chars / 4` token estimates, turn replay modes, and omission boundaries, and `themion-cli` only formats that report for transcript display. This keeps the user-facing inspection path aligned with the real next-round prompt assembly logic rather than relying on a separate TUI-only estimator.
+
 ## Agent identity boundary
 
 `themion-core::Agent` owns per-agent harness state such as session ID, project directory, workflow state, messages, and model/backend integration. `themion-cli` owns process-local descriptors such as `agent_id`, `label`, and `roles` that describe how a given core agent is used within one Themion process.
@@ -369,6 +371,24 @@ Current behavior:
 - when enabled, each provider round in the harness loop writes one JSON file under the system temp root, typically `/tmp/themion/<session_id>/<turn>/round_<n>.json` on Unix-like systems
 - the artifact captures the translated backend request payload, the final accumulated assistant response/tool-call shape, HTTP/timing metadata when available, usage data when available, and explicit error metadata when present
 - the harness treats trace-write failures as non-fatal and emits a bounded warning instead of aborting the session
+
+## Runtime debug command
+
+`themion-cli` now exposes `/debug runtime` as a CLI-local diagnostic command.
+
+## Context inspection command
+
+`themion-cli` now also exposes `/context` as a CLI-local prompt inspection command.
+
+Current behavior:
+
+- `/context` runs locally and does not call the model
+- it reports the prompt-visible context that the next provider round would use, based on the same shared core prompt-analysis path used by live prompt assembly
+- it shows a section-by-section size breakdown including prompt layers such as system prompt, guardrails, Codex CLI instruction, injected contextual instructions, workflow context, optional history recall hint, and replayed history
+- it reports both raw character counts and rough token estimates using the same `chars / 4` heuristic used by current budget-aware replay
+- it shows turn-oriented history replay status including total turns, replayed turns, reduced turns, omitted turns, and per-turn `full` versus `reduced` replay form
+- when older turns are omitted, it makes the omission boundary and recall-hint inclusion visible in the user-facing output
+- when `T0` alone exceeds the normal or spike budget thresholds, it explains that replay state explicitly rather than leaving the user to infer it from totals alone
 
 ## Runtime debug command
 

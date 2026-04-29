@@ -27,7 +27,7 @@ stylos = { git = "https://github.com/tasanakorn/stylos.git", rev = "73b30ca73142
 fastembed = { version = "5.13.3", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
 
 [workspace.package]
-version = "0.38.0"
+version = "0.45.0"
 edition = "2021"
 
 [profile.dev]

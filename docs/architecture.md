@@ -269,6 +269,8 @@ The recall hint is a synthetic `role="system"` message that reminds the model th
 
 The full `messages` Vec is never trimmed — the in-memory copy is always complete. Windowing only affects what is sent over the wire.
 
+Themion now also exposes a user-facing `/context` command in the TUI for inspecting this prompt-visible view. The actual prompt-analysis logic stays in `themion-core`, alongside the live prompt assembly path, and the TUI only handles slash-command intake plus human-readable rendering of the returned report. `/context` reports the same prompt layer ordering, rough `chars / 4` token estimate, and history replay decision that the next model round would use, including which turns are replayed in full form, which are reduced to pure-message replay, and where omission begins.
+
 ## Streaming
 
 ### Chat Completions backends (`client.rs`)
