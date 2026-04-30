@@ -19,6 +19,20 @@ pub enum TokenizerResolutionSource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolEstimateMode {
+    RawOnly,
+    RawPlusEffective,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolEstimateReport {
+    pub raw_tokens: usize,
+    pub effective_tokens: Option<usize>,
+    pub mode: ToolEstimateMode,
+    pub backend_scope: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptSectionKind {
     SystemPrompt,
     CodingGuardrails,
@@ -40,6 +54,7 @@ pub struct PromptSectionReport {
     pub extra_text: Option<String>,
     pub chars: usize,
     pub tokens_estimate: usize,
+    pub tool_estimate: Option<ToolEstimateReport>,
 }
 
 #[derive(Debug, Clone)]

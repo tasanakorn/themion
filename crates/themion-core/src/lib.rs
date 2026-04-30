@@ -16,7 +16,7 @@ pub use client::{ChatBackend, ModelInfo};
 pub use client_codex::{ApiCallRateLimitReport, ExtractedLimitWindow, ExtractedRateLimitSnapshot};
 pub use context_report::{
     EstimateMode, HistoryTurnReport, PromptContextReport, PromptSectionKind, PromptSectionReport,
-    ReplayForm, TokenizerResolutionSource,
+    ReplayForm, TokenizerResolutionSource, ToolEstimateMode, ToolEstimateReport,
 };
 pub use db::DbHandle;
 pub use workflow::{

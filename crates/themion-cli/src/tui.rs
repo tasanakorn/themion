@@ -26,7 +26,7 @@ use themion_core::agent::{Agent, AgentEvent, TurnCancellation, TurnStats};
 use themion_core::client_codex::ApiCallRateLimitReport;
 use themion_core::db::DbHandle;
 use themion_core::workflow::WorkflowState;
-use themion_core::{EstimateMode, PromptContextReport, PromptSectionKind, ReplayForm, TokenizerResolutionSource};
+use themion_core::{EstimateMode, PromptContextReport, PromptSectionKind, ReplayForm, TokenizerResolutionSource, ToolEstimateMode};
 use themion_core::ModelInfo;
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc};
@@ -168,6 +168,29 @@ fn format_context_report(report: &PromptContextReport) -> Vec<String> {
         if section.kind == PromptSectionKind::HistoryReplay && report.total_turns == 0 {
             out.push("  history replay: 0 chars ≈ 0 tokens".to_string());
             continue;
+        }
+        if section.kind == PromptSectionKind::ToolDefinitions {
+            if let Some(tool_estimate) = &section.tool_estimate {
+                match tool_estimate.mode {
+                    ToolEstimateMode::RawPlusEffective => {
+                        out.push(format!(
+                            "  {}: raw {} tok; effective ~{} tok; mode=raw_plus_effective",
+                            section.label,
+                            format_count(tool_estimate.raw_tokens),
+                            format_count(tool_estimate.effective_tokens.unwrap_or(tool_estimate.raw_tokens))
+                        ));
+                        out.push("    effective estimate discounts schema structure overhead".to_string());
+                    }
+                    ToolEstimateMode::RawOnly => {
+                        out.push(format!(
+                            "  {}: raw {} tok; mode=raw_only",
+                            section.label,
+                            format_count(tool_estimate.raw_tokens)
+                        ));
+                    }
+                }
+                continue;
+            }
         }
         out.push(format!(
             "  {}: {} chars ≈ {} tokens",

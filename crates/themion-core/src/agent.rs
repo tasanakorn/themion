@@ -4,7 +4,7 @@ use crate::codex_cli_instruction::CODEX_CLI_WEB_SEARCH_INSTRUCTION;
 use crate::context_report::{
     estimate_messages_chars, estimate_messages_tokens, estimate_text_tokens, EstimateMode,
     HistoryTurnReport, PromptContextReport, PromptSectionKind, PromptSectionReport, ReplayForm,
-    TokenizerResolutionSource,
+    TokenizerResolutionSource, ToolEstimateMode, ToolEstimateReport,
 };
 use crate::db::DbHandle;
 use crate::predefined_guardrails::PREDEFINED_GUARDRAILS;
@@ -95,6 +95,58 @@ impl TokenEstimateContext {
                 .sum(),
             EstimateMode::RoughFallback => estimate_messages_tokens(messages),
         }
+    }
+}
+
+fn codex_responses_effective_tool_estimate(
+    provider: Option<&str>,
+    backend: &str,
+    tool_defs: &Value,
+    token_ctx: &TokenEstimateContext,
+) -> ToolEstimateReport {
+    let tool_defs_text = serde_json::to_string(tool_defs).unwrap_or_default();
+    let raw_tokens = token_ctx.estimate_text(&tool_defs_text);
+
+    if provider != Some("openai-codex") || backend != "responses" {
+        return ToolEstimateReport {
+            raw_tokens,
+            effective_tokens: None,
+            mode: ToolEstimateMode::RawOnly,
+            backend_scope: None,
+        };
+    }
+
+    let mut description_tokens = 0usize;
+    let mut structural_tokens = raw_tokens;
+    if let Some(tools) = tool_defs.as_array() {
+        for tool in tools {
+            if let Some(desc) = tool.get("description").and_then(Value::as_str) {
+                let tokens = token_ctx.estimate_text(desc);
+                description_tokens += tokens;
+                structural_tokens = structural_tokens.saturating_sub(tokens);
+            }
+            if let Some(props) = tool
+                .get("parameters")
+                .and_then(|v| v.get("properties"))
+                .and_then(Value::as_object)
+            {
+                for spec in props.values() {
+                    if let Some(desc) = spec.get("description").and_then(Value::as_str) {
+                        let tokens = token_ctx.estimate_text(desc);
+                        description_tokens += tokens;
+                        structural_tokens = structural_tokens.saturating_sub(tokens);
+                    }
+                }
+            }
+        }
+    }
+
+    let effective_tokens = description_tokens + ((structural_tokens * 3) / 4);
+    ToolEstimateReport {
+        raw_tokens,
+        effective_tokens: Some(effective_tokens),
+        mode: ToolEstimateMode::RawPlusEffective,
+        backend_scope: Some("openai-codex/responses".to_string()),
     }
 }
 
@@ -534,6 +586,7 @@ impl Agent {
             tokens_estimate: token_ctx.estimate_messages(&system_prompt),
             messages: system_prompt,
             extra_text: None,
+            tool_estimate: None,
         });
 
         let coding_guardrails = vec![Message {
@@ -549,6 +602,7 @@ impl Agent {
             tokens_estimate: token_ctx.estimate_messages(&coding_guardrails),
             messages: coding_guardrails,
             extra_text: None,
+            tool_estimate: None,
         });
 
         #[cfg(feature = "stylos")]
@@ -574,6 +628,7 @@ impl Agent {
             tokens_estimate: token_ctx.estimate_messages(&board_guidance),
             messages: board_guidance,
             extra_text: None,
+            tool_estimate: None,
         });
 
         let memory_guidance = vec![Message {
@@ -589,6 +644,7 @@ impl Agent {
             tokens_estimate: token_ctx.estimate_messages(&memory_guidance),
             messages: memory_guidance,
             extra_text: None,
+            tool_estimate: None,
         });
 
         let codex_instruction = vec![Message {
@@ -604,6 +660,7 @@ impl Agent {
             tokens_estimate: token_ctx.estimate_messages(&codex_instruction),
             messages: codex_instruction,
             extra_text: None,
+            tool_estimate: None,
         });
 
         if let Some(agents_md_message) = agents_md::build_agents_md_message(&self.project_dir) {
@@ -620,6 +677,7 @@ impl Agent {
                 tokens_estimate: token_ctx.estimate_messages(&agents_md),
                 messages: agents_md,
                 extra_text: None,
+                tool_estimate: None,
             });
         }
 
@@ -631,17 +689,25 @@ impl Agent {
             tokens_estimate: token_ctx.estimate_messages(&workflow_messages),
             messages: workflow_messages,
             extra_text: None,
+            tool_estimate: None,
         });
 
         let tool_defs = tools::tool_definitions();
         let tool_defs_text = serde_json::to_string(&tool_defs).unwrap_or_default();
+        let tool_estimate = codex_responses_effective_tool_estimate(
+            self.provider.as_deref(),
+            self.client.backend_name(),
+            &tool_defs,
+            &token_ctx,
+        );
         sections.push(PromptSectionReport {
             kind: PromptSectionKind::ToolDefinitions,
             label: "tool definitions".to_string(),
             messages: Vec::new(),
             extra_text: Some(tool_defs_text.clone()),
             chars: tool_defs_text.len(),
-            tokens_estimate: token_ctx.estimate_text(&tool_defs_text),
+            tokens_estimate: tool_estimate.effective_tokens.unwrap_or(tool_estimate.raw_tokens),
+            tool_estimate: Some(tool_estimate),
         });
 
         let prompt_overhead_tokens = sections.iter().map(|s| s.tokens_estimate).sum::<usize>();
@@ -758,6 +824,7 @@ impl Agent {
                 tokens_estimate: token_ctx.estimate_messages(&recall_hint),
                 messages: recall_hint,
                 extra_text: None,
+                tool_estimate: None,
             });
         }
 
@@ -768,6 +835,7 @@ impl Agent {
             tokens_estimate: token_ctx.estimate_messages(&included_history),
             messages: included_history,
             extra_text: None,
+            tool_estimate: None,
         });
 
         let total_chars = sections.iter().map(|s| s.chars).sum();
