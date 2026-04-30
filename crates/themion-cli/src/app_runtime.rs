@@ -139,7 +139,7 @@ pub(crate) fn build_replacement_main_agent(
         #[cfg(feature = "stylos")]
         params.local_stylos_instance,
         #[cfg(feature = "stylos")]
-        "main",
+        "master",
         None,
         params.api_log_enabled,
     )?;

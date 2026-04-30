@@ -611,7 +611,7 @@ impl Agent {
         #[cfg(feature = "stylos")]
         let board_guidance_text = {
             let self_instance = self.local_instance_id.as_deref().unwrap_or("unknown");
-            let self_agent_id = self.local_agent_id.as_deref().unwrap_or("main");
+            let self_agent_id = self.local_agent_id.as_deref().unwrap_or("master");
             format!(
                 "Board guidance: simple direct Q&A without tools usually should not create a self-note. If the task needs tools, edits, validation, or durable follow-up tracking, consider creating a durable board note for yourself to help keep track of the work. Your exact self-note target in this session is to_instance={self_instance} to_agent_id={self_agent_id}. For self-notes, you may also call board_create_note with the exact magic keyword SELF for both to_instance and to_agent_id, and the runtime will replace SELF with those exact values. Do not invent placeholders or guesses other than the exact SELF keyword. Multi-agent collaboration guidance: prefer durable board notes over stylos_request_talk when delegating asynchronous or non-urgent work to another agent. Treat stylos_request_talk as an interrupting realtime path for urgent coordination or brief clarification. When you receive a done-mention note, treat it as an informational completion notification rather than a fresh work request."
             )

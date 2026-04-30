@@ -208,7 +208,7 @@ Stylos `talk` now resolves sender identity automatically and carries exact insta
 
 - sender-side local instance `from` resolved automatically as exact `<hostname>:<pid>`
 - mandatory target `to` in exact `<hostname>:<pid>` form
-- optional `to_agent_id` on the request input, defaulting to `main`
+- optional `to_agent_id` on the request input, defaulting to `master`
 - optional `request_id`
 - optional `wait_for_idle_timeout_ms`
 

@@ -91,4 +91,4 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-077 | [Reset Temporary Model Override When Switching Session Profile](prd/prd-077-reset-temporary-model-override-when-switching-session-profile.md) | Implemented | v0.49.1 | `themion-cli`, docs |
 | PRD-078 | [Idle Watchdog for Background Agent Follow-Up and Pending Board-Note Injection](prd/prd-078-idle-watchdog-for-background-agent-follow-up-and-board-note-injection.md) | Implemented | v0.50.0 | `themion-core`, `themion-cli`, docs |
 | PRD-079 | [Codex-Like User-Shell Execution Mode for Shell Tooling](prd/prd-079-codex-like-user-shell-execution-mode.md) | Implemented | v0.51.0 | `themion-core`, `themion-cli`, docs |
-| PRD-080 | [Rename the Primary Agent Identity from `main` to `master`](prd/prd-080-rename-primary-agent-main-to-master.md) | Draft | >v0.51.0 +minor | `themion-core`, `themion-cli`, docs |
+| PRD-080 | [Rename the Primary Agent Identity from `main` to `master`](prd/prd-080-rename-primary-agent-main-to-master.md) | Implemented | v0.52.0 | `themion-core`, `themion-cli`, docs |

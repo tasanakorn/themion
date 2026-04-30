@@ -165,7 +165,7 @@ pub struct WorkflowDefinition {
 
 pub const DEFAULT_WORKFLOW: &str = "NORMAL";
 pub const DEFAULT_PHASE: &str = "IDLE";
-pub const DEFAULT_AGENT: &str = "main";
+pub const DEFAULT_AGENT: &str = "master";
 pub const LITE_WORKFLOW: &str = "LITE";
 pub const MAX_CURRENT_PHASE_RETRIES: u32 = 3;
 pub const MAX_PREVIOUS_PHASE_RETRIES: u32 = 3;

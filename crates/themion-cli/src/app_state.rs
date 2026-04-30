@@ -198,7 +198,7 @@ impl AppState {
             #[cfg(feature = "stylos")]
             None,
             #[cfg(feature = "stylos")]
-            "main",
+            "master",
             Some(self.system_inspection_snapshot()),
             false,
         )

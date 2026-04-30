@@ -238,7 +238,7 @@ async fn board_and_file_mutations_return_compact_acks() {
     let created = call_json(
         &ctx,
         "board_create_note",
-        json!({"to_instance":"local","to_agent_id":"main","body":"hello"}),
+        json!({"to_instance":"local","to_agent_id":"master","body":"hello"}),
     )
     .await;
     assert_eq!(created["entity"], "board_note");

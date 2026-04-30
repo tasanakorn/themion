@@ -391,7 +391,7 @@ fn split_tool_call_detail(name: &str, args_json: &str) -> (String, Option<String
                     args["to_agent_id"]
                         .as_str()
                         .or_else(|| args["agent_id"].as_str())
-                        .unwrap_or("main"),
+                        .unwrap_or("master"),
                     TOOL_DETAIL_MAX_CHARS,
                 )
             ),
@@ -498,8 +498,18 @@ struct AgentStatusSource {
 }
 
 #[cfg(feature = "stylos")]
+fn normalize_primary_role(value: &str) -> &str {
+    if value == "main" {
+        "master"
+    } else {
+        value
+    }
+}
+
+#[cfg(feature = "stylos")]
 fn has_role(handle: &AgentHandle, role: &str) -> bool {
-    handle.roles.iter().any(|r| r == role)
+    let role = normalize_primary_role(role);
+    handle.roles.iter().any(|r| normalize_primary_role(r) == role)
 }
 
 fn is_interactive_handle(handle: &AgentHandle) -> bool {
@@ -508,10 +518,10 @@ fn is_interactive_handle(handle: &AgentHandle) -> bool {
 
 #[cfg(feature = "stylos")]
 fn validate_agent_roles(agents: &[AgentHandle]) -> anyhow::Result<()> {
-    let main_count = agents.iter().filter(|h| has_role(h, "main")).count();
+    let main_count = agents.iter().filter(|h| has_role(h, "master")).count();
     if main_count != 1 {
         anyhow::bail!(
-            "invalid agent roles: expected exactly one main agent, found {}",
+            "invalid agent roles: expected exactly one master agent, found {}",
             main_count
         );
     }
@@ -532,11 +542,11 @@ fn build_stylos_status_snapshot(
 ) -> anyhow::Result<crate::stylos::StylosStatusSnapshot> {
     let main_count = agent_sources
         .iter()
-        .filter(|agent| agent.roles.iter().any(|r| r == "main"))
+        .filter(|agent| agent.roles.iter().any(|r| r == "master"))
         .count();
     if main_count != 1 {
         anyhow::bail!(
-            "invalid agent roles: expected exactly one main agent, found {}",
+            "invalid agent roles: expected exactly one master agent, found {}",
             main_count
         );
     }
@@ -934,7 +944,7 @@ impl App {
             #[cfg(feature = "stylos")]
             local_stylos_instance.as_deref(),
             #[cfg(feature = "stylos")]
-            "main",
+            "master",
             None,
             false,
         )
@@ -943,9 +953,9 @@ impl App {
         let handle = AgentHandle {
             agent: Some(agent),
             session_id,
-            agent_id: "main".to_string(),
-            label: "main".to_string(),
-            roles: vec!["main".to_string(), "interactive".to_string()],
+            agent_id: "master".to_string(),
+            label: "master".to_string(),
+            roles: vec!["master".to_string(), "interactive".to_string()],
         };
 
         let art = concat!(
@@ -1080,7 +1090,7 @@ impl App {
     #[cfg(feature = "stylos")]
     #[allow(dead_code)]
     fn main_agent_mut(&mut self) -> Option<&mut AgentHandle> {
-        self.agents.iter_mut().find(|h| has_role(h, "main"))
+        self.agents.iter_mut().find(|h| has_role(h, "master"))
     }
 
     fn background_domain(&self) -> DomainHandle {
@@ -2037,9 +2047,9 @@ impl App {
                                 self.agents = vec![AgentHandle {
                                     agent: Some(new_agent),
                                     session_id: new_session_id,
-                                    agent_id: "main".to_string(),
-                                    label: "main".to_string(),
-                                    roles: vec!["main".to_string(), "interactive".to_string()],
+                                    agent_id: "master".to_string(),
+                                    label: "master".to_string(),
+                                    roles: vec!["master".to_string(), "interactive".to_string()],
                                 }];
                                 if cleared_model_override {
                                     out.push(format!(
@@ -2083,9 +2093,9 @@ impl App {
                             self.agents = vec![AgentHandle {
                                 agent: Some(new_agent),
                                 session_id: new_session_id,
-                                agent_id: "main".to_string(),
-                                label: "main".to_string(),
-                                roles: vec!["main".to_string(), "interactive".to_string()],
+                                agent_id: "master".to_string(),
+                                label: "master".to_string(),
+                                roles: vec!["master".to_string(), "interactive".to_string()],
                             }];
                             out.push(format!(
                                 "temporarily using model '{}' for this session only",
@@ -2113,9 +2123,9 @@ impl App {
                                 self.agents = vec![AgentHandle {
                                     agent: Some(new_agent),
                                     session_id: new_session_id,
-                                    agent_id: "main".to_string(),
-                                    label: "main".to_string(),
-                                    roles: vec!["main".to_string(), "interactive".to_string()],
+                                    agent_id: "master".to_string(),
+                                    label: "master".to_string(),
+                                    roles: vec!["master".to_string(), "interactive".to_string()],
                                 }];
                                 out.push(format!(
                                     "cleared temporary session overrides; back to configured profile '{}'  provider={}  model={}",
@@ -2207,9 +2217,9 @@ impl App {
                                 self.agents = vec![AgentHandle {
                                     agent: Some(new_agent),
                                     session_id: new_session_id,
-                                    agent_id: "main".to_string(),
-                                    label: "main".to_string(),
-                                    roles: vec!["main".to_string(), "interactive".to_string()],
+                                    agent_id: "master".to_string(),
+                                    label: "master".to_string(),
+                                    roles: vec!["master".to_string(), "interactive".to_string()],
                                 }];
                                 out.push(format!(
                                     "switched to profile '{}'  provider={}  model={}",
@@ -2531,7 +2541,7 @@ impl App {
         let main_agent_id = self
             .agents
             .iter()
-            .find(|h| h.roles.iter().any(|r| r == "main"))
+            .find(|h| h.roles.iter().any(|r| r == "master"))
             .map(|h| h.agent_id.clone());
         let Some(agent_id) = interactive_agent_id.or(main_agent_id) else {
             self.watchdog_state.set_pending_watchdog_note(false);
@@ -2754,9 +2764,9 @@ impl App {
                         self.agents = vec![AgentHandle {
                             agent: Some(new_agent),
                             session_id: new_session_id,
-                            agent_id: "main".to_string(),
-                            label: "main".to_string(),
-                            roles: vec!["main".to_string(), "interactive".to_string()],
+                            agent_id: "master".to_string(),
+                            label: "master".to_string(),
+                            roles: vec!["master".to_string(), "interactive".to_string()],
                         }];
                         self.push(Entry::Assistant(format!(
                             "logged in as {} — switched to codex profile (gpt-5.4)",
@@ -3527,23 +3537,23 @@ mod tests {
     }
 
     #[test]
-    fn validate_agent_roles_accepts_one_main_and_one_interactive() {
+    fn validate_agent_roles_accepts_one_master_and_one_interactive() {
         let agents = vec![
-            handle("main", &["main", "interactive"]),
+            handle("master", &["master", "interactive"]),
             handle("worker", &["background"]),
         ];
         validate_agent_roles(&agents).unwrap();
     }
 
     #[test]
-    fn validate_agent_roles_rejects_zero_main() {
+    fn validate_agent_roles_rejects_zero_master() {
         let agents = vec![handle("worker", &["background"])];
         assert!(validate_agent_roles(&agents).is_err());
     }
 
     #[test]
-    fn validate_agent_roles_rejects_two_main() {
-        let agents = vec![handle("a", &["main"]), handle("b", &["main"])];
+    fn validate_agent_roles_rejects_two_master() {
+        let agents = vec![handle("a", &["master"]), handle("b", &["master"])];
         assert!(validate_agent_roles(&agents).is_err());
     }
 
@@ -3554,9 +3564,9 @@ mod tests {
             &startup,
             vec![
                 AgentStatusSource {
-                    agent_id: "main".to_string(),
-                    label: "main".to_string(),
-                    roles: vec!["main".to_string(), "interactive".to_string()],
+                    agent_id: "master".to_string(),
+                    label: "master".to_string(),
+                    roles: vec!["master".to_string(), "interactive".to_string()],
                     session_id: "s1".to_string(),
                     workflow: WorkflowState::default(),
                     activity_status: "idle".to_string(),
@@ -3586,7 +3596,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(snapshot.agents.len(), 2);
-        assert_eq!(snapshot.agents[0].roles, vec!["main", "interactive"]);
+        assert_eq!(snapshot.agents[0].roles, vec!["master", "interactive"]);
         assert_eq!(snapshot.agents[1].provider, "p2");
         assert_eq!(snapshot.startup_project_dir, startup.display().to_string());
     }
@@ -3594,7 +3604,7 @@ mod tests {
     #[test]
     fn targeted_remote_request_prefers_matching_agent_id() {
         let agents = vec![
-            handle("main", &["main", "interactive"]),
+            handle("master", &["master", "interactive"]),
             handle("worker", &["background"]),
         ];
         let request = IncomingPromptRequest {
@@ -3603,7 +3613,7 @@ mod tests {
             task_id: None,
             request_id: None,
             from: Some("peer-1:1234".to_string()),
-            from_agent_id: Some("main".to_string()),
+            from_agent_id: Some("master".to_string()),
             to: Some("peer-2:5678".to_string()),
             to_agent_id: Some("worker".to_string()),
         };
@@ -3617,7 +3627,7 @@ mod tests {
 
     #[test]
     fn extract_stylos_talk_target_from_detail_reads_exact_instance() {
-        let detail = "stylos_request_talk instance=node-2:77, to_agent_id=main, message=hello";
+        let detail = "stylos_request_talk instance=node-2:77, to_agent_id=master, message=hello";
         assert_eq!(
             extract_stylos_talk_target_from_detail(detail),
             Some("node-2:77,")
@@ -3627,7 +3637,7 @@ mod tests {
     #[test]
     fn sender_side_stylos_talk_log_format_is_exact() {
         let target = extract_stylos_talk_target_from_detail(
-            "stylos_request_talk instance=node-2:77 to_agent_id=main",
+            "stylos_request_talk instance=node-2:77 to_agent_id=master",
         )
         .unwrap();
         let text = format!("Stylos talk to={} from={}", target, "node-1:42");

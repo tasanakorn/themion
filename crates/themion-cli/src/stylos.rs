@@ -38,6 +38,27 @@ const DISCOVERY_QUERY_TIMEOUT_MS: u64 = 1_500;
 const TALK_POLL_INTERVAL_MS: u64 = 300;
 const NOTE_PREFIX: &str = "type=stylos_note";
 
+const PRIMARY_AGENT_ID: &str = "master";
+const PRIMARY_AGENT_ID_COMPAT_ALIAS: &str = "main";
+const PRIMARY_ROLE: &str = "master";
+const PRIMARY_ROLE_COMPAT_ALIAS: &str = "main";
+
+fn normalize_primary_agent_id(value: &str) -> &str {
+    if value == PRIMARY_AGENT_ID_COMPAT_ALIAS {
+        PRIMARY_AGENT_ID
+    } else {
+        value
+    }
+}
+
+fn normalize_primary_role(value: &str) -> &str {
+    if value == PRIMARY_ROLE_COMPAT_ALIAS {
+        PRIMARY_ROLE
+    } else {
+        value
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum StylosRuntimeState {
     Off,
@@ -258,7 +279,8 @@ impl StylosToolBridge {
                 let req = TalkRequest {
                     to_agent_id: optional_string(&args, "to_agent_id")
                         .or_else(|| optional_string(&args, "agent_id"))
-                        .unwrap_or_else(|| "main".to_string()),
+                        .map(|value| normalize_primary_agent_id(&value).to_string())
+                        .unwrap_or_else(|| PRIMARY_AGENT_ID.to_string()),
                     message: required_string(&args, "message")?,
                     request_id: optional_string(&args, "request_id"),
                     from: Some(self.instance.clone()),
@@ -1032,9 +1054,9 @@ async fn start_inner(
                         None => StylosStatusSnapshot {
                             startup_project_dir: initial_project_dir.clone(),
                             agents: vec![StylosAgentStatusSnapshot {
-                                agent_id: "main".to_string(),
-                                label: "main".to_string(),
-                                roles: vec!["main".to_string(), "interactive".to_string()],
+                                agent_id: "master".to_string(),
+                                label: "master".to_string(),
+                                roles: vec!["master".to_string(), "interactive".to_string()],
                                 session_id: status_session_id.clone(),
                                 workflow: WorkflowState::default(),
                                 activity_status: "idle".to_string(),
@@ -1373,10 +1395,12 @@ async fn build_status_reply(
     let mut agents = build_queryable_agents(snapshot.agents);
     if let Some(req) = req {
         if let Some(agent_id) = req.agent_id {
+            let agent_id = normalize_primary_agent_id(&agent_id);
             agents.retain(|agent| agent.agent_id == agent_id);
         }
         if let Some(role) = req.role {
-            agents.retain(|agent| agent.roles.iter().any(|r| r == &role));
+            let role = normalize_primary_role(&role);
+            agents.retain(|agent| agent.roles.iter().any(|r| r == role));
         }
     }
     let found = !agents.is_empty();
@@ -1408,11 +1432,12 @@ async fn handle_talk_query(
             reason: Some("invalid_request".to_string()),
         };
     };
+    let normalized_to_agent_id = normalize_primary_agent_id(&req.to_agent_id).to_string();
     let wait_for_idle_timeout_ms = req.wait_for_idle_timeout_ms.unwrap_or(0);
     if wait_for_idle_timeout_ms > MAX_WAIT_TIMEOUT_MS {
         return TalkReply {
             accepted: false,
-            agent_id: req.to_agent_id,
+            agent_id: normalized_to_agent_id.clone(),
             request_id: req.request_id,
             correlation_id: None,
             reason: Some("wait_for_idle_timeout_ms_too_large".to_string()),
@@ -1425,7 +1450,7 @@ async fn handle_talk_query(
         let Some(snapshot) = current_snapshot(snapshot_provider).await else {
             return TalkReply {
                 accepted: false,
-                agent_id: req.to_agent_id,
+                agent_id: normalized_to_agent_id.clone(),
                 request_id: req.request_id,
                 correlation_id: None,
                 reason: Some("snapshot_unavailable".to_string()),
@@ -1434,11 +1459,11 @@ async fn handle_talk_query(
         let agent = snapshot
             .agents
             .into_iter()
-            .find(|a| a.agent_id == req.to_agent_id);
+            .find(|a| a.agent_id == normalized_to_agent_id);
         let Some(agent) = agent else {
             return TalkReply {
                 accepted: false,
-                agent_id: req.to_agent_id,
+                agent_id: normalized_to_agent_id.clone(),
                 request_id: req.request_id,
                 correlation_id: None,
                 reason: Some("not_found".to_string()),
@@ -1508,10 +1533,11 @@ async fn handle_note_delivery_query(
             reason: Some("invalid_request".to_string()),
         };
     };
+    let normalized_to_agent_id = normalize_primary_agent_id(&req.to_agent_id).to_string();
     let Some(snapshot) = current_snapshot(snapshot_provider).await else {
         return NoteReply {
             accepted: false,
-            agent_id: req.to_agent_id,
+            agent_id: normalized_to_agent_id.clone(),
             request_id: req.request_id,
             note_id: None,
             note_slug: None,
@@ -1521,11 +1547,11 @@ async fn handle_note_delivery_query(
     let Some(agent) = snapshot
         .agents
         .into_iter()
-        .find(|a| a.agent_id == req.to_agent_id)
+        .find(|a| a.agent_id == normalized_to_agent_id)
     else {
         return NoteReply {
             accepted: false,
-            agent_id: req.to_agent_id,
+            agent_id: normalized_to_agent_id.clone(),
             request_id: req.request_id,
             note_id: None,
             note_slug: None,
@@ -2142,9 +2168,9 @@ mod tests {
     fn test_git_agent(remotes: &[&str], is_repo: bool) -> StylosQueryableAgentSnapshot {
         let git_remotes: Vec<String> = remotes.iter().map(|remote| (*remote).to_string()).collect();
         StylosQueryableAgentSnapshot {
-            agent_id: "main".to_string(),
-            label: "main".to_string(),
-            roles: vec!["main".to_string()],
+            agent_id: "master".to_string(),
+            label: "master".to_string(),
+            roles: vec!["master".to_string()],
             session_id: "session".to_string(),
             activity_status: "idle".to_string(),
             activity_status_changed_at_ms: 0,
@@ -2238,9 +2264,9 @@ mod tests {
 
     #[test]
     fn peer_prompt_mentions_qru_and_sender() {
-        let prompt = build_peer_message_prompt("node-1:42", "node-2:77", "main", "hello");
+        let prompt = build_peer_message_prompt("node-1:42", "node-2:77", "master", "hello");
         assert!(prompt.contains("***QRU***"));
-        assert!(prompt.contains("type=peer_message from=node-1:42 to=node-2:77 to_agent_id=main"));
+        assert!(prompt.contains("type=peer_message from=node-1:42 to=node-2:77 to_agent_id=master"));
         assert!(prompt.contains("hello"));
     }
 
@@ -2252,7 +2278,7 @@ mod tests {
             NoteKind::WorkRequest,
             None,
             Some("node-1:42"),
-            Some("main"),
+            Some("master"),
             "node-2:77",
             "worker",
             NoteColumn::Todo,
@@ -2263,7 +2289,7 @@ mod tests {
         assert!(prompt.contains("note_id=123e4567-e89b-12d3-a456-426614174000"));
         assert!(prompt.contains("note_slug=fix-tests-123e4567"));
         assert!(prompt.contains("from=node-1:42"));
-        assert!(prompt.contains("from_agent_id=main"));
+        assert!(prompt.contains("from_agent_id=master"));
         assert!(prompt.contains("to=node-2:77"));
         assert!(prompt.contains("to_agent_id=worker"));
         assert!(prompt.contains("note_kind=work_request"));

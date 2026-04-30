@@ -1,7 +1,7 @@
 # PRD-080: Rename the Primary Agent Identity from `main` to `master`
 
-- **Status:** Draft
-- **Version:** >v0.51.0 +minor
+- **Status:** Implemented
+- **Version:** v0.52.0
 - **Scope:** `themion-core`, `themion-cli`, docs
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
 - **Date:** 2026-04-30
@@ -220,6 +220,8 @@ This reduces the chance of passing local edits while leaving cross-crate behavio
 
 ## Current implementation inventory
 
+Note: this inventory is a historical snapshot of pre-implementation `main` call sites captured to scope the rename. It is not a list of current remaining issues after the shipped `master` migration.
+
 ### Core defaults and workflow identity
 
 - `crates/themion-core/src/workflow.rs:168` — `pub const DEFAULT_AGENT: &str = "main";`
@@ -282,77 +284,77 @@ This reduces the chance of passing local edits while leaving cross-crate behavio
 
 ### `crates/themion-core/src/workflow.rs`
 
-- [ ] rename `DEFAULT_AGENT` from `"main"` to `"master"`
-- [ ] keep workflow state initialization paths canonical on `DEFAULT_AGENT`
-- [ ] confirm no nearby doc strings or tests still refer to `main` as the built-in default
+- [x] rename `DEFAULT_AGENT` from `"main"` to `"master"`
+- [x] keep workflow state initialization paths canonical on `DEFAULT_AGENT`
+- [x] confirm no nearby doc strings or tests still refer to `main` as the built-in default
 
 ### `crates/themion-core/src/agent.rs`
 
-- [ ] replace remaining hardcoded fallback `unwrap_or("main")` paths with canonical `master` behavior
-- [ ] if compatibility helpers live in core, route fallback/default-agent matching through them
-- [ ] confirm workflow resets and any self-agent-id resolution emit `master` canonically
+- [x] replace remaining hardcoded fallback `unwrap_or("main")` paths with canonical `master` behavior
+- [x] if compatibility helpers live in core, route fallback/default-agent matching through them
+- [x] confirm workflow resets and any self-agent-id resolution emit `master` canonically
 
 ### `crates/themion-core/src/db.rs`
 
-- [ ] confirm DB fallback paths automatically inherit the renamed `DEFAULT_AGENT`
-- [ ] add or update tests only if there is direct coverage for fallback agent-name behavior
+- [x] confirm DB fallback paths automatically inherit the renamed `DEFAULT_AGENT`
+- [x] add or update tests only if there is direct coverage for fallback agent-name behavior
 
 ### `crates/themion-core/src/tools.rs`
 
-- [ ] update Stylos tool descriptions that say `to_agent_id` defaults to `main`
-- [ ] update JSON schema description text from `Default: main.` to `Default: master.`
-- [ ] verify any emitted workflow metadata that references `DEFAULT_AGENT` stays canonical after the rename
+- [x] update Stylos tool descriptions that say `to_agent_id` defaults to `main`
+- [x] update JSON schema description text from `Default: main.` to `Default: master.`
+- [x] verify any emitted workflow metadata that references `DEFAULT_AGENT` stays canonical after the rename
 
 ### `crates/themion-core/tests/memory_tools.rs`
 
-- [ ] update explicit `to_agent_id = "main"` fixtures to `"master"`
-- [ ] if transitional alias acceptance is shipped through the tested path, add one compatibility test that proves `main` normalizes to `master`
+- [x] update explicit `to_agent_id = "main"` fixtures to `"master"`
+- [x] if transitional alias acceptance is shipped through the tested path, add one compatibility test that proves `main` normalizes to `master`
 
 ### `crates/themion-cli/src/app_runtime.rs`
 
-- [ ] rename built-in bootstrap identity from `"main"` to `"master"`
-- [ ] verify nearby bootstrap code does not separately hardcode the old role or label
+- [x] rename built-in bootstrap identity from `"main"` to `"master"`
+- [x] verify nearby bootstrap code does not separately hardcode the old role or label
 
 ### `crates/themion-cli/src/app_state.rs`
 
-- [ ] rename built-in bootstrap identity from `"main"` to `"master"`
-- [ ] verify state initialization still matches TUI/bootstrap expectations exactly
+- [x] rename built-in bootstrap identity from `"main"` to `"master"`
+- [x] verify state initialization still matches TUI/bootstrap expectations exactly
 
 ### `crates/themion-cli/src/tui.rs`
 
-- [ ] replace fallback `to_agent_id` parsing default from `main` to `master`
-- [ ] rename primary-role validation from one-`main` to one-`master`
-- [ ] rename primary-agent lookup helpers from role `main` to role `master`
-- [ ] update all built-in local agent fixtures to `agent_id = "master"`, `label = "master"`, `roles = ["master", "interactive"]`
-- [ ] update transcript/request-detail test expectations that currently spell `to_agent_id=main` or `from_agent_id=main`
-- [ ] if compatibility handling is implemented here, centralize it through helper functions rather than repeating inline dual-name checks
+- [x] replace fallback `to_agent_id` parsing default from `main` to `master`
+- [x] rename primary-role validation from one-`main` to one-`master`
+- [x] rename primary-agent lookup helpers from role `main` to role `master`
+- [x] update all built-in local agent fixtures to `agent_id = "master"`, `label = "master"`, `roles = ["master", "interactive"]`
+- [x] update transcript/request-detail test expectations that currently spell `to_agent_id=main` or `from_agent_id=main`
+- [x] if compatibility handling is implemented here, centralize it through helper functions rather than repeating inline dual-name checks
 
 ### `crates/themion-cli/src/stylos.rs`
 
-- [ ] replace outbound and inbound default-target assumptions that currently use `main`
-- [ ] update peer-message prompt fixtures and expected prompt headers from `main` to `master`
-- [ ] update snapshot/test fixtures that currently build local agent descriptors with `main`
-- [ ] if compatibility handling is implemented here, normalize inbound target identity before selection and emit canonical `master` afterward
+- [x] replace outbound and inbound default-target assumptions that currently use `main`
+- [x] update peer-message prompt fixtures and expected prompt headers from `main` to `master`
+- [x] update snapshot/test fixtures that currently build local agent descriptors with `main`
+- [x] if compatibility handling is implemented here, normalize inbound target identity before selection and emit canonical `master` afterward
 
 ### `docs/engine-runtime.md`
 
-- [ ] update runtime docs so default `to_agent_id` is `master`
-- [ ] if a transition-window alias exists, document that `main` is temporarily accepted and normalized to `master`
+- [x] update runtime docs so default `to_agent_id` is `master`
+- [x] if a transition-window alias exists, document that `main` is temporarily accepted and normalized to `master`
 
 ### `docs/architecture.md`
 
-- [ ] update the initial interactive-agent description from `roles = ["main", "interactive"]` to `roles = ["master", "interactive"]`
-- [ ] verify surrounding prose still reads correctly once “main agent” wording becomes “master agent” or “primary interactive agent”
+- [x] update the initial interactive-agent description from `roles = ["main", "interactive"]` to `roles = ["master", "interactive"]`
+- [x] verify surrounding prose still reads correctly once “main agent” wording becomes “master agent” or “primary interactive agent”
 
 ### archived / active PRDs
 
-- [ ] update only the current-behavior or implementation-status notes that would otherwise incorrectly describe shipped runtime behavior after the rename lands
-- [ ] preserve historical descriptions where the PRD is intentionally describing the old design at the time it was written
+- [x] update only the current-behavior or implementation-status notes that would otherwise incorrectly describe shipped runtime behavior after the rename lands
+- [x] preserve historical descriptions where the PRD is intentionally describing the old design at the time it was written
 
 ### `docs/README.md`
 
-- [ ] keep PRD-080 listed with the current draft status now
-- [ ] when implementation lands, update PRD-080 status/version metadata in the index to match the shipped release
+- [x] list PRD-080 with implemented status in the PRD index
+- [x] keep PRD-080 status/version metadata in the index aligned with the shipped release
 
 ## Edge Cases
 
@@ -393,15 +395,15 @@ Rollout guidance:
 
 ## Implementation checklist
 
-- [ ] replace `DEFAULT_AGENT` and any other shared built-in default-agent helpers from `main` to `master`
-- [ ] add or update small helper functions for built-in-primary-agent normalization and primary-role matching if compatibility handling is implemented
-- [ ] update core fallback paths that still hardcode `"main"` outside `DEFAULT_AGENT`
-- [ ] update CLI bootstrap/default agent construction in `app_runtime.rs`, `app_state.rs`, `tui.rs`, and `stylos.rs`
-- [ ] rename primary-role validation and primary-agent selection logic from `main` to `master`
-- [ ] apply transitional input normalization at the chosen external request boundaries, if the compatibility policy is shipped
-- [ ] update prompt, transcript, request-detail, and snapshot strings that still encode `main`
-- [ ] update tests and fixtures that currently assert `main` as built-in agent id, label, role, or default target
-- [ ] update runtime/docs wording for default `to_agent_id`, primary-agent role behavior, and any transitional compatibility support
+- [x] replace `DEFAULT_AGENT` and any other shared built-in default-agent helpers from `main` to `master`
+- [x] add or update small helper functions for built-in-primary-agent normalization and primary-role matching if compatibility handling is implemented
+- [x] update core fallback paths that still hardcode `"main"` outside `DEFAULT_AGENT`
+- [x] update CLI bootstrap/default agent construction in `app_runtime.rs`, `app_state.rs`, `tui.rs`, and `stylos.rs`
+- [x] rename primary-role validation and primary-agent selection logic from `main` to `master`
+- [x] apply transitional input normalization at the chosen external request boundaries, if the compatibility policy is shipped
+- [x] update prompt, transcript, request-detail, and snapshot strings that still encode `main`
+- [x] update tests and fixtures that currently assert `main` as built-in agent id, label, role, or default target
+- [x] update runtime/docs wording for default `to_agent_id`, primary-agent role behavior, and any transitional compatibility support
 
 ## Technical note: preferred implementation decision record
 

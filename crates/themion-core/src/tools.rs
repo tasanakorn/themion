@@ -910,10 +910,10 @@ fn stylos_tool_definitions() -> Vec<Value> {
         stylos_tool("stylos_query_status", "Query one instance for current process and agent status.", json!({
             "type":"object","properties":{"instance":{"type":"string"},"agent_id":{"type":"string"},"role":{"type":"string"}},"required":["instance"]
         })),
-        stylos_tool("stylos_request_talk", "Send a user-style message to one instance. Sender identity is automatic; to_agent_id defaults to main.", json!({
+        stylos_tool("stylos_request_talk", "Send a user-style message to one instance. Sender identity is automatic; to_agent_id defaults to master.", json!({
             "type":"object","properties":{
                 "instance":{"type":"string","description":"Target instance in <hostname>:<pid> form."},
-                "to_agent_id":{"type":"string","description":"Target agent id. Default: main."},
+                "to_agent_id":{"type":"string","description":"Target agent id. Default: master."},
                 "message":{"type":"string"},
                 "request_id":{"type":"string"},
                 "wait_for_idle_timeout_ms":{"type":"integer","description":"Optional bounded wait in ms for target availability."}

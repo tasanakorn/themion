@@ -453,7 +453,7 @@ Task lifecycle tracking is process-local and in-memory. Accepted tasks start as 
 
 ## TUI (tui.rs)
 
-The TUI still boots with one main interactive agent in the first shipped step, but its runtime agent descriptor now uses explicit roles rather than relying only on an `is_interactive` boolean. The initial main agent carries `roles = ["main", "interactive"]`.
+The TUI still boots with one master interactive agent in the first shipped step, but its runtime agent descriptor now uses explicit roles rather than relying only on an `is_interactive` boolean. The initial master agent carries `roles = ["master", "interactive"]`.
 
 ### Long-session chat navigation
 
