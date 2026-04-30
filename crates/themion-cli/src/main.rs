@@ -109,6 +109,7 @@ impl Session {
 
     pub fn switch_profile_temporarily(&mut self, name: &str) -> bool {
         self.temporary_profile_override = Some(name.to_string());
+        self.temporary_model_override = None;
         self.switch_profile(name)
     }
 

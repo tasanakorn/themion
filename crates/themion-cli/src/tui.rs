@@ -1907,6 +1907,7 @@ impl App {
             let parts: Vec<&str> = rest.splitn(3, ' ').collect();
             match parts.as_slice() {
                 ["profile", "use", name] => {
+                    let cleared_model_override = self.session.temporary_model_override.is_some();
                     if self.session.switch_profile_temporarily(name) {
                         match build_replacement_main_agent(AgentReplacementParams {
                             session: &self.session,
@@ -1928,10 +1929,17 @@ impl App {
                                     label: "main".to_string(),
                                     roles: vec!["main".to_string(), "interactive".to_string()],
                                 }];
-                                out.push(format!(
-                                    "temporarily switched to profile '{}' for this session only  provider={}  model={}",
-                                    name, self.session.provider, self.session.model
-                                ));
+                                if cleared_model_override {
+                                    out.push(format!(
+                                        "temporarily switched to profile '{}' for this session only; cleared temporary model override and reset to profile model  provider={}  model={}",
+                                        name, self.session.provider, self.session.model
+                                    ));
+                                } else {
+                                    out.push(format!(
+                                        "temporarily switched to profile '{}' for this session only  provider={}  model={}",
+                                        name, self.session.provider, self.session.model
+                                    ));
+                                }
                             }
                             Err(e) => out.push(format!("error building agent: {}", e)),
                         }
