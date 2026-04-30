@@ -1,6 +1,6 @@
 [package]
 name = "themion-core"
-version = "0.50.0"
+version = "0.51.0"
 edition = "2021"
 
 [features]
@@ -20,5 +20,6 @@ tokio.workspace = true
 rusqlite.workspace = true
 uuid.workspace = true
 chrono = { version = "0.4", default-features = true, features = ["clock"] }
+libc = "0.2"
 fastembed = { workspace = true, optional = true }
 tiktoken-rs.workspace = true

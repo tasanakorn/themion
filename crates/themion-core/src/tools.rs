@@ -15,14 +15,19 @@ use anyhow::{Context, Result};
 
 use base64::Engine;
 use chrono::Utc;
+#[cfg(unix)]
+use libc::{ERANGE, _SC_GETPW_R_SIZE_MAX, getpwuid_r, getuid, passwd, sysconf};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::ffi::CStr;
 use std::fs;
 #[cfg(feature = "stylos")]
 use std::future::Future;
-use std::path::PathBuf;
+use std::mem::MaybeUninit;
+use std::path::{Path, PathBuf};
 #[cfg(feature = "stylos")]
 use std::pin::Pin;
+use std::ptr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -131,6 +136,113 @@ fn memory_tool(name: &str, description: &str, parameters: Value) -> Value {
             "parameters": parameters,
         }
     })
+}
+
+fn shell_path_if_valid(path: PathBuf) -> Option<PathBuf> {
+    fs::metadata(&path)
+        .ok()
+        .filter(|metadata| metadata.is_file())
+        .map(|_| path)
+}
+
+#[cfg(unix)]
+fn user_shell_from_passwd() -> Option<PathBuf> {
+    let uid = unsafe { getuid() };
+    let suggested_buffer_len = unsafe { sysconf(_SC_GETPW_R_SIZE_MAX) };
+    let buffer_len = usize::try_from(suggested_buffer_len)
+        .ok()
+        .filter(|len| *len > 0)
+        .unwrap_or(1024);
+    let mut buffer = vec![0; buffer_len];
+    let mut passwd_entry = MaybeUninit::<passwd>::uninit();
+
+    loop {
+        let mut result = ptr::null_mut();
+        let status = unsafe {
+            getpwuid_r(
+                uid,
+                passwd_entry.as_mut_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+
+        if status == 0 {
+            if result.is_null() {
+                return None;
+            }
+            let passwd_entry = unsafe { passwd_entry.assume_init_ref() };
+            if passwd_entry.pw_shell.is_null() {
+                return None;
+            }
+            let shell = unsafe { CStr::from_ptr(passwd_entry.pw_shell) }
+                .to_string_lossy()
+                .into_owned();
+            return shell_path_if_valid(PathBuf::from(shell));
+        }
+
+        if status != ERANGE {
+            return None;
+        }
+
+        let new_len = buffer.len().checked_mul(2)?;
+        if new_len > 1024 * 1024 {
+            return None;
+        }
+        buffer.resize(new_len, 0);
+    }
+}
+
+#[cfg(not(unix))]
+fn user_shell_from_passwd() -> Option<PathBuf> {
+    None
+}
+
+fn user_shell_from_env() -> Option<PathBuf> {
+    std::env::var_os("SHELL")
+        .map(PathBuf::from)
+        .and_then(shell_path_if_valid)
+}
+
+fn default_shell_path() -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from("cmd")
+    } else {
+        PathBuf::from("sh")
+    }
+}
+
+fn resolve_user_shell() -> PathBuf {
+    user_shell_from_passwd()
+        .or_else(user_shell_from_env)
+        .unwrap_or_else(default_shell_path)
+}
+
+fn shell_program_name(shell_path: &Path) -> String {
+    shell_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+fn shell_command_argv(command: &str) -> Vec<String> {
+    let shell_path = resolve_user_shell();
+    let program_name = shell_program_name(&shell_path);
+    let shell = shell_path.to_string_lossy().to_string();
+
+    if cfg!(windows) {
+        if matches!(
+            program_name.as_str(),
+            "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe"
+        ) {
+            return vec![shell, "-Command".to_string(), command.to_string()];
+        }
+        return vec![shell, "/c".to_string(), command.to_string()];
+    }
+
+    vec![shell, "-lc".to_string(), command.to_string()]
 }
 
 fn memory_tool_definitions() -> Vec<Value> {
@@ -909,11 +1021,14 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 .ok_or_else(|| anyhow::anyhow!("missing command"))?;
             let result_limit = parse_shell_result_limit(&args)?;
             let timeout_ms = parse_shell_timeout_ms(&args)?;
+            let argv = shell_command_argv(command);
+            let (program, program_args) = argv
+                .split_first()
+                .ok_or_else(|| anyhow::anyhow!("failed to build shell command argv"))?;
             let output = match timeout(
                 Duration::from_millis(timeout_ms),
-                tokio::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(command)
+                tokio::process::Command::new(program)
+                    .args(program_args)
                     .current_dir(&ctx.project_dir)
                     .output(),
             )

@@ -3513,7 +3513,7 @@ dependencies = [
 
 [[package]]
 name = "themion-cli"
-version = "0.50.0"
+version = "0.51.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3540,13 +3540,14 @@ dependencies = [
 
 [[package]]
 name = "themion-core"
-version = "0.50.0"
+version = "0.51.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
  "chrono",
  "fastembed",
+ "libc",
  "reqwest",
  "rusqlite",
  "serde",
