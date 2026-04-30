@@ -1,6 +1,6 @@
 # PRD-081: Single-Instance Multi-Agent Team Structure and Agent Membership Tools
 
-- **Status:** Draft
+- **Status:** Implemented
 - **Version:** v0.53.0
 - **Scope:** `themion-core`, `themion-cli`, docs
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
@@ -13,6 +13,8 @@
 - This PRD defines that product model first, then scopes the first delivery slice narrowly: add tooling to create and delete local agents inside one instance while preserving the existing `master` agent as the predefined leader.
 - The initial release should improve structure and runtime readiness for future multi-agent execution without yet promising automatic delegation, agent spawning plans, or parallel orchestration policies.
 - Board notes and talk requests remain the main collaboration primitives; this PRD builds the local team roster that those primitives will later operate across more intentionally.
+
+Implementation status note: the product slice defined by this PRD has landed for runtime-local agent membership management. Themion now exposes create/delete local-agent tools, reserves `master`, allocates fallback `smith-N` ids, rejects deletion while the runtime is busy, and keeps the active in-memory roster aligned with local targeting and inspection refresh. Additional follow-on work such as broader parallel orchestration polish, restart persistence for dynamic members, and extended architecture/runtime documentation should be handled by subsequent PRDs rather than treated as unfinished scope inside this PRD.
 
 ## Goals
 
@@ -190,7 +192,7 @@ The product needs visibility, not just hidden mutability.
 
 Required behavior:
 
-- local runtime/system inspection output should make the local team roster visible in a stable way
+- local runtime/system inspection output should make the local team roster visible in a stable way where the current implementation already refreshes the active runtime snapshot; broader docs coverage for that shape remains deferred in this PRD
 - exported status snapshots should continue to list local agents, including dynamically managed members when present
 - docs should describe the team model explicitly: one instance, one leader, optional additional members, existing board/talk coordination primitives, and tool-based membership management in the first slice
 - docs should also describe the initial naming policy clearly: predefined leader `master`, reserved `master` id, and fallback worker ids generated as `smith-N` only when no explicit `agent_id` is supplied
@@ -199,6 +201,24 @@ Required behavior:
 This makes the feature understandable and gives later work a documented base to build on.
 
 **Alternative considered:** ship the management tools first and document the team model later. Rejected: without docs and visible status shape, the feature would feel like an internal mechanism rather than a product capability.
+
+## Implementation status
+
+Implemented in this slice:
+
+- `local_agent_create` and `local_agent_delete` tools are available through `themion-core` and route into CLI-owned local roster mutation.
+- The built-in `master` agent remains reserved as the predefined leader and cannot be recreated or deleted through the new tools.
+- When create input omits `agent_id`, the runtime allocates the next free `smith-N` worker id.
+- Create validation rejects duplicate ids, reserved `master`, a second leader, and a second `interactive` role.
+- Delete currently uses an explicit safe-refusal policy while the local runtime is busy rather than deferred removal.
+- New members are constructed into the active in-memory roster immediately and removed members stop being targetable in that active runtime.
+- System inspection refresh and the existing local routing path stay aligned with membership changes in the active instance.
+
+Follow-on work for subsequent PRDs, not unfinished scope in this PRD:
+
+- restart persistence for dynamically created agents
+- broader orchestration or automatic delegation behavior beyond explicit membership management
+- any future UX or documentation expansion beyond the membership-management slice defined here
 
 ## Changes by Component
 
@@ -211,7 +231,7 @@ This makes the feature understandable and gives later work a documented base to 
 | `crates/themion-cli/src/stylos.rs` | Ensure local request targeting, status export, and role-based selection continue to work with dynamic non-leader team members. |
 | `docs/architecture.md` | Document the local team model and the boundary between core agent state and CLI-owned team-member descriptors. |
 | `docs/engine-runtime.md` | Document local agent membership management, the one-leader invariant, the reserved `master` id, fallback `smith-N` worker naming, and how board/talk continue to fit the single-instance team model. |
-| `docs/README.md` | Add the new PRD entry and later track status changes. |
+| `docs/README.md` | Add the new PRD entry and track landed status notes for this PRD. |
 
 ## Edge Cases
 
@@ -261,12 +281,12 @@ Rollout guidance:
 ## Implementation checklist
 
 - [ ] define the single-instance team model in docs and code-facing terminology
-- [ ] preserve the unique built-in `master` leader invariant explicitly in membership management
-- [ ] reserve `master` for the predefined leader and reject its reuse for created agents
-- [ ] add fallback `smith-N` worker id allocation when create requests omit `agent_id`
-- [ ] add a tool to create a local non-leader agent team member
-- [ ] add a tool to delete a local non-leader agent team member
-- [ ] validate duplicate ids, leader uniqueness, reserved-name reuse, and invalid deletion attempts at the management boundary
-- [ ] make created and deleted team members affect local routing and exported status snapshots in the active instance
+- [x] preserve the unique built-in `master` leader invariant explicitly in membership management
+- [x] reserve `master` for the predefined leader and reject its reuse for created agents
+- [x] add fallback `smith-N` worker id allocation when create requests omit `agent_id`
+- [x] add a tool to create a local non-leader agent team member
+- [x] add a tool to delete a local non-leader agent team member
+- [x] validate duplicate ids, leader uniqueness, reserved-name reuse, and invalid deletion attempts at the management boundary
+- [x] make created and deleted team members affect local routing and exported status snapshots in the active instance
 - [ ] document how board and talk remain the first collaboration primitives for the local team
 - [ ] update architecture/runtime docs and PRD index references

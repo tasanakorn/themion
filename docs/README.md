@@ -92,4 +92,4 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-078 | [Idle Watchdog for Background Agent Follow-Up and Pending Board-Note Injection](prd/prd-078-idle-watchdog-for-background-agent-follow-up-and-board-note-injection.md) | Implemented | v0.50.0 | `themion-core`, `themion-cli`, docs |
 | PRD-079 | [Codex-Like User-Shell Execution Mode for Shell Tooling](prd/prd-079-codex-like-user-shell-execution-mode.md) | Implemented | v0.51.0 | `themion-core`, `themion-cli`, docs |
 | PRD-080 | [Rename the Primary Agent Identity from `main` to `master`](prd/prd-080-rename-primary-agent-main-to-master.md) | Implemented | v0.52.0 | `themion-core`, `themion-cli`, docs |
-| PRD-081 | [Single-Instance Multi-Agent Team Structure and Agent Membership Tools](prd/prd-081-single-instance-multi-agent-team-structure-and-agent-membership-tools.md) | Draft | v0.53.0 | `themion-core`, `themion-cli`, docs |
+| PRD-081 | [Single-Instance Multi-Agent Team Structure and Agent Membership Tools](prd/prd-081-single-instance-multi-agent-team-structure-and-agent-membership-tools.md) | Implemented | v0.53.0 | `themion-core`, `themion-cli`, docs |
