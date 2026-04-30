@@ -244,6 +244,7 @@ pub struct TurnStats {
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub tokens_cached: u64,
+    pub last_api_call_tokens_in: Option<u64>,
     pub elapsed_ms: u128,
 }
 
@@ -1491,6 +1492,7 @@ impl Agent {
         let mut tokens_in = 0u64;
         let mut tokens_out = 0u64;
         let mut tokens_cached = 0u64;
+        let mut last_api_call_tokens_in: Option<u64> = None;
         let mut turn_end_reason = "turn_end".to_string();
         let activation_source = if requested_workflow.is_some() {
             "user_input"
@@ -1606,6 +1608,7 @@ impl Agent {
             if let Some(u) = usage {
                 if let Some(pt) = u.prompt_tokens {
                     tokens_in += pt;
+                    last_api_call_tokens_in = Some(pt);
                 }
                 if let Some(ct) = u.completion_tokens {
                     tokens_out += ct;
@@ -2022,6 +2025,7 @@ impl Agent {
             tokens_in,
             tokens_out,
             tokens_cached,
+            last_api_call_tokens_in,
             elapsed_ms: turn_start.elapsed().as_millis(),
         };
         {

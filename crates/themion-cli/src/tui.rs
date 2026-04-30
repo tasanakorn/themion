@@ -930,6 +930,7 @@ impl App {
                 tokens_in: 0,
                 tokens_out: 0,
                 tokens_cached: 0,
+                last_api_call_tokens_in: None,
                 elapsed_ms: 0,
             },
             last_ctx_tokens: 0,
@@ -1404,7 +1405,9 @@ impl App {
                 self.activity_counters.agent_turn_completed_count += 1;
                 self.agent_busy = false;
                 self.active_turn_cancellation = None;
-                self.last_ctx_tokens = stats.tokens_in;
+                if let Some(last_api_call_tokens_in) = stats.last_api_call_tokens_in {
+                    self.last_ctx_tokens = last_api_call_tokens_in;
+                }
                 self.session_tokens.tokens_in += stats.tokens_in;
                 self.session_tokens.tokens_out += stats.tokens_out;
                 self.session_tokens.tokens_cached += stats.tokens_cached;

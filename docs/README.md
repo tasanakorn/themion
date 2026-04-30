@@ -84,3 +84,5 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-070 | [Improve `/context` and Prompt-Budget Estimation with `tiktoken-rs`](prd/prd-070-improve-context-token-estimation-with-tiktoken-rs.md) | Implemented | v0.46.0 | `themion-core`, `themion-cli`, docs |
 | PRD-071 | [Reduce Tool-Schema Verbosity to Lower Static Prompt Overhead](prd/prd-071-reduce-tool-schema-verbosity-to-lower-static-prompt-overhead.md) | Implemented | v0.46.1 | `themion-core`, docs |
 | PRD-072 | [Add Effective Tool-Token Estimation to `/context`](prd/prd-072-add-effective-tool-token-estimation-to-context.md) | Implemented | v0.47.0 | `themion-core`, `themion-cli`, docs |
+| PRD-073 | [Make Statusline `ctx` Show the Last API Call Context Value](prd/prd-073-make-statusline-ctx-show-last-api-call-context-value.md) | Implemented | v0.47.1 | `themion-core`, `themion-cli`, docs |
+| PRD-073 | [Make Statusline `ctx` Show the Last API Call Context Value](prd/prd-073-make-statusline-ctx-show-last-api-call-context-value.md) | Draft | >v0.47.0 +patch | `themion-core`, `themion-cli`, docs |
