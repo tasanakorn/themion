@@ -33,7 +33,7 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-019 | [Basic Stylos Support in `themion-cli`](prd/archive/prd-019-basic-stylos-support-in-themion-cli.md) | Implemented | v0.10.0 | `themion-cli`, docs |
 | PRD-020 | [Stylos Git Metadata Cache and Remote URL Simplification](prd/archive/prd-020-stylos-git-metadata-cache-and-remote-url-simplification.md) | Implemented | v0.10.1 | `themion-cli`, docs |
 | PRD-021 | [Single-Process Multi-Agent Runtime and Multi-Agent Stylos Status Reporting](prd/archive/prd-021-single-process-multi-agent-runtime-and-stylos-reporting.md) | Implemented | v0.11.0 | `themion-core`, `themion-cli`, docs |
-| PRD-022 | [Stylos Queryables for Agent Presence, Availability, and Task Requests](prd/archive/prd-022-stylos-queryables-for-agent-presence-availability-and-task-requests.md) | Implemented   | v0.12.1 | `themion-cli`, `themion-core`, docs |
+| PRD-022 | [Stylos Queryables for Agent Presence, Availability, and Task Requests](prd/archive/prd-022-stylos-queryables-for-agent-presence-availability-and-task-requests.md) | Implemented   | v0.12.1 | `themion-core`, `themion-cli`, docs |
 | PRD-023 | [Use External Stylos Repository Instead of Vendored Workspace Copy](prd/archive/prd-023-use-external-stylos-repository-instead-of-vendored-workspace-copy.md) | Implemented   | v0.13.0 | workspace, `themion-cli`, docs |
 | PRD-024 | [Client-Side Git Repo Identity Normalization for Stylos Agent Git Queries](prd/archive/prd-024-client-side-git-repo-identity-normalization-for-stylos-agent-git-queries.md) | Implemented   | v0.13.1 | `themion-core`, `themion-cli`, docs |
 | PRD-025 | [Long-Session Chat History Navigation in the TUI](prd/archive/prd-025-long-session-chat-history-navigation.md) | Implemented | v0.14.0 | `themion-cli`, docs |
@@ -62,7 +62,7 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-048 | [Remove Long Navigation Shortcut Hints from the TUI Statusline](prd/archive/prd-048-remove-navigation-shortcut-hints-from-statusline.md) | Implemented | v0.29.3 | `themion-cli`, docs |
 | PRD-049 | [Project Memory and Global Knowledge Naming for Durable Knowledge Tools](prd/archive/prd-049-project-memory-and-global-knowledge-naming.md) | Implemented | v0.30.0 | `themion-core`, `themion-cli`, docs |
 | PRD-050 | [Reorganize Tokio Runtime Execution into Domain-Specific Pools](prd/archive/prd-050-reorganize-tokio-runtime-pools.md) | Implemented | v0.31.0 | `themion-cli`, `themion-core`, docs |
-| PRD-051 | [Separate Shared Application Runtime from TUI Presentation and Introduce Headless Mode](prd/prd-051-separate-shared-application-runtime-from-tui-presentation-and-introduce-headless-mode.md) | Implemented | v0.32.0 | `themion-cli`, docs |
+| PRD-051 | [Separate Shared Application Runtime from TUI Presentation and Introduce Headless Mode](prd/prd-051-separate-shared-application-runtime-and-introduce-headless-mode.md) | Implemented | v0.32.0 | `themion-cli`, docs |
 | PRD-052 | [Local System Inspection Tool for Runtime, Tooling, and Provider Readiness](prd/prd-052-tool-and-model-self-healthcheck.md) | Implemented | v0.33.0 | `themion-core`, `themion-cli`, docs |
 | PRD-053 | [Tighten Tokio Runtime Topology Semantics and Remove Remaining TUI-Orchestration Leakage](prd/prd-053-tighten-tokio-runtime-topology-and-tui-layering.md) | Implemented | v0.34.0 | `themion-cli`, docs |
 | PRD-054 | [Rename Shared CLI Application Runtime Type to `AppState`](prd/prd-054-rename-shared-cli-app-runtime-to-app-state.md) | Implemented | v0.34.1 | `themion-cli`, docs |
@@ -85,4 +85,4 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-071 | [Reduce Tool-Schema Verbosity to Lower Static Prompt Overhead](prd/prd-071-reduce-tool-schema-verbosity-to-lower-static-prompt-overhead.md) | Implemented | v0.46.1 | `themion-core`, docs |
 | PRD-072 | [Add Effective Tool-Token Estimation to `/context`](prd/prd-072-add-effective-tool-token-estimation-to-context.md) | Implemented | v0.47.0 | `themion-core`, `themion-cli`, docs |
 | PRD-073 | [Make Statusline `ctx` Show the Last API Call Context Value](prd/prd-073-make-statusline-ctx-show-last-api-call-context-value.md) | Implemented | v0.47.1 | `themion-core`, `themion-cli`, docs |
-| PRD-073 | [Make Statusline `ctx` Show the Last API Call Context Value](prd/prd-073-make-statusline-ctx-show-last-api-call-context-value.md) | Draft | >v0.47.0 +patch | `themion-core`, `themion-cli`, docs |
+| PRD-074 | [Require Double `Ctrl+C` to Exit the TUI](prd/prd-074-require-double-ctrl-c-to-exit-the-tui.md) | Implemented | v0.48.0 | `themion-cli`, docs |

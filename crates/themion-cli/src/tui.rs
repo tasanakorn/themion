@@ -90,6 +90,7 @@ enum ReviewMode {
 
 const TOOL_DETAIL_MAX_CHARS: usize = 60;
 const TOOL_DETAIL_CENTER_TRIM_MARKER: &str = "󱑼";
+const CTRL_C_EXIT_CONFIRM_WINDOW: Duration = Duration::from_secs(3);
 
 fn center_trim(s: &str, max: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
@@ -768,6 +769,7 @@ pub struct App {
     pending: Option<String>,
     composer: ChatComposer,
     pub(crate) running: bool,
+    ctrl_c_exit_armed_until: Option<Instant>,
     agent_busy: bool,
     scroll_offset: usize,
     navigation_mode: NavigationMode,
@@ -907,6 +909,7 @@ impl App {
             entries: initial_entries,
             pending: None,
             composer: ChatComposer::new(),
+            ctrl_c_exit_armed_until: None,
             running: true,
             agent_busy: false,
             scroll_offset: 0,
@@ -1052,8 +1055,29 @@ impl App {
         }
     }
 
+    fn arm_ctrl_c_exit(&mut self) {
+        self.ctrl_c_exit_armed_until = Some(Instant::now() + CTRL_C_EXIT_CONFIRM_WINDOW);
+        self.push(Entry::Status(
+            "Press Ctrl+C again within 3s to exit".to_string(),
+        ));
+        self.mark_dirty_status();
+    }
+
+    fn ctrl_c_exit_is_armed(&self, now: Instant) -> bool {
+        matches!(self.ctrl_c_exit_armed_until, Some(deadline) if deadline > now)
+    }
+
+    fn expire_ctrl_c_exit_if_needed(&mut self, now: Instant) -> bool {
+        if matches!(self.ctrl_c_exit_armed_until, Some(deadline) if deadline <= now) {
+            self.ctrl_c_exit_armed_until = None;
+            return true;
+        }
+        false
+    }
+
     fn on_tick(&mut self) {
         self.activity_counters.tick_count += 1;
+        self.expire_ctrl_c_exit_if_needed(Instant::now());
         self.record_runtime_snapshot();
         self.refresh_main_agent_system_inspection();
         let previous = self.pending.clone();
@@ -2633,7 +2657,17 @@ impl App {
                     self.request_draw(frame_requester);
                 }
             }
-            InputAction::Quit => self.running = false,
+            InputAction::Quit => {
+                let now = Instant::now();
+                if self.ctrl_c_exit_is_armed(now) {
+                    self.ctrl_c_exit_armed_until = None;
+                    self.running = false;
+                } else {
+                    self.expire_ctrl_c_exit_if_needed(now);
+                    self.arm_ctrl_c_exit();
+                    self.request_draw(frame_requester);
+                }
+            }
             InputAction::Interrupt => self.request_interrupt(),
             InputAction::OpenTranscriptReview => {
                 self.open_transcript_review();

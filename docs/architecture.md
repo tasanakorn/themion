@@ -182,6 +182,8 @@ In Stylos-enabled builds, the board-note injection and note-completion follow-up
 
 Within that TUI layer, input ownership is now split into a Themion-local editor and composer pattern inspired by `codex-rs`: `crates/themion-cli/src/textarea.rs` owns the local UTF-8 text buffer, wrap-aware height and cursor calculations, and render-facing state via `TextArea` plus `TextAreaState`, while `crates/themion-cli/src/chat_composer.rs` owns higher-level input policy such as paste-burst handling, non-ASCII-sensitive input routing, history draft restore, and submit-versus-newline decisions. `App` in `crates/themion-cli/src/tui.rs` delegates input editing to that composer instead of owning a third-party textarea directly.
 
+TUI keyboard exit behavior now keeps `/exit` and `/quit` as explicit single-step slash-command exits, preserves `Esc` as the in-progress turn interrupt key, and requires two `Ctrl+C` presses within 3 seconds to exit from the keyboard path. After the first `Ctrl+C`, the TUI emits a lightweight local notice telling the user to press `Ctrl+C` again within the timeout window.
+
 In `crates/themion-cli/src/tui.rs`, the app creates a central `AppEvent` channel and then spawns a few long-lived background tasks around one main UI loop.
 
 The main UI loop now works as a request-driven redraw loop:
