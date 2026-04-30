@@ -22,8 +22,13 @@ Instructions for coding agents working in this repository.
   - project docs and behavior notes; consult relevant docs before changing documented flows
   - PRDs live in `docs/prd/`; when creating or updating a PRD, follow `docs/prd/PRD_AUTHORING_GUIDE.md`
 - `scripts/`
-  - repository maintenance helpers
+  - repository maintenance helpers only
+  - keep durable/real repo helpers here; do not leave one-off research utilities here
   - use `scripts/bump_version.py <semver>` to update crate package versions consistently
+- `experiments/`
+  - scratch analysis, temporary measurement code, and PRD-specific research artifacts
+  - prefer `experiments/prdNNN/` for work tied to one PRD or investigation
+  - move one-off scripts and exploratory code here instead of leaving them under crate `examples/` or `scripts/`
 - crate-local tests and inline module tests
   - prefer keeping tests close to the code they cover unless the crate already uses a different pattern
 
@@ -76,6 +81,7 @@ When adding code:
 
 - Prefer focused edits to existing files.
 - Create new modules only when they meaningfully isolate behavior.
+- Put temporary experiments, token-analysis helpers, replay probes, and other exploratory utilities under `experiments/` rather than shipping them as crate examples or permanent maintenance scripts unless the user asks for that promotion.
 - Do not rewrite large files unnecessarily.
 - Do not touch generated/build output such as `target/`.
 - Do not edit lockfiles unless a dependency change is required.
