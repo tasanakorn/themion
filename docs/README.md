@@ -82,4 +82,4 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-068 | [Keep the TUI Chat Composer Usable When Input Exceeds the Visible Height](prd/prd-068-keep-the-tui-chat-composer-usable-when-input-exceeds-the-visible-height.md) | Implemented | v0.44.0 | `themion-cli`, docs |
 | PRD-069 | [Add a `/context` Command for Prompt-Budget Breakdown and History-Replay Visibility](prd/prd-069-context-command-prompt-budget-breakdown.md) | Implemented | v0.45.0 | `themion-core`, `themion-cli`, docs |
 | PRD-070 | [Improve `/context` and Prompt-Budget Estimation with `tiktoken-rs`](prd/prd-070-improve-context-token-estimation-with-tiktoken-rs.md) | Implemented | v0.46.0 | `themion-core`, `themion-cli`, docs |
-| PRD-071 | [Reduce Tool-Schema Verbosity to Lower Static Prompt Overhead](prd/prd-071-reduce-tool-schema-verbosity-to-lower-static-prompt-overhead.md) | Partially implemented | v0.46.1 | `themion-core`, docs |
+| PRD-071 | [Reduce Tool-Schema Verbosity to Lower Static Prompt Overhead](prd/prd-071-reduce-tool-schema-verbosity-to-lower-static-prompt-overhead.md) | Implemented | v0.46.1 | `themion-core`, docs |

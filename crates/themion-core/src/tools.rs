@@ -604,7 +604,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "workflow_get_state",
-                "description": "Return the current workflow, phase, status, phase result, and allowed transitions.",
+                "description": "Get workflow state and allowed transitions.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -616,12 +616,12 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "workflow_set_active",
-                "description": "Activate a built-in workflow and reset to its start phase.",
+                "description": "Activate a workflow and reset to its start phase.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "workflow": { "type": "string", "description": "Built-in workflow name." },
-                        "reason": { "type": "string", "description": "Reason for switching workflows." }
+                        "workflow": { "type": "string", "description": "Workflow name." },
+                        "reason": { "type": "string", "description": "Reason." }
                     },
                     "required": ["workflow"]
                 }
@@ -635,8 +635,8 @@ pub fn tool_definitions() -> Value {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "phase": { "type": "string", "description": "Next workflow phase." },
-                        "reason": { "type": "string", "description": "Reason for changing phase." }
+                        "phase": { "type": "string", "description": "Next phase." },
+                        "reason": { "type": "string", "description": "Reason." }
                     },
                     "required": ["phase"]
                 }
@@ -651,7 +651,7 @@ pub fn tool_definitions() -> Value {
                     "type": "object",
                     "properties": {
                         "result": { "type": "string", "enum": ["passed", "failed", "user_feedback_required"] },
-                        "reason": { "type": "string", "description": "Reason for this phase result." }
+                        "reason": { "type": "string", "description": "Reason." }
                     },
                     "required": ["result"]
                 }
@@ -661,14 +661,14 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "board_create_note",
-                "description": "Create a durable board note for a target instance and agent. Use SELF for the current local instance or agent.",
+                "description": "Create a durable board note. Use SELF for the current local instance or agent.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "to_instance": { "type": "string", "description": "Target instance id or SELF." },
                         "to_agent_id": { "type": "string", "description": "Target agent id or SELF." },
                         "body": { "type": "string" },
-                        "note_kind": { "type": "string", "enum": ["work_request", "done_mention"], "description": "Note kind. Default: work_request." },
+                        "note_kind": { "type": "string", "enum": ["work_request", "done_mention"], "description": "Kind. Default: work_request." },
                         "origin_note_id": { "type": "string", "description": "Original note id for done mentions." },
                         "from_instance": { "type": "string" },
                         "from_agent_id": { "type": "string" },
@@ -684,7 +684,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "board_list_notes",
-                "description": "List durable board notes, optionally filtered by target or column.",
+                "description": "List board notes, optionally filtered by target or column.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -700,7 +700,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "board_read_note",
-                "description": "Read one board note by note_id.",
+                "description": "Read a board note by note_id.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -714,7 +714,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "board_move_note",
-                "description": "Move a board note between todo, in_progress, blocked, and done.",
+                "description": "Move a board note between columns.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -729,7 +729,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "board_update_note_result",
-                "description": "Set or update result text on a board note.",
+                "description": "Set a board note result.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -744,7 +744,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "workflow_complete",
-                "description": "Mark the current workflow as passed/completed or failed. Completed requires current phase_result=passed.",
+                "description": "Complete or fail the current workflow. Success requires phase_result=passed.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -788,7 +788,7 @@ fn stylos_tool_definitions() -> Vec<Value> {
             },
             "required":[]
         })),
-        stylos_tool("stylos_query_agents_git", "Query agents attached to git repositories, optionally filtered by normalized remote <host>/<owner>/<repo>. If the forge or host is ambiguous, ask for clarification instead of guessing.", json!({
+        stylos_tool("stylos_query_agents_git", "Query agents by git repo. Prefer normalized remote <host>/<owner>/<repo>; ask if ambiguous.", json!({
             "type":"object","properties":{
                 "remote":{"type":"string","description":"Optional git selector. Prefer normalized <host>/<owner>/<repo>."},
                 "exclude_self":{"type":"boolean","description":"Exclude the current instance from discovery results. Default: true."}
@@ -798,7 +798,7 @@ fn stylos_tool_definitions() -> Vec<Value> {
         stylos_tool("stylos_query_status", "Query one instance for current process and agent status.", json!({
             "type":"object","properties":{"instance":{"type":"string"},"agent_id":{"type":"string"},"role":{"type":"string"}},"required":["instance"]
         })),
-        stylos_tool("stylos_request_talk", "Send a user-style message to one target instance. Sender identity is resolved automatically; to_agent_id is optional and defaults to main.", json!({
+        stylos_tool("stylos_request_talk", "Send a user-style message to one instance. Sender identity is automatic; to_agent_id defaults to main.", json!({
             "type":"object","properties":{
                 "instance":{"type":"string","description":"Target instance in <hostname>:<pid> form."},
                 "to_agent_id":{"type":"string","description":"Target agent id. Default: main."},

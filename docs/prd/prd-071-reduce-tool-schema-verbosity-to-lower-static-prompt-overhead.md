@@ -1,6 +1,6 @@
 # PRD-071: Reduce Tool-Schema Verbosity to Lower Static Prompt Overhead
 
-- **Status:** Partially implemented
+- **Status:** Implemented
 - **Version:** v0.46.1
 - **Scope:** `themion-core`, docs
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
@@ -8,7 +8,7 @@
 
 ## Implementation status
 
-Landed in `v0.46.1` as an initial schema-trimming slice. The shipped behavior shortens several high-cost filesystem, shell, and Project Memory tool descriptions, reducing static tool-definition overhead without changing tool names or tool availability. Further trimming for board/workflow and Stylos-heavy descriptions remains open within this PRD.
+Landed in `v0.46.1` as schema-trimming work across filesystem, shell, Project Memory, board/workflow, and Stylos tool descriptions. The shipped behavior reduces static tool-definition overhead without changing tool names or tool availability. Build validation is complete; `/context` reduction verification remains the product check for follow-up measurement on a live session.
 
 ## Summary
 
@@ -259,7 +259,7 @@ This is a prompt-schema optimization and documentation change only.
 - [x] audit tool-definition text for the highest-cost verbose descriptions
 - [x] shorten repetitive boilerplate across filesystem and shell tools
 - [x] shorten high-cost memory tool descriptions and parameter notes
-- [ ] shorten board/workflow tool description text while preserving semantics
-- [ ] trim feature-gated Stylos tool descriptions where needed
+- [x] shorten board/workflow tool description text while preserving semantics
+- [x] trim feature-gated Stylos tool descriptions where needed
 - [ ] verify `/context` shows a meaningfully lower `tool definitions` token total
 - [x] update relevant docs and the PRD index
