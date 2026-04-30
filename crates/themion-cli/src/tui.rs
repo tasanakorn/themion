@@ -91,6 +91,7 @@ enum ReviewMode {
 const TOOL_DETAIL_MAX_CHARS: usize = 60;
 const TOOL_DETAIL_CENTER_TRIM_MARKER: &str = "󱑼";
 const CTRL_C_EXIT_CONFIRM_WINDOW: Duration = Duration::from_secs(3);
+const CONTEXT_HISTORY_TURN_DISPLAY_MAX_AGE: usize = 10;
 
 fn center_trim(s: &str, max: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
@@ -159,6 +160,12 @@ fn format_context_report(report: &PromptContextReport) -> Vec<String> {
         "turns: total={} replayed={} reduced={} omitted={}",
         report.total_turns, report.replayed_turns, report.reduced_turns, report.omitted_turns
     ));
+    if report.cap_omitted_turns > 0 {
+        out.push(format!(
+            "history replay cap: omitted {} turn(s) older than T-7",
+            report.cap_omitted_turns
+        ));
+    }
     if report.t0_exceeds_spike_budget {
         out.push("history mode: T0 alone exceeds spike budget; prior turns not replayed".to_string());
     } else if report.t0_exceeds_normal_budget {
@@ -202,7 +209,15 @@ fn format_context_report(report: &PromptContextReport) -> Vec<String> {
     }
     if !report.history_turns.is_empty() {
         out.push("history turns:".to_string());
-        for turn in &report.history_turns {
+        for turn in report.history_turns.iter().filter(|turn| {
+            if turn.turn_label == "T0" {
+                return true;
+            }
+            turn.turn_label
+                .strip_prefix("T-")
+                .and_then(|s| s.parse::<usize>().ok())
+                .is_some_and(|age| age <= CONTEXT_HISTORY_TURN_DISPLAY_MAX_AGE)
+        }) {
             if turn.omitted {
                 out.push(format!(
                     "  {}: omitted{}",

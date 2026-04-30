@@ -75,6 +75,7 @@ pub struct PromptContextReport {
     pub total_turns: usize,
     pub replayed_turns: usize,
     pub omitted_turns: usize,
+    pub cap_omitted_turns: usize,
     pub reduced_turns: usize,
     pub total_chars: usize,
     pub total_tokens_estimate: usize,

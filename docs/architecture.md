@@ -255,7 +255,7 @@ Each call to `run_loop(user_input)`:
 
 ## Context Windowing
 
-Prompt replay is now budget-aware rather than purely fixed by `Agent.window_turns`. The current PRD-067 implementation still keeps `window_turns` as a compatibility field, but replay in `themion-core` now preserves the active turn first, downgrades `T-1` through `T-5` into pure-message form when `T0` alone exceeds the normal 170K target, and omits older turns once replay would exceed the 250K ceiling. Durable history remains stored in SQLite even when replay is reduced. On each LLM round:
+Prompt replay is now budget-aware rather than purely fixed by `Agent.window_turns`. The current implementation still keeps `window_turns` as a compatibility field, but replay in `themion-core` now preserves the active turn first, never replays turns older than `T-7`, downgrades `T-1` through `T-5` into pure-message form when `T0` alone exceeds the normal 170K target, and omits older allowed turns once replay within that `T-7` band would exceed the 250K ceiling. Durable history remains stored in SQLite even when replay is reduced. On each LLM round:
 
 ```text
 [system_prompt]
@@ -271,7 +271,7 @@ The recall hint is a synthetic `role="system"` message that reminds the model th
 
 The full `messages` Vec is never trimmed — the in-memory copy is always complete. Windowing only affects what is sent over the wire.
 
-Themion now also exposes a user-facing `/context` command in the TUI for inspecting this prompt-visible view. The actual prompt-analysis logic stays in `themion-core`, alongside the live prompt assembly path, and the TUI only handles slash-command intake plus human-readable rendering of the returned report. `/context` now uses the same tokenizer-backed estimate path that prompt-budget replay uses when the active model resolves through `tiktoken-rs`, falls back through a short explicit trusted mapping when needed, and otherwise degrades to the rough fallback estimator. The command reports the same prompt layer ordering, estimate mode, tokenizer path when available, and history replay decision that the next model round would use, including which turns are replayed in full form, which are reduced to pure-message replay, and where omission begins.
+Themion now also exposes a user-facing `/context` command in the TUI for inspecting this prompt-visible view. The actual prompt-analysis logic stays in `themion-core`, alongside the live prompt assembly path, and the TUI only handles slash-command intake plus human-readable rendering of the returned report. `/context` now uses the same tokenizer-backed estimate path that prompt-budget replay uses when the active model resolves through `tiktoken-rs`, falls back through a short explicit trusted mapping when needed, and otherwise degrades to the rough fallback estimator. The command reports the same prompt layer ordering, estimate mode, tokenizer path when available, and history replay decision that the next model round would use, including which turns are replayed in full form, which are reduced to pure-message replay, and where omission begins. For readability, the visible `history turns:` listing is capped at `T0` through `T-10` even when older omitted turns exist in the underlying structured analysis.
 
 ## Streaming
 

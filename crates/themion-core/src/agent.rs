@@ -284,6 +284,8 @@ impl TurnCancellation {
     }
 }
 
+const MAX_HISTORY_REPLAY_AGE: usize = 7;
+
 const MEMORY_KB_GUIDANCE: &str = "Project Memory guidance: memory_* tools are for intentional durable Project Memory knowledge that should outlive the current session, not routine transcript logging or disposable task tracking. Project Memory stores durable knowledge for the current project by default. Use project_dir=\"[GLOBAL]\" only for Global Knowledge: reusable cross-project facts, preferences, conventions, provider/tool behavior, or troubleshooting patterns. Global Knowledge is an explicitly selected context inside Project Memory, not a separate system. When unsure, keep knowledge project-local and promote later only when cross-project usefulness is clear. Prefer knowledge-base shaped entries: concepts, components, files, tasks, decisions, facts, observations, troubleshooting records, and typed links between them. Use node_type values such as concept, component, file, task, decision, fact, observation, troubleshooting, or person. Use node_type=memory only for genuinely narrative long-term capture when a more specific knowledge-base type is not yet known. Add hashtags for retrieval, and link related nodes when the relationship is useful. Keep ordinary conversation history in session history and coordination work in board notes rather than duplicating it into Project Memory.";
 
 const TOOL_START_BOARD_NOTE_DISPLAY_TOOLS: &[&str] = &[
@@ -716,6 +718,7 @@ impl Agent {
         let mut included_history = Vec::new();
         let mut history_turns = Vec::new();
         let mut omitted_turns = 0usize;
+        let mut cap_omitted_turns = 0usize;
         let mut t0_exceeds_normal_budget = false;
         let mut t0_exceeds_spike_budget = false;
 
@@ -742,8 +745,23 @@ impl Agent {
             });
             let mut used_tokens = prompt_overhead_tokens + t0_tokens;
 
+            for age_from_t0 in (MAX_HISTORY_REPLAY_AGE + 1)..=t0_index {
+                history_turns.push(HistoryTurnReport {
+                    turn_label: format!("T-{}", age_from_t0),
+                    replay_form: ReplayForm::Full,
+                    omitted: true,
+                    chars: 0,
+                    tokens_estimate: 0,
+                    messages: Vec::new(),
+                    note: Some("omitted by T-7 replay cap".to_string()),
+                });
+                omitted_turns += 1;
+                cap_omitted_turns += 1;
+            }
+
             if !t0_exceeds_spike_budget {
-                for older_idx in (0..t0_index).rev() {
+                let oldest_allowed_idx = t0_index.saturating_sub(MAX_HISTORY_REPLAY_AGE);
+                for older_idx in (oldest_allowed_idx..t0_index).rev() {
                     let start = self.turn_boundaries[older_idx];
                     let end = self
                         .turn_boundaries
@@ -764,7 +782,6 @@ impl Agent {
                     let candidate_chars = estimate_messages_chars(&candidate);
                     let turn_label = format!("T-{}", age_from_t0);
                     if used_tokens + candidate_tokens > EFFECTIVE_PROMPT_SPIKE_TOKENS {
-                        omitted_turns = older_idx + 1;
                         history_turns.push(HistoryTurnReport {
                             turn_label,
                             replay_form,
@@ -774,6 +791,19 @@ impl Agent {
                             messages: Vec::new(),
                             note: Some("omitted to stay within spike budget".to_string()),
                         });
+                        omitted_turns += 1;
+                        for skipped_idx in (oldest_allowed_idx..older_idx).rev() {
+                            history_turns.push(HistoryTurnReport {
+                                turn_label: format!("T-{}", t0_index - skipped_idx),
+                                replay_form: ReplayForm::Full,
+                                omitted: true,
+                                chars: 0,
+                                tokens_estimate: 0,
+                                messages: Vec::new(),
+                                note: Some("omitted because a newer allowed turn already hit the spike budget".to_string()),
+                            });
+                            omitted_turns += 1;
+                        }
                         break;
                     }
                     used_tokens += candidate_tokens;
@@ -793,7 +823,19 @@ impl Agent {
                     });
                 }
             } else {
-                omitted_turns = t0_index;
+                omitted_turns += t0_index.min(MAX_HISTORY_REPLAY_AGE);
+                let highest_age_in_band = t0_index.min(MAX_HISTORY_REPLAY_AGE);
+                for age_from_t0 in 1..=highest_age_in_band {
+                    history_turns.push(HistoryTurnReport {
+                        turn_label: format!("T-{}", age_from_t0),
+                        replay_form: ReplayForm::Full,
+                        omitted: true,
+                        chars: 0,
+                        tokens_estimate: 0,
+                        messages: Vec::new(),
+                        note: Some("omitted because T0 alone exceeds spike budget".to_string()),
+                    });
+                }
             }
         }
 
@@ -853,6 +895,7 @@ impl Agent {
             total_turns: recent_turn_count,
             replayed_turns,
             omitted_turns,
+            cap_omitted_turns,
             reduced_turns,
             total_chars,
             total_tokens_estimate,
