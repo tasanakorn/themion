@@ -26,6 +26,7 @@ A single user turn follows this shape:
 1. The CLI starts or resumes a harness session.
 2. The user submits input.
 3. The harness records a new turn and persists the user message. New `agent_turns` rows also capture optional turn-level runtime attribution in `agent_turns.meta` as compact JSON, currently including `app_version`, `profile`, `provider`, and `model` when available.
+Because current-session runtime state can now change through explicit session-only overrides as well as persistent config changes, those turn-level `profile`/`provider`/`model` values continue to reflect the effective runtime state active when each turn began rather than only the persisted config defaults.
 4. The harness builds the model input from:
    - the base system prompt
    - predefined built-in coding guardrails, including guidance to prefer the smallest clear answer shape, prefer plain direct prose for simple answers, answer in 1–2 sentences when that is enough, add bullets/headings/tables only when that extra structure materially helps scanning or comparison, otherwise organize replies into about 4±1 meaningful chunks by default, allow expansion toward about 7±2 chunks only for user-requested fuller explanation, and preserve important tool-learned findings in ordinary assistant chat text with concise 1–2 sentence summaries by default when that information matters

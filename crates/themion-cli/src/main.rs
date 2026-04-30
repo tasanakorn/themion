@@ -57,6 +57,7 @@ pub fn format_stats(s: &TurnStats) -> String {
 #[derive(Clone)]
 pub struct Session {
     pub id: uuid::Uuid,
+    pub configured_profile: String,
     pub active_profile: String,
     pub profiles: HashMap<String, ProfileConfig>,
     pub provider: String,
@@ -65,12 +66,15 @@ pub struct Session {
     pub model: String,
     pub system_prompt: String,
     pub model_info: Option<ModelInfo>,
+    pub temporary_profile_override: Option<String>,
+    pub temporary_model_override: Option<String>,
 }
 
 impl Session {
     pub fn from_config(cfg: Config) -> Self {
         Self {
             id: uuid::Uuid::new_v4(),
+            configured_profile: cfg.active_profile.clone(),
             active_profile: cfg.active_profile,
             profiles: cfg.profiles,
             provider: cfg.provider,
@@ -79,6 +83,8 @@ impl Session {
             model: cfg.model,
             system_prompt: cfg.system_prompt,
             model_info: None,
+            temporary_profile_override: None,
+            temporary_model_override: None,
         }
     }
 
@@ -88,7 +94,10 @@ impl Session {
             Some(p) => p.clone(),
             None => return false,
         };
-        let (provider, base_url, api_key, model) = resolve_profile(&profile);
+        let (provider, base_url, api_key, mut model) = resolve_profile(&profile);
+        if let Some(temporary_model_override) = &self.temporary_model_override {
+            model = temporary_model_override.clone();
+        }
         self.provider = provider;
         self.base_url = base_url;
         self.api_key = api_key;
@@ -96,6 +105,27 @@ impl Session {
         self.active_profile = name.to_string();
         self.model_info = None;
         true
+    }
+
+    pub fn switch_profile_temporarily(&mut self, name: &str) -> bool {
+        self.temporary_profile_override = Some(name.to_string());
+        self.switch_profile(name)
+    }
+
+    pub fn set_temporary_model_override(&mut self, model: &str) {
+        self.temporary_model_override = Some(model.to_string());
+        self.model = model.to_string();
+        self.model_info = None;
+    }
+
+    pub fn clear_temporary_overrides(&mut self) -> bool {
+        let had_overrides =
+            self.temporary_profile_override.is_some() || self.temporary_model_override.is_some();
+        self.temporary_profile_override = None;
+        self.temporary_model_override = None;
+        let configured_profile = self.configured_profile.clone();
+        let switched = self.switch_profile(&configured_profile);
+        had_overrides && switched
     }
 }
 

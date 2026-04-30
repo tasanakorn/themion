@@ -87,3 +87,4 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-073 | [Make Statusline `ctx` Show the Last API Call Context Value](prd/prd-073-make-statusline-ctx-show-last-api-call-context-value.md) | Implemented | v0.47.1 | `themion-core`, `themion-cli`, docs |
 | PRD-074 | [Require Double `Ctrl+C` to Exit the TUI](prd/prd-074-require-double-ctrl-c-to-exit-the-tui.md) | Implemented | v0.48.0 | `themion-cli`, docs |
 | PRD-075 | [Cap Prompt History Replay at `T-7`](prd/prd-075-cap-prompt-history-replay-at-t-7.md) | Implemented | v0.48.2 | `themion-core`, `themion-cli`, docs |
+| PRD-076 | [Temporary Session-Only Profile and Model Switching](prd/prd-076-temporary-session-profile-or-model-switch.md) | Implemented | v0.49.0 | `themion-cli`, `themion-core`, docs |

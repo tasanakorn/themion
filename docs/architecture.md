@@ -184,6 +184,8 @@ Within that TUI layer, input ownership is now split into a Themion-local editor 
 
 TUI keyboard exit behavior now keeps `/exit` and `/quit` as explicit single-step slash-command exits, preserves `Esc` as the in-progress turn interrupt key, and requires two `Ctrl+C` presses within 3 seconds to exit from the keyboard path. After the first `Ctrl+C`, the TUI emits a lightweight local notice telling the user to press `Ctrl+C` again within the timeout window.
 
+The TUI now also distinguishes persistent config changes from session-only runtime overrides. `/config profile use <name>` still switches profile and saves that choice to config, while `/session profile use <name>` and `/session model use <model>` rebuild the live interactive agent for the current session only without rewriting config on disk. `/session show` reports configured versus effective runtime state, and `/session reset` clears temporary session-only overrides.
+
 In `crates/themion-cli/src/tui.rs`, the app creates a central `AppEvent` channel and then spawns a few long-lived background tasks around one main UI loop.
 
 The main UI loop now works as a request-driven redraw loop:

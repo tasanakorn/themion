@@ -1873,6 +1873,151 @@ impl App {
             out.push(format!("model    : {}", self.session.model));
             out.push(format!("endpoint : {}", self.session.base_url));
             out.push(format!("api_key  : {}", key_display));
+            if self.session.temporary_profile_override.is_some()
+                || self.session.temporary_model_override.is_some()
+            {
+                out.push("note     : temporary session-only override active; config on disk unchanged".to_string());
+            }
+            return out;
+        }
+
+        if input == "/session show" {
+            out.push(format!("configured profile : {}", self.session.configured_profile));
+            out.push(format!("effective profile   : {}", self.session.active_profile));
+            out.push(format!("effective provider  : {}", self.session.provider));
+            out.push(format!("effective model     : {}", self.session.model));
+            out.push(format!(
+                "temporary profile override : {}",
+                self.session
+                    .temporary_profile_override
+                    .as_deref()
+                    .unwrap_or("(none)")
+            ));
+            out.push(format!(
+                "temporary model override   : {}",
+                self.session
+                    .temporary_model_override
+                    .as_deref()
+                    .unwrap_or("(none)")
+            ));
+            return out;
+        }
+
+        if let Some(rest) = input.strip_prefix("/session ") {
+            let parts: Vec<&str> = rest.splitn(3, ' ').collect();
+            match parts.as_slice() {
+                ["profile", "use", name] => {
+                    if self.session.switch_profile_temporarily(name) {
+                        match build_replacement_main_agent(AgentReplacementParams {
+                            session: &self.session,
+                            project_dir: &self.project_dir,
+                            db: &self.db,
+                            #[cfg(feature = "stylos")]
+                            stylos_tool_bridge: self.stylos_tool_bridge.clone(),
+                            #[cfg(feature = "stylos")]
+                            local_stylos_instance: self.local_stylos_instance.as_deref(),
+                            api_log_enabled: self.api_log_enabled,
+                            insert_session: true,
+                        }) {
+                            Ok((new_agent, new_session_id)) => {
+                                self.status_model_info = new_agent.model_info().cloned();
+                                self.agents = vec![AgentHandle {
+                                    agent: Some(new_agent),
+                                    session_id: new_session_id,
+                                    agent_id: "main".to_string(),
+                                    label: "main".to_string(),
+                                    roles: vec!["main".to_string(), "interactive".to_string()],
+                                }];
+                                out.push(format!(
+                                    "temporarily switched to profile '{}' for this session only  provider={}  model={}",
+                                    name, self.session.provider, self.session.model
+                                ));
+                            }
+                            Err(e) => out.push(format!("error building agent: {}", e)),
+                        }
+                    } else {
+                        let mut names: Vec<String> = self.session.profiles.keys().cloned().collect();
+                        names.sort();
+                        out.push(format!(
+                            "unknown profile '{}'.  available: {}",
+                            name,
+                            names.join(", ")
+                        ));
+                    }
+                }
+                ["model", "use", model] => {
+                    self.session.set_temporary_model_override(model);
+                    match build_replacement_main_agent(AgentReplacementParams {
+                        session: &self.session,
+                        project_dir: &self.project_dir,
+                        db: &self.db,
+                        #[cfg(feature = "stylos")]
+                        stylos_tool_bridge: self.stylos_tool_bridge.clone(),
+                        #[cfg(feature = "stylos")]
+                        local_stylos_instance: self.local_stylos_instance.as_deref(),
+                        api_log_enabled: self.api_log_enabled,
+                        insert_session: true,
+                    }) {
+                        Ok((new_agent, new_session_id)) => {
+                            self.status_model_info = new_agent.model_info().cloned();
+                            self.agents = vec![AgentHandle {
+                                agent: Some(new_agent),
+                                session_id: new_session_id,
+                                agent_id: "main".to_string(),
+                                label: "main".to_string(),
+                                roles: vec!["main".to_string(), "interactive".to_string()],
+                            }];
+                            out.push(format!(
+                                "temporarily using model '{}' for this session only",
+                                self.session.model
+                            ));
+                        }
+                        Err(e) => out.push(format!("error building agent: {}", e)),
+                    }
+                }
+                ["reset"] => {
+                    if self.session.clear_temporary_overrides() {
+                        match build_replacement_main_agent(AgentReplacementParams {
+                            session: &self.session,
+                            project_dir: &self.project_dir,
+                            db: &self.db,
+                            #[cfg(feature = "stylos")]
+                            stylos_tool_bridge: self.stylos_tool_bridge.clone(),
+                            #[cfg(feature = "stylos")]
+                            local_stylos_instance: self.local_stylos_instance.as_deref(),
+                            api_log_enabled: self.api_log_enabled,
+                            insert_session: true,
+                        }) {
+                            Ok((new_agent, new_session_id)) => {
+                                self.status_model_info = new_agent.model_info().cloned();
+                                self.agents = vec![AgentHandle {
+                                    agent: Some(new_agent),
+                                    session_id: new_session_id,
+                                    agent_id: "main".to_string(),
+                                    label: "main".to_string(),
+                                    roles: vec!["main".to_string(), "interactive".to_string()],
+                                }];
+                                out.push(format!(
+                                    "cleared temporary session overrides; back to configured profile '{}'  provider={}  model={}",
+                                    self.session.active_profile,
+                                    self.session.provider,
+                                    self.session.model
+                                ));
+                            }
+                            Err(e) => out.push(format!("error building agent: {}", e)),
+                        }
+                    } else {
+                        out.push("no temporary session override is active".to_string());
+                    }
+                }
+                _ => {
+                    out.push("commands:".to_string());
+                    out.push("  /session show                 show configured vs effective session runtime state".to_string());
+                    out.push("  /session profile use <name>   temporarily switch profile for this session only".to_string());
+                    out.push("  /session model use <model>    temporarily override model for this session only".to_string());
+                    out.push("  /session reset                clear temporary session-only overrides".to_string());
+                }
+            }
             return out;
         }
 
@@ -2021,7 +2166,7 @@ impl App {
                         "  /config profile create <name>    create from current settings"
                             .to_string(),
                     );
-                    out.push("  /config profile use <name>       switch profile".to_string());
+                    out.push("  /config profile use <name>       switch profile and save to config".to_string());
                     out.push(
                         "  /config profile set key=value    set provider/model/endpoint/api_key"
                             .to_string(),
@@ -2032,7 +2177,7 @@ impl App {
         }
 
         out.push(format!(
-            "unknown command '{}'.  try /context, /config, /debug runtime, /debug api-log enable, or /semantic-memory index",
+            "unknown command '{}'.  try /context, /config, /session show, /debug runtime, /debug api-log enable, or /semantic-memory index",
             input
         ));
         out
