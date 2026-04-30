@@ -3,10 +3,10 @@ use crate::config::{save_profiles, ProfileConfig};
 use crate::runtime_domains::DomainHandle;
 use crate::app_runtime::{build_replacement_main_agent, build_system_inspection_snapshot, AgentReplacementParams};
 #[cfg(feature = "stylos")]
-use crate::board_runtime::{BoardTurnFollowUp, resolve_completed_note_follow_up, resolve_pending_board_note_injection};
+use crate::board_runtime::{BoardTurnFollowUp, WATCHDOG_IDLE_DELAY_MS_DEFAULT, resolve_completed_note_follow_up, resolve_pending_board_note_injection};
 #[cfg(feature = "stylos")]
 use crate::stylos::{
-    tool_bridge, IncomingPromptRequest, StylosHandle, StylosRuntimeState, StylosToolBridge,
+    tool_bridge, IncomingPromptRequest, IncomingPromptSource, StylosHandle, StylosRuntimeState, StylosToolBridge,
 };
 use crate::{format_stats, Session};
 use crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
@@ -22,6 +22,8 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(feature = "stylos")]
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use themion_core::agent::{Agent, AgentEvent, TurnCancellation, TurnStats};
 use themion_core::client_codex::ApiCallRateLimitReport;
 use themion_core::db::DbHandle;
@@ -31,6 +33,79 @@ use themion_core::ModelInfo;
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
+
+
+#[cfg(feature = "stylos")]
+#[derive(Default)]
+struct WatchdogRuntimeState {
+    busy: AtomicBool,
+    idle_started_at_ms: AtomicU64,
+    active_incoming_prompt: AtomicBool,
+    pending_watchdog_note: AtomicBool,
+}
+
+#[cfg(feature = "stylos")]
+impl WatchdogRuntimeState {
+    fn set_busy(&self, busy: bool) {
+        self.busy.store(busy, Ordering::Relaxed);
+    }
+
+    fn set_idle_started_now(&self) {
+        self.idle_started_at_ms.store(unix_epoch_now_ms(), Ordering::Relaxed);
+    }
+
+    fn clear_idle_started(&self) {
+        self.idle_started_at_ms.store(0, Ordering::Relaxed);
+    }
+
+    fn idle_started_at_ms(&self) -> Option<u64> {
+        let value = self.idle_started_at_ms.load(Ordering::Relaxed);
+        (value != 0).then_some(value)
+    }
+
+    fn set_active_incoming_prompt(&self, active: bool) {
+        self.active_incoming_prompt.store(active, Ordering::Relaxed);
+    }
+
+    fn set_pending_watchdog_note(&self, pending: bool) {
+        self.pending_watchdog_note.store(pending, Ordering::Relaxed);
+    }
+
+    fn pending_watchdog_note(&self) -> bool {
+        self.pending_watchdog_note.load(Ordering::Relaxed)
+    }
+
+    fn should_trigger_watchdog_note(&self, now_ms: u64, idle_delay_ms: u64) -> bool {
+        if self.busy.load(Ordering::Relaxed) || self.active_incoming_prompt.load(Ordering::Relaxed) {
+            return false;
+        }
+        let Some(idle_started_at_ms) = self.idle_started_at_ms() else {
+            return false;
+        };
+        now_ms.saturating_sub(idle_started_at_ms) >= idle_delay_ms
+    }
+}
+
+#[cfg(feature = "stylos")]
+fn start_watchdog_task(
+    background_domain: &DomainHandle,
+    app_tx: mpsc::UnboundedSender<AppEvent>,
+    runtime_state: Arc<WatchdogRuntimeState>,
+) {
+    background_domain.spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(250));
+        loop {
+            interval.tick().await;
+            let now_ms = unix_epoch_now_ms();
+            if !runtime_state.should_trigger_watchdog_note(now_ms, WATCHDOG_IDLE_DELAY_MS_DEFAULT) {
+                continue;
+            }
+            if app_tx.send(AppEvent::WatchdogPoll).is_err() {
+                break;
+            }
+        }
+    });
+}
 
 pub(crate) enum AppEvent {
     Key(event::KeyEvent),
@@ -43,6 +118,8 @@ pub(crate) enum AppEvent {
     StylosCmd(crate::stylos::StylosCmdRequest),
     #[cfg(feature = "stylos")]
     IncomingPrompt(IncomingPromptRequest),
+    #[cfg(feature = "stylos")]
+    WatchdogPoll,
     #[cfg(feature = "stylos")]
     StylosEvent(String),
     LoginPrompt {
@@ -820,6 +897,8 @@ pub struct App {
     #[cfg(feature = "stylos")]
     active_incoming_prompt: Option<IncomingPromptRequest>,
     #[cfg(feature = "stylos")]
+    watchdog_state: Arc<WatchdogRuntimeState>,
+    #[cfg(feature = "stylos")]
     last_assistant_text: Option<String>,
     #[cfg(feature = "stylos")]
     stylos_tool_bridge: Option<StylosToolBridge>,
@@ -833,6 +912,7 @@ impl App {
         project_dir: PathBuf,
         background_domain: DomainHandle,
         core_domain: DomainHandle,
+        #[cfg(feature = "stylos")] app_tx: mpsc::UnboundedSender<AppEvent>,
         #[cfg(feature = "stylos")] stylos: Option<StylosHandle>,
     ) -> Self {
         #[cfg(feature = "stylos")]
@@ -842,6 +922,8 @@ impl App {
             StylosRuntimeState::Active { instance, .. } => Some(instance.clone()),
             _ => Some(crate::stylos::derive_local_instance_id()),
         });
+        #[cfg(feature = "stylos")]
+        let watchdog_state = Arc::new(WatchdogRuntimeState::default());
         let agent = crate::app_state::build_agent(
             &session,
             session_id,
@@ -972,10 +1054,18 @@ impl App {
             #[cfg(feature = "stylos")]
             active_incoming_prompt: None,
             #[cfg(feature = "stylos")]
+            watchdog_state,
+            #[cfg(feature = "stylos")]
             last_assistant_text: None,
             #[cfg(feature = "stylos")]
             stylos_tool_bridge,
         };
+        #[cfg(feature = "stylos")]
+        start_watchdog_task(&app.background_domain, app_tx, app.watchdog_state.clone());
+        #[cfg(feature = "stylos")]
+        app.watchdog_state.set_busy(false);
+        #[cfg(feature = "stylos")]
+        app.watchdog_state.set_idle_started_now();
         app.record_runtime_snapshot();
         app.refresh_main_agent_system_inspection();
         app
@@ -1041,6 +1131,12 @@ impl App {
         }
         self.idle_since = None;
         self.idle_status_changed_at = None;
+        #[cfg(feature = "stylos")]
+        {
+            self.watchdog_state.set_busy(true);
+            self.watchdog_state.clear_idle_started();
+            self.watchdog_state.set_pending_watchdog_note(false);
+        }
         self.pending = Some(self.pending_str());
         self.mark_dirty_status();
         self.refresh_stylos_status();
@@ -1051,6 +1147,12 @@ impl App {
         self.agent_activity_changed_at = None;
         self.idle_since = Some(Instant::now());
         self.idle_status_changed_at = Some(unix_epoch_now_ms());
+        #[cfg(feature = "stylos")]
+        {
+            self.watchdog_state.set_busy(false);
+            self.watchdog_state.set_idle_started_now();
+            self.watchdog_state.set_active_incoming_prompt(self.active_incoming_prompt.is_some());
+        }
         self.pending = None;
         self.mark_dirty_status();
         self.refresh_stylos_status();
@@ -1162,7 +1264,13 @@ impl App {
 
         match self.idle_since {
             Some(idle_since) if idle_since.elapsed() > NAP_AFTER => "nap".to_string(),
-            _ => "idle".to_string(),
+            _ => {
+                #[cfg(feature = "stylos")]
+                if self.watchdog_state.pending_watchdog_note() {
+                    return "idle-watchdog".to_string();
+                }
+                "idle".to_string()
+            }
         }
     }
 
@@ -1421,6 +1529,10 @@ impl App {
                         });
                     }
                 }
+#[cfg(feature = "stylos")]
+                self.watchdog_state.set_active_incoming_prompt(false);
+                #[cfg(feature = "stylos")]
+                self.watchdog_state.set_pending_watchdog_note(false);
                 self.streaming_idx = None;
                 self.set_agent_activity(AgentActivity::Finishing);
                 self.clear_agent_activity();
@@ -2402,11 +2514,13 @@ impl App {
     }
 
     #[cfg(feature = "stylos")]
-    fn maybe_inject_pending_board_note(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) {
+    fn handle_watchdog_poll(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) {
         if self.agent_busy {
+            self.watchdog_state.set_pending_watchdog_note(false);
             return;
         }
         let Some(instance) = self.local_stylos_instance.clone() else {
+            self.watchdog_state.set_pending_watchdog_note(false);
             return;
         };
         let interactive_agent_id = self
@@ -2420,13 +2534,22 @@ impl App {
             .find(|h| h.roles.iter().any(|r| r == "main"))
             .map(|h| h.agent_id.clone());
         let Some(agent_id) = interactive_agent_id.or(main_agent_id) else {
+            self.watchdog_state.set_pending_watchdog_note(false);
             return;
         };
-        let Some(action) = resolve_pending_board_note_injection(&self.db, &instance, &agent_id) else {
+        let Some(action) = resolve_pending_board_note_injection(
+            &self.db,
+            &instance,
+            &agent_id,
+            IncomingPromptSource::WatchdogBoardNote,
+        ) else {
+            self.watchdog_state.set_pending_watchdog_note(false);
             return;
         };
+        self.watchdog_state.set_pending_watchdog_note(true);
         self.push(Entry::RemoteEvent(action.log_line));
         self.active_incoming_prompt = Some(action.request.clone());
+        self.watchdog_state.set_active_incoming_prompt(true);
         self.submit_text(action.request.prompt, app_tx);
     }
 
@@ -2494,15 +2617,12 @@ impl App {
     pub(crate) fn handle_tick_event(
         &mut self,
         frame_requester: &FrameRequester,
-        #[cfg(feature = "stylos")] app_tx: &mpsc::UnboundedSender<AppEvent>,
     ) {
         let was_dirty = self.dirty.any();
         self.on_tick();
         if self.dirty.any() && !was_dirty {
             self.request_draw(frame_requester);
         }
-        #[cfg(feature = "stylos")]
-        self.maybe_inject_pending_board_note(app_tx);
     }
 
     pub(crate) fn handle_agent_ready_event(
@@ -2550,7 +2670,7 @@ impl App {
             AppEvent::Key(key) => self.handle_key_event(key, frame_requester, app_tx, terminal),
             AppEvent::Tick => {
                 #[cfg(feature = "stylos")]
-                self.handle_tick_event(frame_requester, app_tx);
+                self.handle_tick_event(frame_requester);
                 #[cfg(not(feature = "stylos"))]
                 self.handle_tick_event(frame_requester);
             }
@@ -2562,6 +2682,8 @@ impl App {
             AppEvent::IncomingPrompt(request) => self.handle_incoming_prompt_event(request, app_tx),
             #[cfg(feature = "stylos")]
             AppEvent::Agent(ev) => self.handle_agent_event_for_run(ev, frame_requester, app_tx),
+            #[cfg(feature = "stylos")]
+            AppEvent::WatchdogPoll => self.handle_watchdog_poll(app_tx),
             #[cfg(not(feature = "stylos"))]
             AppEvent::Agent(ev) => self.handle_agent_event_for_run(ev, frame_requester),
             AppEvent::AgentReady(agent, sid) => {
@@ -2708,6 +2830,10 @@ impl App {
         frame_requester: &FrameRequester,
     ) {
         self.activity_counters.shell_complete_count += 1;
+#[cfg(feature = "stylos")]
+        self.watchdog_state.set_active_incoming_prompt(false);
+        #[cfg(feature = "stylos")]
+        self.watchdog_state.set_pending_watchdog_note(false);
         self.clear_agent_activity();
         self.push(Entry::Assistant(output));
         if let Some(code) = exit_code {
@@ -2732,6 +2858,10 @@ impl App {
             cmd.prompt.lines().next().unwrap_or("")
         )));
         self.active_incoming_prompt = None;
+#[cfg(feature = "stylos")]
+        self.watchdog_state.set_active_incoming_prompt(false);
+        #[cfg(feature = "stylos")]
+        self.watchdog_state.set_pending_watchdog_note(false);
         self.submit_text(cmd.prompt, app_tx);
     }
 
@@ -2797,6 +2927,8 @@ impl App {
                 )));
             }
             self.active_incoming_prompt = Some(request.clone());
+            self.watchdog_state.set_active_incoming_prompt(true);
+            self.watchdog_state.set_pending_watchdog_note(matches!(request.source, IncomingPromptSource::WatchdogBoardNote));
             self.submit_text(request.prompt, app_tx);
         }
     }

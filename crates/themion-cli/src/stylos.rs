@@ -78,9 +78,16 @@ pub struct StylosCmdRequest {
     pub prompt: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IncomingPromptSource {
+    RemoteStylos,
+    WatchdogBoardNote,
+}
+
 #[derive(Clone, Debug)]
 pub struct IncomingPromptRequest {
     pub prompt: String,
+    pub source: IncomingPromptSource,
     pub agent_id: Option<String>,
     pub task_id: Option<String>,
     #[allow(dead_code)]
@@ -1445,6 +1452,7 @@ async fn handle_talk_query(
             let prompt = build_peer_message_prompt(&sender, &target, &agent.agent_id, &req.message);
             let result = query_context.submit_incoming_prompt(IncomingPromptRequest {
                 prompt,
+                source: IncomingPromptSource::RemoteStylos,
                 agent_id: Some(agent.agent_id.clone()),
                 task_id: None,
                 request_id: req.request_id.clone(),
@@ -1553,13 +1561,6 @@ async fn handle_note_delivery_query(
             }
         }
     };
-    let _ = query_context.submit_event(format!(
-        "received remote board note create request via stylos from={} from_agent_id={} to={} to_agent_id={}",
-        req.from.as_deref().unwrap_or("unknown sender"),
-        req.from_agent_id.as_deref().unwrap_or("unknown"),
-        req.to.as_deref().unwrap_or(query_context.local_instance()),
-        req.to_agent_id,
-    ));
     let created = query_context.notes_db().create_board_note(CreateNoteArgs {
         note_id: note_id.clone(),
         note_kind,
@@ -1575,36 +1576,10 @@ async fn handle_note_delivery_query(
     match created {
         Ok(note) => {
             let _ = query_context.submit_event(format!(
-                "created board note in db note_slug={} from={} from_agent_id={} to={} to_agent_id={} column={}",
+                "Board note posted note_slug={} column={}",
                 note.note_slug,
-                note.from_instance.as_deref().unwrap_or("unknown sender"),
-                note.from_agent_id.as_deref().unwrap_or("unknown"),
-                note.to_instance,
-                note.to_agent_id,
                 note.column.as_str(),
             ));
-            let prompt = build_board_note_prompt(
-                &note.note_id,
-                &note.note_slug,
-                note.note_kind,
-                note.origin_note_id.as_deref(),
-                note.from_instance.as_deref(),
-                note.from_agent_id.as_deref(),
-                &note.to_instance,
-                &note.to_agent_id,
-                note.column,
-                &note.body,
-            );
-            let _ = query_context.submit_incoming_prompt(IncomingPromptRequest {
-                prompt,
-                agent_id: Some(note.to_agent_id.clone()),
-                task_id: None,
-                request_id: req.request_id.clone(),
-                from: note.from_instance.clone(),
-                from_agent_id: note.from_agent_id.clone(),
-                to: Some(note.to_instance.clone()),
-                to_agent_id: Some(note.to_agent_id.clone()),
-            });
             NoteReply {
                 accepted: true,
                 agent_id: agent.agent_id,
@@ -1690,6 +1665,7 @@ async fn handle_task_request_query(
         .await;
     let submit_result = query_context.submit_incoming_prompt(IncomingPromptRequest {
         prompt: req.task,
+        source: IncomingPromptSource::RemoteStylos,
         agent_id: Some(agent.agent_id.clone()),
         task_id: Some(task_id.clone()),
         request_id: req.request_id.clone(),
@@ -2045,6 +2021,7 @@ pub fn build_board_note_prompt(
     local_agent_id: &str,
     column: NoteColumn,
     body: &str,
+    source: IncomingPromptSource,
 ) -> String {
     let note_purpose = match note_kind {
         NoteKind::WorkRequest => match column {
@@ -2053,16 +2030,36 @@ pub fn build_board_note_prompt(
         },
         NoteKind::DoneMention => "This is an informational completion mention for prior delegated work. Incoming notes still enter the board in todo and must be actively handled; do not assume storage state means the note is already resolved. Treat this as a durable done notification, not as a fresh request to repeat the same task. Decide whether any concrete action remains based on the note context. If no further action is actually needed, move the note to done in this turn. If follow-up is still required, keep working it through the board workflow until the remaining action is complete. Do not create an automatic done echo in response. Do not send an acknowledgment, summary-only reply, or any other no-op follow-up unless the note clearly requires a concrete next action or correction.",
     };
-    format!(
-        "{NOTE_PREFIX} note_id={note_id} note_slug={note_slug} note_kind={} origin_note_id={} from={} from_agent_id={} to={target} to_agent_id={local_agent_id} column={}\n\n{}\n\nNote body:\n{}",
-        note_kind.as_str(),
-        origin_note_id.unwrap_or("-"),
-        sender.unwrap_or("unknown"),
-        sender_agent_id.unwrap_or("unknown"),
-        column.as_str(),
-        note_purpose,
-        body
-    )
+    let instruction = match source {
+        IncomingPromptSource::RemoteStylos => None,
+        IncomingPromptSource::WatchdogBoardNote => Some(
+            "I found that you have a pending note to handle. Below is that note."
+                .to_string(),
+        ),
+    };
+    match instruction {
+        Some(instruction) => format!(
+            "{NOTE_PREFIX} note_id={note_id} note_slug={note_slug} note_kind={} origin_note_id={} from={} from_agent_id={} to={target} to_agent_id={local_agent_id} column={}\n\n{}\n\n{}\n\nNote body:\n{}",
+            note_kind.as_str(),
+            origin_note_id.unwrap_or("-"),
+            sender.unwrap_or("unknown"),
+            sender_agent_id.unwrap_or("unknown"),
+            column.as_str(),
+            instruction,
+            note_purpose,
+            body
+        ),
+        None => format!(
+            "{NOTE_PREFIX} note_id={note_id} note_slug={note_slug} note_kind={} origin_note_id={} from={} from_agent_id={} to={target} to_agent_id={local_agent_id} column={}\n\n{}\n\nNote body:\n{}",
+            note_kind.as_str(),
+            origin_note_id.unwrap_or("-"),
+            sender.unwrap_or("unknown"),
+            sender_agent_id.unwrap_or("unknown"),
+            column.as_str(),
+            note_purpose,
+            body
+        ),
+    }
 }
 
 fn build_peer_message_prompt(
@@ -2260,6 +2257,7 @@ mod tests {
             "worker",
             NoteColumn::Todo,
             "please fix the tests",
+            IncomingPromptSource::WatchdogBoardNote,
         );
         assert!(prompt.contains("type=stylos_note"));
         assert!(prompt.contains("note_id=123e4567-e89b-12d3-a456-426614174000"));
@@ -2270,6 +2268,7 @@ mod tests {
         assert!(prompt.contains("to_agent_id=worker"));
         assert!(prompt.contains("note_kind=work_request"));
         assert!(prompt.contains("column=todo"));
+        assert!(prompt.contains("I found that you have a pending note to handle. Below is that note."));
         assert!(prompt.contains(
             "Note body:
 please fix the tests"

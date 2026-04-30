@@ -5,7 +5,9 @@ use std::sync::Arc;
 use themion_core::db::{DbHandle, NoteColumn, NoteKind};
 
 use crate::app_state::{create_done_mention_locally, DoneMentionRequest};
-use crate::stylos::{build_board_note_prompt, IncomingPromptRequest};
+use crate::stylos::{build_board_note_prompt, IncomingPromptRequest, IncomingPromptSource};
+
+pub const WATCHDOG_IDLE_DELAY_MS_DEFAULT: u64 = 2_000;
 
 #[derive(Clone, Debug)]
 pub struct BoardInjectionAction {
@@ -32,6 +34,7 @@ pub fn resolve_pending_board_note_injection(
     db: &Arc<DbHandle>,
     local_instance: &str,
     target_agent_id: &str,
+    trigger: IncomingPromptSource,
 ) -> Option<BoardInjectionAction> {
     let Ok(Some(note)) = db.next_board_note_for_injection(local_instance, target_agent_id) else {
         return None;
@@ -48,17 +51,30 @@ pub fn resolve_pending_board_note_injection(
         &note.to_agent_id,
         note.column,
         &note.body,
+        trigger,
     );
-    Some(BoardInjectionAction {
-        log_line: format!(
+    let log_line = match trigger {
+        IncomingPromptSource::WatchdogBoardNote => format!(
+            "Watchdog injected board note note_slug={} to={} to_agent_id={} column={} after_idle_ms={}",
+            note.note_slug,
+            note.to_instance,
+            note.to_agent_id,
+            note.column.as_str(),
+            WATCHDOG_IDLE_DELAY_MS_DEFAULT,
+        ),
+        IncomingPromptSource::RemoteStylos => format!(
             "Board note injection note_slug={} to={} to_agent_id={} column={}",
             note.note_slug,
             note.to_instance,
             note.to_agent_id,
             note.column.as_str()
         ),
+    };
+    Some(BoardInjectionAction {
+        log_line,
         request: IncomingPromptRequest {
             prompt,
+            source: trigger,
             agent_id: Some(note.to_agent_id.clone()),
             task_id: None,
             request_id: None,
