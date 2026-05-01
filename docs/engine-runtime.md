@@ -176,14 +176,17 @@ Stylos request handling stays CLI-local even when it ultimately causes an agent 
 In the current implementation:
 
 - Stylos queryables are registered in `crates/themion-cli/src/stylos.rs` and their long-lived serving/publishing/subscription tasks now run on the CLI-owned `network` runtime domain
-- query handlers read the current exported process snapshot from a snapshot provider published from the CLI-local app/TUI state path
+- query handlers read the current exported process snapshot from a snapshot provider owned by the Stylos runtime path rather than by `tui.rs`
 - accepted `talk`, durable `notes/request`, and `tasks/request` queries are converted into `IncomingPromptRequest` values or persisted note records and sent over an in-process/local-runtime path
+- in Stylos-enabled TUI mode, CLI-local incoming-prompt admission and rejection policy now lives in `crates/themion-cli/src/app_runtime.rs` rather than inline in `tui.rs`
 - in Stylos-enabled TUI mode, CLI-local board-note coordination for pending note injection and note-completion follow-up now lives in `crates/themion-cli/src/board_runtime.rs` rather than inline in `tui.rs`
 - the TUI event loop receives those requests as `AppEvent::IncomingPrompt`
-- the TUI either rejects the request immediately if the current local execution path is already busy, or submits the prompt through the same local turn path used for normal input
+- the TUI renders the returned outcome and submits accepted work through the same local turn path used for normal input
 
 This means Stylos does not bypass the harness loop, call providers directly, or move history/tool execution into the transport layer. It only injects new work into the existing local input path.
 For durable board notes in TUI mode, `board_runtime.rs` is now the CLI-local coordination boundary for selecting the next pending note, claiming one note locally before handoff, mutating injected/completion state only after successful handoff, releasing local claims when a selected target loses the handoff race, and resolving post-turn follow-up into typed actions that the TUI displays or submits. This keeps the watchdog scheduler independent while preventing duplicate in-process injection of the same note across overlapping local-agent activity.
+
+Sender-side Stylos transport event derivation is also no longer a TUI transcript-inference path. The current implementation derives outbound talk and board-note transport events through explicit helper logic in `crates/themion-cli/src/stylos.rs`, and the TUI only renders the returned event line when present.
 
 ## Snapshot-driven request decisions
 
@@ -244,11 +247,11 @@ When a `talk` request is accepted, the CLI does not inject the raw message direc
 
 This keeps sender identity and reply guidance visible to the model in the harness prompt path rather than hidden only in transport metadata.
 
-When the local agent invokes `stylos_request_talk` and the request is accepted, the TUI also emits a sender-side chat-panel event line in exact identifier form:
+When the local agent invokes `stylos_request_talk` and the request is accepted, the sender-side chat-panel event line is now derived by explicit helper logic in `crates/themion-cli/src/stylos.rs` rather than by TUI transcript backtracking:
 
 - `Stylos talk to=<hostname>:<pid> from=<hostname>:<pid>`
 
-This sender-side log is distinct from generic tool-call text and is intended to make outbound peer messaging visible in the chat transcript.
+This sender-side log remains distinct from generic tool-call text and is intended to make outbound peer messaging visible in the chat transcript.
 
 Tool-call chat labels remain compact, but long tool detail values are now center-trimmed to about 60 characters with `󱑼` so the display can preserve both the beginning and the end of paths, commands, and other long identifiers.
 
@@ -290,142 +293,3 @@ These defaults make binary-safe file transfer and bounded shell usage the normal
 ## Project Memory knowledge-base tools
 
 Themion exposes one `memory_*` tool family backed by SQLite in `themion-core`. The tools build Project Memory: an intentional long-term durable knowledge base, not a transcript log or task board. Concepts, components, files, tasks, decisions, facts, observations, troubleshooting records, people, and occasional narrative memory records are all `memory_nodes`, while `memory_edges` records typed directed links between any two nodes. Each node stores a `project_dir` memory context. Hashtags are flat normalized labels in `memory_node_hashtags`; they replace a separate memory scope concept for this feature.
-
-Model-facing guidance: use these tools for durable reusable knowledge that should outlive the current session. Project Memory defaults to the current project. Use the exact selector `[GLOBAL]` only for Global Knowledge: the virtual cross-project context inside Project Memory for reusable facts, preferences, conventions, provider/tool behavior, or troubleshooting patterns. `[GLOBAL]` is not a filesystem path and is not resolved or canonicalized. When unsure, keep knowledge project-local and promote later only when cross-project usefulness is clear. Prefer specific `node_type` values such as `concept`, `component`, `file`, `task`, `decision`, `fact`, `observation`, `troubleshooting`, or `person`. Use `memory` only for narrative long-term capture when no more specific type fits. Keep ordinary transcript reconstruction in history tools and coordination work in board notes.
-
-Current tool contracts:
-
-- `memory_create_node` accepts `title`, optional `project_dir`, optional `node_type` (default `observation`), optional `content`, optional `hashtags`, optional UUID `node_id`. Omitted `project_dir` uses the current session project directory; exact `[GLOBAL]` uses Global Knowledge. It stores timestamps in milliseconds as `created_at_ms` and `updated_at_ms`.
-- `memory_update_node` accepts `node_id` plus any mutable node fields. When `hashtags` is supplied, it replaces the node's hashtag set. `content` may be set to `null`.
-- `memory_link_nodes` accepts `from_node_id`, `to_node_id`, `relation_type`, and optional UUID `edge_id`. Both endpoint nodes must already exist.
-- `memory_unlink_nodes` removes an edge by `edge_id`, or by the exact `from_node_id`/`to_node_id`/`relation_type` tuple.
-- `memory_get_node` returns the node, including its `project_dir`, plus immediate `outgoing` and `incoming` edge arrays.
-- `memory_search` supports explicit `mode` selection. `mode="fts"` preserves current FTS5 keyword search over title/content when FTS5 is available, while `mode="semantic"` requests feature-gated embedding ranking over the same scoped and filtered candidate set. Semantic responses stay explicit and inspectable: they return the selected mode, `degraded` state, optional `degradation_reason`, `pending_index_count` (currently expected to stay `0` under the immediate-on-write lifecycle), and the matched `nodes`. Omitted `project_dir` searches only the current session project; `[GLOBAL]` searches only Global Knowledge. If FTS5 is unavailable, non-keyword filters still work in `fts` mode. If Themion is built without `semantic-memory`, semantic mode returns an explicit degraded response instead of silently changing behavior.
-- when the optional `semantic-memory` cargo feature is enabled, Project Memory persists embedding rows in `memory_node_embeddings`; create and update operations generate and store fresh embeddings in the same mutation flow rather than deferring freshness to a background queue
-- fastembed model/cache assets for semantic-memory now download into Themion shared app data under `themion/fastembed`, alongside the shared application data root that also contains `system.db`, so semantic model artifacts do not depend on repo-local cache placement
-- semantic indexing maintenance still has two user-facing triggers in `themion-cli`: slash commands `/semantic-memory index` and `/semantic-memory index full` inside the TUI, plus the standalone shell-invokable command `themion --command semantic-memory index [--full]`; under the immediate-on-write lifecycle these act as explicit repair or full-regeneration workflows rather than the ordinary path for newly created or updated nodes
-- `memory_open_graph` opens a bounded local neighborhood around `node_id` or `node_ids`; depth is clamped to 3 and node limit to 200.
-- `memory_delete_node` deletes one node and its directly owned hashtag and edge rows.
-- `memory_list_hashtags` returns hashtag usage counts for the selected project context, optionally by prefix. Omitted `project_dir` uses the current session project; `[GLOBAL]` lists only Global Knowledge tags.
-
-Hashtag normalization is case-insensitive: leading `#` is optional, stored hashtags always include it, and hyphens become underscores. Labels such as node type, relation type, and hashtag bodies accept letters, digits, underscores, and hyphens.
-
-## Lightweight wait tool
-
-`themion-core` now exposes a built-in `time_sleep` tool for short bounded waits.
-
-Current behavior:
-
-- accepts `ms`
-- sleeps without invoking the shell
-- rejects durations above 30,000 ms
-- returns structured JSON with the slept duration
-
-This is intended for lightweight pauses and retry gaps. It is not a general scheduler or background timer system.
-
-## CLI-local transcript review boundary
-
-Long-session transcript navigation in the TUI is a CLI-local display concern and does not change the core harness loop.
-
-That means:
-
-- follow-tail versus browsed-history state lives in `crates/themion-cli/src/tui.rs`
-- the read-only transcript review overlay uses the current in-memory `Entry` list already held by the TUI for the active session
-- browsing old content does not alter `themion-core::Agent` message history, turn boundaries, SQLite persistence, tool semantics, or prompt assembly
-- streamed assistant chunks continue to arrive through normal `AgentEvent` handling; the CLI only changes whether the current viewport follows the latest content automatically
-- persistent history tools such as `history_recall` and `history_search` remain the mechanism for model-visible access to older stored history outside the current prompt window
-- these history tools are always scoped to the current project directory; omitted `session_id` means the active session, `session_id="*"` means all sessions in the current project, and explicit UUIDs only match sessions within that current project
-
-This feature improves user-facing review behavior without changing runtime semantics in `themion-core`.
-
-## CLI redraw scheduling
-
-`crates/themion-cli/src/tui.rs` now uses a request-driven redraw path rather than unconditionally drawing once per event-loop iteration.
-
-Current behavior:
-
-- the TUI performs an initial draw at startup
-- later draws are triggered by scheduled redraw notifications after event handlers mark visible state dirty
-- dirty tracking is coarse and UI-shaped: conversation, input, status, overlay, or full invalidation
-- multiple redraw requests may be coalesced before one actual `terminal.draw(...)` call
-- the 150 ms tick still updates runtime counters and idle-time logic, but it only results in a draw when visible UI state changed
-- `/debug runtime` distinguishes draw requests, executed draws, and skipped-clean redraw attempts so redraw churn can be inspected without confusing wakeups with actual draws
-
-This keeps Ratatui's buffer-diff renderer in place while avoiding unnecessary frame rebuilding during idle periods.
-
-## Durable Stylos notes runtime
-
-PRD-029 phase 1 adds a durable board-backed note path.
-
-Current behavior:
-
-- `notes/request` validates the target agent from the current exported snapshot
-- when the `stylos` feature is enabled, `board_create_note` always reaches note creation through `notes/request`, including self-targeted delivery to the current local instance
-- accepted notes are persisted in SQLite immediately rather than rejected when the agent is busy
-- persisted notes start in column `todo` by default, or may start in `blocked` for waiting-first follow-up work
-- blocked notes store durable `blocked_until_ms` cooldown metadata and are only eligible for automatic idle-time reinjection after cooldown expires
-- idle injection priority is `in_progress`, then `todo`, then cooldown-eligible `blocked`
-- `themion-core` exposes `board_*` note tools for create/list/read/move/update-result operations using canonical durable UUID `note_id` values and returns companion `note_slug` metadata for human-readable inspection
-- TUI chat-panel/operator-facing note lifecycle events prefer `note_slug` as the visible note identifier, while machine-facing tool results and prompt metadata preserve canonical `note_id`
-- board note tool-call labels in the TUI prefer `note_slug`; when the original model-supplied tool args omit it, `themion-core` may enrich `ToolStart` with display-oriented arguments that include the resolved slug while the tool contract still uses canonical `note_id`
-- sender `from` and `from_agent_id` are forwarded from the calling runtime context into Stylos note delivery so receiver-side logs and stored note metadata reflect the actual calling agent
-- successful receiver-side note insertion emits `created board note in db note_slug=<slug> ...` before the note is queued for later injection
-- inbound note delivery logging is distinct from talk logging: note delivery uses `Board note intake ...`, while talk delivery uses `Stylos hear ...`
-- the TUI checks for pending local notes on tick when no local turn is active
-- idle injection prefers pending `in_progress` notes; `todo` is considered only when no pending `in_progress` note exists for that agent
-- injected notes use a note-specific prompt wrapper, include core note metadata (`note_id`, `note_slug`, sender/target identities, current column, then body), and are marked injected to avoid duplicate delivery
-- prompt-visible board guidance says simple direct Q&A without tools usually should not create a self-note, while tool-using or follow-up-tracked work should consider one
-- prompt-visible collaboration guidance prefers durable notes over `talk` for delegated asynchronous work, treating `talk` as a more interrupting realtime path
-- injected note prompts distinguish delegated work-request notes from informational done mentions so agents can treat completion notifications as result handoff rather than fresh delegated work
-- when a delegated cross-agent note reaches `done`, the CLI-side completion path can emit one requester-directed done mention through the existing note-create flow, including original-note reference metadata and result text when available
-- auto-created done mentions are classified so later marking them `done` does not recursively emit another automatic completion notification
-
-This keeps persistence and board state durable while still reusing the normal harness turn path for actual agent work.
-
-## Session-scoped API call logging
-
-`themion-cli` now also exposes a CLI-local `/debug api-log` command family for provider round tracing.
-
-Current behavior:
-
-- `/debug api-log enable` enables logging for the active session only
-- `/debug api-log disable` disables logging for the active session only
-- invalid arguments keep the session state unchanged and return usage feedback
-- when enabled, each provider round in the harness loop writes one JSON file under the system temp root, typically `/tmp/themion/<session_id>/<turn>/round_<n>.json` on Unix-like systems
-- the artifact captures the translated backend request payload, the final accumulated assistant response/tool-call shape, HTTP/timing metadata when available, usage data when available, and explicit error metadata when present
-- the harness treats trace-write failures as non-fatal and emits a bounded warning instead of aborting the session
-
-## Runtime debug command
-
-`themion-cli` now exposes `/debug runtime` as a CLI-local diagnostic command.
-
-## Context inspection command
-
-`themion-cli` now also exposes `/context` as a CLI-local prompt inspection command.
-
-Current behavior:
-
-- `/context` runs locally and does not call the model
-- it reports the prompt-visible context that the next provider round would use, based on the same shared core prompt-analysis path used by live prompt assembly
-- it shows a section-by-section size breakdown including prompt layers such as system prompt, guardrails, Codex CLI instruction, injected contextual instructions, workflow context, tool definitions, optional history recall hint, and replayed history
-- it reports both raw character counts and estimated token counts from the same estimator path used by live replay budgeting
-- it shows an explicit estimate mode such as tokenizer-backed or rough fallback
-- when tokenizer-backed estimation is active, it also shows which tokenizer path was used, including exact model match versus trusted fallback mapping
-- it shows turn-oriented history replay status including total turns, replayed turns, reduced turns, omitted turns, and per-turn `full` versus `reduced` replay form
-- when older turns are omitted, it makes the omission boundary and recall-hint inclusion visible in the user-facing output
-- when `T0` alone exceeds the normal or spike budget thresholds, it explains that replay state explicitly rather than leaving the user to infer it from totals alone
-
-## Runtime debug command
-
-`themion-cli` now exposes `/debug runtime` as a CLI-local diagnostic command.
-
-Current behavior:
-
-- prints process identity, current busy/workflow state, and thread snapshot data for the running Themion process
-- on Linux, thread details come from `/proc/self/task/*/stat` and are reported as sampled cumulative user/system CPU ticks, not exact percentages
-- prints Themion task/activity metrics derived from lightweight counters and handler timing around the TUI loop, input path, tick path, agent event path, shell completion path, and agent-turn lifecycle
-- keeps cumulative counters internally but renders the recent-window section from snapshot deltas rather than from raw lifetime totals
-- labels separately shown lifetime totals explicitly as lifetime values
-- when the `stylos` feature is enabled, also prints lightweight Stylos runtime counters for status publishing, query handling, and bridge event categories
-
-Because Tokio tasks are cooperatively scheduled async tasks rather than kernel threads, the task section is intentionally described as activity/busy-time observability. It must not be read as exact per-Tokio-task CPU accounting.

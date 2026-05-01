@@ -1,14 +1,12 @@
-# Docs
-
-## Architecture
+# Documentation
 
 - [architecture.md](architecture.md) — workspace structure, core design philosophy, component map, process/thread model, harness loop, context windowing, streaming, tools, persistent history, TUI behavior, and Stylos multi-agent status shape.
 - [engine-runtime.md](engine-runtime.md) — detailed walkthrough of prompt inputs, `AGENTS.md` injection, context building, tool-calling flow, workflow runtime behavior, SQLite session storage, and the boundary between CLI-local agent roles and core harness state.
-- [codex-integration-guide.md](codex-integration-guide.md) — Codex provider integration contract, endpoint usage, auth, `/models` metadata parsing, `/responses` translation, and rate-limit extraction behavior.
+- [prd-self-note-guidance.md](prd-self-note-guidance.md) — focused guidance on when to create self-notes and how to avoid noisy board-note behavior.
 
-## Product Requirements Documents (PRDs)
+## PRDs
 
-Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md). The `docs/prd/README.md` file is the directory entrypoint and links back to that guide. Older PRDs 001–050 now live under [`docs/prd/archive/`](prd/archive/).
+Active and recent product requirements documents live in `docs/prd/`. Older implemented PRDs that are primarily historical context live in `docs/prd/archive/`](prd/archive/).
 
 | ID      | Title                                                                                                       | Status        | Version | Scope                                    |
 | ------- | ----------------------------------------------------------------------------------------------------------- | ------------- | ------- | ---------------------------------------- |
@@ -16,7 +14,7 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-002 | [Persistent History, Multi-Agent Sessions, Context Window](prd/archive/prd-002-persistent-history-multi-agent.md)   | Implemented   | v0.2.0  | `themion-core`, `themion-cli`, workspace |
 | PRD-003 | [OpenAI Codex Subscription Provider](prd/archive/prd-003-openai-codex-provider.md)                                  | Implemented   | v0.3.0  | `themion-core`, `themion-cli`, workspace |
 | PRD-004 | [Direct Shell Command Prefix in the TUI](prd/archive/prd-004-direct-shell-command-prefix.md)                        | Implemented   | v0.3.0  | `themion-cli`, `themion-core`            |
-| PRD-005 | [Model Context Window Refresh and Statusline Display](prd/archive/prd-005-model-context-window-refresh-and-statusline.md) | Implemented | v0.3.0 | `themion-core`, `themion-cli`, docs      |
+| PRD-005 | [Model Context Window Refresh and Statusline Display](prd/archive/prd-005-model-context-window-refresh-and-statusline.md) | Implemented | v0.3.0 | `themion-cli`, `themion-core`, docs      |
 | PRD-006 | [Workflow and Phase Model for the Harness Engine](prd/archive/prd-006-workflow-and-phase-model-for-harness-engine.md) | Implemented | v0.4.0 | `themion-core`, `themion-cli`, docs      |
 | PRD-007 | [Lite Workflow Activation and Runtime Structure](prd/archive/prd-007-lite-workflow-activation-and-runtime-structure.md) | Implemented | v0.5.0 | `themion-core`, `themion-cli`, docs      |
 | PRD-008 | [Workflow Phase Retry and Recovery Policy](prd/archive/prd-008-workflow-phase-retry-and-recovery-policy.md)         | Implemented | v0.5.0 | `themion-core`, `themion-cli`, docs      |
@@ -95,3 +93,4 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-081 | [Single-Instance Multi-Agent Team Structure and Agent Membership Tools](prd/prd-081-single-instance-multi-agent-team-structure-and-agent-membership-tools.md) | Implemented | v0.53.0 | `themion-core`, `themion-cli`, docs |
 | PRD-082 | [Multi-Agent TUI Agent-Tagged Transcript and Event Highlighting](prd/prd-082-multi-agent-tui-agent-tagged-transcript.md) | Implemented | v0.54.0 | `themion-cli`, docs |
 | PRD-083 | [Concurrent Local Agent Harness Execution and Independent Watchdog Scheduling](prd/prd-083-concurrent-local-agent-harness-and-independent-watchdog.md) | Implemented | v0.54.0 | `themion-core`, `themion-cli`, docs |
+| PRD-084 | [Move Non-Input/Output Responsibilities out of the TUI](prd/prd-084-move-non-input-output-out-of-tui.md) | Implemented | v0.55.0 | `themion-cli`, docs |

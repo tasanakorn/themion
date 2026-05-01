@@ -146,7 +146,6 @@ fn wire_stylos_app(
     runtime_domains: &Arc<RuntimeDomains>,
     app_tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
-    app.refresh_stylos_status();
     app.wire_stylos_event_streams(
         &runtime_domains
             .tui()

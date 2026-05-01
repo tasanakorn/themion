@@ -21,6 +21,10 @@ Use this guide whenever you create or update a PRD.
    - If technical research or evidence is useful but too detailed for the main PRD body, move it into an optional technical note or appendix rather than bloating the core review path.
 5. Update `docs/README.md`.
    - Add the new PRD to the PRD table with link, status, and short description.
+6. Treat guideline-document updates as mandatory when the PRD changes documented behavior or repository guidance.
+   - If the proposed change affects architecture expectations, authoring guidance, workflow conventions, prompt/instruction handling, validation expectations, or any other durable guidance document, update that guidance in the same task.
+   - Do not leave guidance drift for later when the needed update is already known.
+   - Treat this as important follow-through, not an optional polish pass.
 
 ## File naming and numbering
 
@@ -231,6 +235,7 @@ Before finishing:
 - Add an `Implementation checklist` section when the PRD defines an implementation path.
 - If detailed evidence is needed, keep the PRD review-efficient by moving it into an optional appendix or technical note.
 - `docs/README.md` PRD table was updated.
+- If the PRD changes documented behavior or durable repository guidance, all affected guideline documents were updated in the same task.
 - Structure and voice match recent PRDs.
 - Repeated explanation was removed where bullets or tables would be clearer.
 - A reviewer should be able to understand the problem and proposed change in a few minutes.

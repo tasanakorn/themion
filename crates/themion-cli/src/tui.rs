@@ -1,14 +1,11 @@
 use crate::app_runtime::{
     build_local_agent_tool_invoker, build_main_agent, build_replacement_main_agent,
-    build_system_inspection_snapshot,
-    handle_local_agent_management_request as runtime_handle_local_agent_management_request,
-    select_watchdog_dispatch, start_watchdog_task, AgentReplacementParams,
-    LocalAgentRuntimeContext, WatchdogRuntimeState,
+    build_system_inspection_snapshot, handle_local_agent_management_request as runtime_handle_local_agent_management_request,
+    AgentReplacementParams, LocalAgentManagementRequest, LocalAgentRuntimeContext,
 };
 #[cfg(feature = "stylos")]
 use crate::board_runtime::{
-    board_note_id_from_prompt, finalize_board_note_injection, release_board_note_claim,
-    resolve_completed_note_follow_up, BoardTurnFollowUp,
+    finalize_board_note_injection, resolve_completed_note_follow_up, BoardTurnFollowUp,
     LocalBoardClaimRegistry,
 };
 use crate::chat_composer::{ChatComposer, InputAction};
@@ -16,8 +13,14 @@ use crate::config::{save_profiles, ProfileConfig};
 use crate::runtime_domains::DomainHandle;
 #[cfg(feature = "stylos")]
 use crate::stylos::{
-    tool_bridge, IncomingPromptRequest, IncomingPromptSource, StylosHandle, StylosRuntimeState,
-    StylosToolBridge,
+    sender_side_transport_event_from_tool_detail, tool_bridge, IncomingPromptRequest, StylosHandle,
+    StylosRuntimeState, StylosToolBridge,
+};
+
+#[cfg(feature = "stylos")]
+use crate::app_runtime::{
+    resolve_incoming_prompt_disposition, select_watchdog_dispatch, start_watchdog_task,
+    IncomingPromptDisposition, WatchdogRuntimeState,
 };
 use crate::{format_stats, Session};
 use crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
@@ -45,13 +48,6 @@ use themion_core::{
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
-
-#[derive(Debug)]
-pub(crate) struct LocalAgentManagementRequest {
-    pub(crate) action: String,
-    pub(crate) args: serde_json::Value,
-    pub(crate) reply_tx: tokio::sync::oneshot::Sender<anyhow::Result<String>>,
-}
 
 pub(crate) enum AppEvent {
     Key(event::KeyEvent),
@@ -483,36 +479,10 @@ fn split_tool_call_detail(name: &str, args_json: &str) -> (String, Option<String
     }
 }
 
-pub struct AgentHandle {
-    pub(crate) agent: Option<Agent>,
-    pub(crate) session_id: Uuid,
-    #[allow(dead_code)]
-    pub agent_id: String,
-    #[allow(dead_code)]
-    pub label: String,
-    pub(crate) roles: Vec<String>,
-    pub(crate) busy: bool,
-    pub(crate) turn_cancellation: Option<TurnCancellation>,
-    #[cfg(feature = "stylos")]
-    pub(crate) active_incoming_prompt: Option<IncomingPromptRequest>,
+fn is_interactive_handle(handle: &AgentHandle) -> bool {
+    handle.roles.iter().any(|r| r == "interactive")
 }
 
-#[cfg(feature = "stylos")]
-#[derive(Clone, Debug)]
-struct AgentStatusSource {
-    agent_id: String,
-    label: String,
-    roles: Vec<String>,
-    session_id: String,
-    workflow: WorkflowState,
-    activity_status: String,
-    activity_status_changed_at_ms: u64,
-    project_dir: PathBuf,
-    provider: String,
-    model: String,
-    active_profile: String,
-    rate_limits: Option<ApiCallRateLimitReport>,
-}
 
 #[cfg(feature = "stylos")]
 fn normalize_primary_role(value: &str) -> &str {
@@ -532,83 +502,18 @@ fn has_role(handle: &AgentHandle, role: &str) -> bool {
         .any(|r| normalize_primary_role(r) == role)
 }
 
-fn is_interactive_handle(handle: &AgentHandle) -> bool {
-    handle.roles.iter().any(|r| r == "interactive")
-}
-
-#[cfg(feature = "stylos")]
-fn validate_agent_roles(agents: &[AgentHandle]) -> anyhow::Result<()> {
-    let main_count = agents.iter().filter(|h| has_role(h, "master")).count();
-    if main_count != 1 {
-        anyhow::bail!(
-            "invalid agent roles: expected exactly one master agent, found {}",
-            main_count
-        );
-    }
-    let interactive_count = agents.iter().filter(|h| has_role(h, "interactive")).count();
-    if interactive_count > 1 {
-        anyhow::bail!(
-            "invalid agent roles: expected at most one interactive agent, found {}",
-            interactive_count
-        );
-    }
-    Ok(())
-}
-
-#[cfg(feature = "stylos")]
-fn build_stylos_status_snapshot(
-    startup_project_dir: &std::path::Path,
-    agent_sources: Vec<AgentStatusSource>,
-) -> anyhow::Result<crate::stylos::StylosStatusSnapshot> {
-    let main_count = agent_sources
-        .iter()
-        .filter(|agent| agent.roles.iter().any(|r| r == "master"))
-        .count();
-    if main_count != 1 {
-        anyhow::bail!(
-            "invalid agent roles: expected exactly one master agent, found {}",
-            main_count
-        );
-    }
-    let interactive_count = agent_sources
-        .iter()
-        .filter(|agent| agent.roles.iter().any(|r| r == "interactive"))
-        .count();
-    if interactive_count > 1 {
-        anyhow::bail!(
-            "invalid agent roles: expected at most one interactive agent, found {}",
-            interactive_count
-        );
-    }
-
-    let agents = agent_sources
-        .into_iter()
-        .map(|agent| {
-            let git_status =
-                crate::stylos::GitStatusCache::new(agent.project_dir.clone()).snapshot();
-            crate::stylos::StylosAgentStatusSnapshot {
-                agent_id: agent.agent_id,
-                label: agent.label,
-                roles: agent.roles,
-                session_id: agent.session_id,
-                workflow: agent.workflow,
-                activity_status: agent.activity_status,
-                activity_status_changed_at_ms: agent.activity_status_changed_at_ms,
-                project_dir: agent.project_dir.display().to_string(),
-                project_dir_is_git_repo: git_status.is_repo,
-                git_remotes: git_status.remotes,
-                provider: agent.provider,
-                model: agent.model,
-                active_profile: agent.active_profile,
-                rate_limits: agent.rate_limits,
-            }
-        })
-        .collect();
-
-    Ok(crate::stylos::StylosStatusSnapshot {
-        startup_project_dir: startup_project_dir.display().to_string(),
-        agents,
-    })
+pub struct AgentHandle {
+    pub(crate) agent: Option<Agent>,
+    pub(crate) session_id: Uuid,
+    #[allow(dead_code)]
+    pub agent_id: String,
+    #[allow(dead_code)]
+    pub label: String,
+    pub(crate) roles: Vec<String>,
+    pub(crate) busy: bool,
+    pub(crate) turn_cancellation: Option<TurnCancellation>,
+    #[cfg(feature = "stylos")]
+    pub(crate) active_incoming_prompt: Option<IncomingPromptRequest>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -931,6 +836,8 @@ pub struct App {
     last_assistant_text: Option<String>,
     #[cfg(feature = "stylos")]
     stylos_tool_bridge: Option<StylosToolBridge>,
+    #[cfg(feature = "stylos")]
+    last_sender_side_transport_event: Option<crate::stylos::SenderSideTransportEvent>,
     local_agent_mgmt_tx: mpsc::UnboundedSender<AppEvent>,
 }
 
@@ -1107,6 +1014,8 @@ impl App {
             last_assistant_text: None,
             #[cfg(feature = "stylos")]
             stylos_tool_bridge,
+            #[cfg(feature = "stylos")]
+            last_sender_side_transport_event: None,
             local_agent_mgmt_tx: app_tx.clone(),
         };
         #[cfg(feature = "stylos")]
@@ -1263,7 +1172,6 @@ impl App {
         }
         self.pending = Some(self.pending_str());
         self.mark_dirty_status();
-        self.refresh_stylos_status();
     }
 
     fn clear_agent_activity(&mut self) {
@@ -1282,7 +1190,6 @@ impl App {
         }
         self.pending = None;
         self.mark_dirty_status();
-        self.refresh_stylos_status();
     }
 
     fn reset_stream_counters(&mut self) {
@@ -1445,109 +1352,6 @@ impl App {
         }
     }
 
-    pub(crate) fn refresh_stylos_status(&self) {
-        #[cfg(feature = "stylos")]
-        if self.stylos.is_some() {
-            if validate_agent_roles(&self.agents).is_err() {
-                return;
-            }
-            let startup_project_dir = self.startup_project_dir.clone();
-            let rate_limits = self.status_rate_limits.clone();
-            let idle_since = self.idle_since;
-            let idle_status_changed_at = self.idle_status_changed_at;
-            let agent_activity = self.agent_activity.clone();
-            let agent_activity_changed_at = self.agent_activity_changed_at;
-            let stream_chunks = self.stream_chunks;
-            let stream_chars = self.stream_chars;
-
-            let agent_sources: Vec<AgentStatusSource> = self
-                .agents
-                .iter()
-                .enumerate()
-                .map(|(idx, h)| {
-                    let (activity_status, activity_status_changed_at_ms) = if idx == 0 {
-                        if let Some(activity) = agent_activity.as_ref() {
-                            (
-                                activity.status_bar(stream_chunks, stream_chars),
-                                agent_activity_changed_at.unwrap_or_else(unix_epoch_now_ms),
-                            )
-                        } else {
-                            const NAP_AFTER: Duration = Duration::from_secs(5 * 60);
-                            match idle_since {
-                                Some(idle_since) if idle_since.elapsed() > NAP_AFTER => (
-                                    "nap".to_string(),
-                                    idle_status_changed_at.unwrap_or_else(unix_epoch_now_ms)
-                                        + NAP_AFTER.as_millis() as u64,
-                                ),
-                                _ => (
-                                    "idle".to_string(),
-                                    idle_status_changed_at.unwrap_or_else(unix_epoch_now_ms),
-                                ),
-                            }
-                        }
-                    } else {
-                        ("idle".to_string(), unix_epoch_now_ms())
-                    };
-
-                    let workflow = h
-                        .agent
-                        .as_ref()
-                        .map(|agent| agent.workflow_state().clone())
-                        .unwrap_or_else(|| {
-                            if idx == 0 {
-                                self.workflow_state.clone()
-                            } else {
-                                WorkflowState::default()
-                            }
-                        });
-
-                    AgentStatusSource {
-                        agent_id: h.agent_id.clone(),
-                        label: h.label.clone(),
-                        roles: h.roles.clone(),
-                        session_id: h.session_id.to_string(),
-                        workflow,
-                        activity_status,
-                        activity_status_changed_at_ms,
-                        project_dir: h
-                            .agent
-                            .as_ref()
-                            .map(|agent| agent.project_dir.clone())
-                            .unwrap_or_else(|| self.project_dir.clone()),
-                        provider: self.session.provider.clone(),
-                        model: self.session.model.clone(),
-                        active_profile: self.session.active_profile.clone(),
-                        rate_limits: if idx == 0 { rate_limits.clone() } else { None },
-                    }
-                })
-                .collect();
-
-            let provider = std::sync::Arc::new(move || {
-                let startup_project_dir = startup_project_dir.clone();
-                let agent_sources = agent_sources.clone();
-                Box::pin(async move {
-                    build_stylos_status_snapshot(&startup_project_dir, agent_sources)
-                        .unwrap_or_else(|_| crate::stylos::StylosStatusSnapshot {
-                            startup_project_dir: startup_project_dir.display().to_string(),
-                            agents: Vec::new(),
-                        })
-                })
-                    as std::pin::Pin<
-                        Box<
-                            dyn std::future::Future<Output = crate::stylos::StylosStatusSnapshot>
-                                + Send,
-                        >,
-                    >
-            });
-            if let Some(handle) = self.stylos.as_ref() {
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(handle.set_snapshot_provider(provider));
-                });
-            }
-        }
-    }
-
     fn process_agent_event(
         &mut self,
         #[allow(unused_variables)] sid: Uuid,
@@ -1637,6 +1441,19 @@ impl App {
                     None => detail.clone(),
                 };
                 self.set_agent_activity(AgentActivity::RunningTool(activity_detail));
+                #[cfg(feature = "stylos")]
+                {
+                    self.last_sender_side_transport_event = self
+                        .local_stylos_instance
+                        .as_deref()
+                        .and_then(|local_instance| {
+                            sender_side_transport_event_from_tool_detail(
+                                &detail,
+                                local_instance,
+                                self.stylos_tool_bridge.is_some(),
+                            )
+                        });
+                }
                 self.push(Entry::ToolCall {
                     agent_id: agent_id_for_session(&self.agents, sid),
                     detail,
@@ -1646,7 +1463,12 @@ impl App {
             AgentEvent::ToolEnd => {
                 self.push(Entry::ToolDone);
                 #[cfg(feature = "stylos")]
-                self.maybe_log_sender_side_stylos_talk();
+                if let Some(event) = self.last_sender_side_transport_event.take() {
+                    self.push(Entry::RemoteEvent {
+                        agent_id: event.agent_id,
+                        text: event.text,
+                    });
+                }
                 self.set_agent_activity(AgentActivity::WaitingAfterTool);
             }
             AgentEvent::Status(text) => {
@@ -1734,58 +1556,6 @@ impl App {
                     self.last_assistant_text = None;
                 }
             }
-        }
-    }
-
-    #[cfg(feature = "stylos")]
-    fn maybe_log_sender_side_stylos_talk(&mut self) {
-        if self
-            .agents
-            .iter()
-            .any(|handle| handle.active_incoming_prompt.is_some())
-        {
-            return;
-        }
-        let Some(Entry::ToolDone) = self.entries.last() else {
-            return;
-        };
-        let Some(Entry::ToolCall {
-            detail, reason: _, ..
-        }) = self.entries.iter().rev().nth(1)
-        else {
-            return;
-        };
-        let Some(handle) = self.stylos.as_ref() else {
-            return;
-        };
-        let local_instance = match handle.state() {
-            StylosRuntimeState::Active { instance, .. } => instance.as_str(),
-            _ => return,
-        };
-
-        if detail.starts_with("stylos_request_talk") {
-            if let Some(target) = extract_stylos_talk_target_from_detail(detail) {
-                self.push(Entry::RemoteEvent {
-                    agent_id: None,
-                    text: format!("Stylos talk to={} from={}", target, local_instance),
-                });
-            }
-            return;
-        }
-
-        if detail.starts_with("board_create_note") {
-            let mode = if self.stylos_tool_bridge.is_some() {
-                "send request via stylos"
-            } else {
-                "create local"
-            };
-            self.push(Entry::RemoteEvent {
-                agent_id: None,
-                text: format!(
-                    "board_create_note {} from={} detail={}",
-                    mode, local_instance, detail
-                ),
-            });
         }
     }
 
@@ -3141,103 +2911,51 @@ impl App {
         app_tx: &mpsc::UnboundedSender<AppEvent>,
     ) {
         self.activity_counters.incoming_prompt_count += 1;
-        let target = request
-            .agent_id
-            .clone()
-            .unwrap_or_else(|| "interactive".to_string());
-        let Some(agent_index) = self.agents.iter().position(|h| h.agent_id == target) else {
-            let sender = request.from.as_deref().unwrap_or("unknown sender");
-            let sender_agent = request.from_agent_id.as_deref().unwrap_or("unknown");
-            let target_instance = request.to.as_deref().unwrap_or("unknown target");
-            let target_agent = request.to_agent_id.as_deref().unwrap_or(target.as_str());
-            self.push(Entry::RemoteEvent {
-                agent_id: Some(target.clone()),
-                text: format!(
-                    "Stylos hear from={} from_agent_id={} to={} to_agent_id={} rejected: target agent missing locally",
-                    sender, sender_agent, target_instance, target_agent
-                ),
-            });
-            if let (Some(handle), Some(task_id)) = (self.stylos.as_ref(), request.task_id.clone()) {
-                let query_context = handle.query_context();
-                self.background_domain().spawn(async move {
-                    query_context
-                        .task_registry()
-                        .set_failed(&task_id, "target_agent_missing".to_string())
-                        .await;
-                });
+        match resolve_incoming_prompt_disposition(&self.agents, &self.board_claims, request) {
+            IncomingPromptDisposition::MissingTarget {
+                log_agent_id,
+                log_text,
+                failed_task_id,
+                ..
             }
-            return;
-        };
-        if self.agents[agent_index].busy
-            || self.agents[agent_index].active_incoming_prompt.is_some()
-        {
-            if let Some(note_id) = board_note_id_from_prompt(&request.prompt) {
-                release_board_note_claim(&self.board_claims, note_id);
-            }
-            let sender = request.from.as_deref().unwrap_or("unknown sender");
-            let sender_agent = request.from_agent_id.as_deref().unwrap_or("unknown");
-            let target_instance = request.to.as_deref().unwrap_or("unknown target");
-            let target_agent = request.to_agent_id.as_deref().unwrap_or(target.as_str());
-            if request.prompt.starts_with("type=stylos_note ") {
-                let note_identifier = stylos_note_display_identifier(&request.prompt);
+            | IncomingPromptDisposition::BusyTarget {
+                log_agent_id,
+                log_text,
+                failed_task_id,
+                ..
+            } => {
                 self.push(Entry::RemoteEvent {
-                    agent_id: Some(target.clone()),
-                    text: format!(
-                        "Board note intake {} from={} from_agent_id={} to={} to_agent_id={} deferred: local agent busy",
-                        note_identifier, sender, sender_agent, target_instance, target_agent
-                    ),
+                    agent_id: log_agent_id,
+                    text: log_text,
                 });
-            } else {
-                self.push(Entry::RemoteEvent {
-                    agent_id: Some(target.clone()),
-                    text: format!(
-                        "Stylos hear from={} from_agent_id={} to={} to_agent_id={} rejected: local agent busy",
-                        sender, sender_agent, target_instance, target_agent
-                    ),
-                });
+                if let (Some(handle), Some(task_id)) = (self.stylos.as_ref(), failed_task_id) {
+                    let query_context = handle.query_context();
+                    self.background_domain().spawn(async move {
+                        query_context
+                            .task_registry()
+                            .set_failed(&task_id, "agent_busy".to_string())
+                            .await;
+                    });
+                }
             }
-            if let (Some(handle), Some(task_id)) = (self.stylos.as_ref(), request.task_id.clone()) {
-                let query_context = handle.query_context();
-                self.background_domain().spawn(async move {
-                    query_context
-                        .task_registry()
-                        .set_failed(&task_id, "agent_busy".to_string())
-                        .await;
-                });
-            }
-        } else {
-            let sender = request.from.as_deref().unwrap_or("unknown sender");
-            let sender_agent = request.from_agent_id.as_deref().unwrap_or("unknown");
-            let target_instance = request.to.as_deref().unwrap_or("unknown target");
-            let target_agent = request.to_agent_id.as_deref().unwrap_or(target.as_str());
-            if request.prompt.starts_with("type=stylos_note ") {
-                let note_identifier = stylos_note_display_identifier(&request.prompt);
-                let column =
-                    stylos_note_header_value(&request.prompt, "column").unwrap_or("unknown");
+            IncomingPromptDisposition::Accepted {
+                agent_index,
+                log_agent_id,
+                log_text,
+                prompt,
+                request,
+                pending_watchdog_note,
+            } => {
                 self.push(Entry::RemoteEvent {
-                    agent_id: Some(target.clone()),
-                    text: format!(
-                        "Board note intake {} from={} from_agent_id={} to={} to_agent_id={} column={}",
-                        note_identifier, sender, sender_agent, target_instance, target_agent, column
-                    ),
+                    agent_id: log_agent_id,
+                    text: log_text,
                 });
-            } else {
-                self.push(Entry::RemoteEvent {
-                    agent_id: Some(target.clone()),
-                    text: format!(
-                        "Stylos hear from={} from_agent_id={} to={} to_agent_id={}",
-                        sender, sender_agent, target_instance, target_agent
-                    ),
-                });
+                self.agents[agent_index].active_incoming_prompt = Some(request);
+                self.watchdog_state.set_active_incoming_prompt(true);
+                self.watchdog_state
+                    .set_pending_watchdog_note(pending_watchdog_note);
+                self.submit_text_to_agent(agent_index, prompt, app_tx);
             }
-            let prompt = request.prompt.clone();
-            self.agents[agent_index].active_incoming_prompt = Some(request.clone());
-            self.watchdog_state.set_active_incoming_prompt(true);
-            self.watchdog_state.set_pending_watchdog_note(matches!(
-                request.source,
-                IncomingPromptSource::WatchdogBoardNote
-            ));
-            self.submit_text_to_agent(agent_index, prompt, app_tx);
         }
     }
 
@@ -3314,21 +3032,6 @@ impl App {
             }
         }
     }
-}
-
-#[cfg(feature = "stylos")]
-fn extract_stylos_talk_target_from_detail(detail: &str) -> Option<&str> {
-    let prefix = "stylos_request_talk ";
-    let rest = detail.strip_prefix(prefix)?;
-    for field in rest.split_whitespace() {
-        if let Some(value) = field.strip_prefix("instance=") {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed);
-            }
-        }
-    }
-    None
 }
 
 fn format_human_count(n: u64) -> String {
@@ -4072,23 +3775,15 @@ mod tests {
     }
 
     #[test]
-    fn extract_stylos_talk_target_from_detail_reads_exact_instance() {
-        let detail = "stylos_request_talk instance=node-2:77, to_agent_id=master, message=hello";
-        assert_eq!(
-            extract_stylos_talk_target_from_detail(detail),
-            Some("node-2:77,")
-        );
-    }
-
-    #[test]
     fn sender_side_stylos_talk_log_format_is_exact() {
-        let target = extract_stylos_talk_target_from_detail(
+        let event = crate::stylos::sender_side_transport_event_from_tool_detail(
             "stylos_request_talk instance=node-2:77 to_agent_id=master",
+            "node-1:42",
+            true,
         )
         .unwrap();
-        let text = format!("Stylos talk to={} from={}", target, "node-1:42");
-        assert_eq!(text, "Stylos talk to=node-2:77 from=node-1:42");
-        assert!(!text.contains('/'));
+        assert_eq!(event.text, "Stylos talk to=node-2:77 from=node-1:42");
+        assert!(!event.text.contains('/'));
     }
 }
 

@@ -31,7 +31,6 @@ use zenoh::query::{ConsolidationMode, QueryTarget};
 use crate::config::StylosConfig;
 use crate::Session;
 
-const GIT_STATUS_TTL: Duration = Duration::from_secs(30);
 const TASK_RETENTION: Duration = Duration::from_secs(30 * 60);
 const MAX_WAIT_TIMEOUT_MS: u64 = 60_000;
 const DISCOVERY_QUERY_TIMEOUT_MS: u64 = 1_500;
@@ -57,6 +56,57 @@ fn normalize_primary_role(value: &str) -> &str {
     } else {
         value
     }
+}
+
+
+#[derive(Clone, Debug)]
+pub struct SenderSideTransportEvent {
+    pub agent_id: Option<String>,
+    pub text: String,
+}
+
+pub fn sender_side_transport_event_from_tool_detail(
+    detail: &str,
+    local_instance: &str,
+    use_stylos_note_delivery: bool,
+) -> Option<SenderSideTransportEvent> {
+    if let Some(target) = extract_stylos_talk_target_from_detail(detail) {
+        return Some(SenderSideTransportEvent {
+            agent_id: None,
+            text: format!("Stylos talk to={} from={}", target, local_instance),
+        });
+    }
+
+    if detail.starts_with("board_create_note") {
+        let mode = if use_stylos_note_delivery {
+            "send request via stylos"
+        } else {
+            "create local"
+        };
+        return Some(SenderSideTransportEvent {
+            agent_id: None,
+            text: format!(
+                "board_create_note {} from={} detail={}",
+                mode, local_instance, detail
+            ),
+        });
+    }
+
+    None
+}
+
+fn extract_stylos_talk_target_from_detail(detail: &str) -> Option<&str> {
+    let prefix = "stylos_request_talk ";
+    let rest = detail.strip_prefix(prefix)?;
+    for field in rest.split_whitespace() {
+        if let Some(value) = field.strip_prefix("instance=") {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+    }
+    None
 }
 
 #[derive(Clone, Debug)]
@@ -540,7 +590,6 @@ pub struct StylosHandle {
     cmd_rx: Option<mpsc::UnboundedReceiver<StylosCmdRequest>>,
     prompt_rx: Option<mpsc::UnboundedReceiver<IncomingPromptRequest>>,
     event_rx: Option<mpsc::UnboundedReceiver<String>>,
-    snapshot_provider: Arc<RwLock<Option<StylosSnapshotProvider>>>,
     query_context: StylosQueryContext,
     activity_counters: Arc<StylosActivityCounters>,
 }
@@ -559,7 +608,6 @@ impl StylosHandle {
             cmd_rx: None,
             prompt_rx: Some(prompt_rx),
             event_rx: Some(event_rx),
-            snapshot_provider: Arc::new(RwLock::new(None)),
             query_context: StylosQueryContext {
                 prompt_tx,
                 event_tx,
@@ -598,9 +646,6 @@ impl StylosHandle {
         }
     }
 
-    pub async fn set_snapshot_provider(&self, provider: StylosSnapshotProvider) {
-        *self.snapshot_provider.write().await = Some(provider);
-    }
 
     pub async fn shutdown(self) {
         if let Some(task) = self.status_task {
@@ -645,40 +690,6 @@ struct ThemionStatusPayload {
 struct ThemionCmdPayload {
     r#type: String,
     prompt: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct GitStatusCache {
-    project_dir: PathBuf,
-    state: Arc<std::sync::Mutex<CachedGitStatus>>,
-}
-
-#[derive(Clone, Debug)]
-struct CachedGitStatus {
-    last_refresh: Instant,
-    value: GitProjectStatus,
-}
-
-impl GitStatusCache {
-    pub fn new(project_dir: PathBuf) -> Self {
-        let value = inspect_git_project(&project_dir);
-        Self {
-            project_dir,
-            state: Arc::new(std::sync::Mutex::new(CachedGitStatus {
-                last_refresh: Instant::now(),
-                value,
-            })),
-        }
-    }
-
-    pub fn snapshot(&self) -> GitProjectStatus {
-        let mut state = self.state.lock().expect("git status cache lock");
-        if state.last_refresh.elapsed() >= GIT_STATUS_TTL {
-            state.value = inspect_git_project(&self.project_dir);
-            state.last_refresh = Instant::now();
-        }
-        state.value.clone()
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1326,7 +1337,6 @@ async fn start_inner(
         cmd_rx: Some(cmd_rx),
         prompt_rx: Some(prompt_rx),
         event_rx: Some(event_rx),
-        snapshot_provider,
         query_context,
         activity_counters,
     })

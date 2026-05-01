@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[cfg(feature = "stylos")]
 use std::time::Duration;
 
 #[cfg(feature = "stylos")]
@@ -17,15 +18,22 @@ use themion_core::workflow::WorkflowState;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-use crate::tui::{AppEvent, LocalAgentManagementRequest};
+use crate::tui::AppEvent;
 #[cfg(feature = "stylos")]
 use crate::board_runtime::{
-    resolve_pending_board_note_injection, BoardInjectionAction, LocalBoardClaimRegistry,
-    WATCHDOG_IDLE_DELAY_MS_DEFAULT,
+    board_note_id_from_prompt, release_board_note_claim, resolve_pending_board_note_injection,
+    BoardInjectionAction, LocalBoardClaimRegistry, WATCHDOG_IDLE_DELAY_MS_DEFAULT,
 };
 #[cfg(feature = "stylos")]
 use crate::runtime_domains::DomainHandle;
 use crate::Session;
+
+#[derive(Debug)]
+pub(crate) struct LocalAgentManagementRequest {
+    pub(crate) action: String,
+    pub(crate) args: serde_json::Value,
+    pub(crate) reply_tx: tokio::sync::oneshot::Sender<anyhow::Result<String>>,
+}
 
 pub(crate) fn build_local_agent_tool_invoker(
     app_tx: mpsc::UnboundedSender<AppEvent>,
@@ -469,7 +477,6 @@ pub(crate) fn start_watchdog_task(
     });
 }
 
-
 #[cfg(feature = "stylos")]
 pub(crate) struct WatchdogDispatchSelection {
     pub(crate) agent_index: usize,
@@ -523,4 +530,125 @@ pub(crate) fn select_watchdog_dispatch(
             action,
         })
     })
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) enum IncomingPromptDisposition {
+    MissingTarget {
+        log_agent_id: Option<String>,
+        log_text: String,
+        failed_task_id: Option<String>,
+    },
+    BusyTarget {
+        log_agent_id: Option<String>,
+        log_text: String,
+        failed_task_id: Option<String>,
+    },
+    Accepted {
+        agent_index: usize,
+        log_agent_id: Option<String>,
+        log_text: String,
+        prompt: String,
+        request: crate::stylos::IncomingPromptRequest,
+        pending_watchdog_note: bool,
+    },
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn resolve_incoming_prompt_disposition(
+    agents: &[crate::tui::AgentHandle],
+    board_claims: &Arc<LocalBoardClaimRegistry>,
+    request: crate::stylos::IncomingPromptRequest,
+) -> IncomingPromptDisposition {
+    let target = request
+        .agent_id
+        .clone()
+        .unwrap_or_else(|| "interactive".to_string());
+    let sender = request.from.as_deref().unwrap_or("unknown sender");
+    let sender_agent = request.from_agent_id.as_deref().unwrap_or("unknown");
+    let target_instance = request.to.as_deref().unwrap_or("unknown target");
+    let target_agent = request.to_agent_id.as_deref().unwrap_or(target.as_str());
+    let is_note = request.prompt.starts_with("type=stylos_note ");
+
+    let Some(agent_index) = agents.iter().position(|h| h.agent_id == target) else {
+        return IncomingPromptDisposition::MissingTarget {
+            log_agent_id: Some(target.clone()),
+            log_text: format!(
+                "Stylos hear from={} from_agent_id={} to={} to_agent_id={} rejected: target agent missing locally",
+                sender, sender_agent, target_instance, target_agent
+            ),
+            failed_task_id: request.task_id.clone(),
+        };
+    };
+
+    if agents[agent_index].busy || agents[agent_index].active_incoming_prompt.is_some() {
+        if let Some(note_id) = board_note_id_from_prompt(&request.prompt) {
+            release_board_note_claim(board_claims, note_id);
+        }
+        let log_text = if is_note {
+            let note_identifier = stylos_note_display_identifier(&request.prompt);
+            format!(
+                "Board note intake {} from={} from_agent_id={} to={} to_agent_id={} deferred: local agent busy",
+                note_identifier, sender, sender_agent, target_instance, target_agent
+            )
+        } else {
+            format!(
+                "Stylos hear from={} from_agent_id={} to={} to_agent_id={} rejected: local agent busy",
+                sender, sender_agent, target_instance, target_agent
+            )
+        };
+        return IncomingPromptDisposition::BusyTarget {
+            log_agent_id: Some(target),
+            log_text,
+            failed_task_id: request.task_id.clone(),
+        };
+    }
+
+    let log_text = if is_note {
+        let note_identifier = stylos_note_display_identifier(&request.prompt);
+        let column = stylos_note_header_value(&request.prompt, "column")
+            .unwrap_or("unknown");
+        format!(
+            "Board note intake {} from={} from_agent_id={} to={} to_agent_id={} column={}",
+            note_identifier, sender, sender_agent, target_instance, target_agent, column
+        )
+    } else {
+        format!(
+            "Stylos hear from={} from_agent_id={} to={} to_agent_id={}",
+            sender, sender_agent, target_instance, target_agent
+        )
+    };
+
+    IncomingPromptDisposition::Accepted {
+        agent_index,
+        log_agent_id: Some(target),
+        log_text,
+        prompt: request.prompt.clone(),
+        pending_watchdog_note: matches!(
+            request.source,
+            crate::stylos::IncomingPromptSource::WatchdogBoardNote
+        ),
+        request,
+    }
+}
+
+#[cfg(feature = "stylos")]
+fn stylos_note_header_value<'a>(prompt: &'a str, key: &str) -> Option<&'a str> {
+    let prefix = format!("{key}=");
+    prompt
+        .lines()
+        .next()?
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix(&prefix))
+}
+
+#[cfg(feature = "stylos")]
+fn stylos_note_display_identifier(prompt: &str) -> String {
+    if let Some(note_slug) = stylos_note_header_value(prompt, "note_slug") {
+        format!("note_slug={note_slug}")
+    } else if let Some(note_id) = stylos_note_header_value(prompt, "note_id") {
+        format!("note_id={note_id}")
+    } else {
+        "note_id=unknown".to_string()
+    }
 }
