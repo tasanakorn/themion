@@ -150,9 +150,14 @@ Rules:
 - Describe the proposed behavior and structure.
 - Break major topics into focused subsections.
 - If the work is phased, preserve the distinction between the overall product behavior and the current delivery phase.
-- For each major design choice, include an inline note in this format:
-  - `**Alternative considered:** <option>. Rejected: <reason>.`
-- Do not add a standalone `Alternatives` section.
+- Do not add a standalone `Alternatives` section by default.
+- Include alternative discussion only when it helps a reviewer understand a meaningful design decision, tradeoff, or rejected direction.
+- If an alternative note is useful, keep it brief and scannable. Prefer patterns such as:
+  - `Alternative considered: <option> — rejected because <reason>.`
+  - `Alternatives considered: <short list> — chose <option> because <reason>.`
+  - `No useful alternative identified for this subsection.`
+- Do not force exactly one `Alternative considered` note into every subsection. Omit it when it would be filler.
+- If alternatives are included, make accept/reject outcome obvious in plain language rather than hiding the decision in verbose prose.
 - Make each subsection easy to review: state what changes, what stays the same, and why this choice was made.
 - Prefer requirements phrased as what the product must do over placeholder tokens, temporary shorthand, or speculative implementation wording.
 - If an example token or sketch appears in discussion, verify whether it is the actual requirement or only shorthand before baking it into the PRD.
@@ -210,6 +215,7 @@ Match the style of neighboring PRDs:
 - Do not repeat the same point across Summary, Goals, Background, and Design unless the later section adds new decision-relevant detail.
 - If detailed evidence is needed, prefer a short synthesis in the main body and move the supporting detail to an appendix or technical note.
 - Prefer naming the user-visible distinction or product behavior directly instead of anchoring the PRD around placeholder markers such as `[xxxx]` unless the literal marker itself is truly the requirement.
+- If an alternatives note does not help the reviewer make or understand a decision, omit it instead of adding verbose junk.
 
 The finished PRD should look visually consistent with nearby PRDs in `docs/prd/`.
 
@@ -235,9 +241,9 @@ Before finishing:
 - Goals still describe the product requirement or user/problem outcome, not only the current implementation phase.
 - Background explains the actual product problem, not just the transcript history of how the wording evolved.
 - Design states what the product must do and does not silently promote placeholder examples into requirements.
+- Any alternatives note that remains is actually decision-useful and easy to scan for the chosen/rejected outcome.
 - If the PRD is phased, the overall product intent remains visible and the current phase is clearly identified.
 - Empty sections were omitted.
-- Major design choices include inline `Alternative considered` notes.
 - Testing uses `step → verify:` lines.
 - Add an `Implementation checklist` section when the PRD defines an implementation path.
 - If detailed evidence is needed, keep the PRD review-efficient by moving it into an optional appendix or technical note.
