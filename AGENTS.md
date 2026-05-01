@@ -134,6 +134,15 @@ Typical feature checks for `themion-cli`:
 - If the PRD does not specify a target version, still decide whether the change is release-worthy and bump the repository version when appropriate.
 - Do not stop at pre-bump validation only: when a task includes a version bump, also run the relevant post-bump validation so version-sensitive issues are checked fairly in both directions.
 
+### PRD execution behavior
+
+- When starting work on an existing PRD, create a durable todo board note for yourself that captures the PRD-specific definition-of-done intent for the implementation slice you are beginning.
+- When executing a PRD, try to drive the work to an actual done state rather than stopping early to re-ask the human for routine follow-through that the PRD, repo instructions, or current code/docs can resolve.
+- Do not silently bind important assumptions just to keep moving; if a missing decision would materially change the implementation, docs, validation, or release outcome, identify it explicitly.
+- If one part of a PRD becomes blocked on a human answer or decision, look for other concrete work within that same PRD that can still be completed correctly without that answer, and continue progressing those unblocked parts first.
+- Ask the human only after you have exhausted the meaningful unblocked work that can be done safely without guessing.
+- When you do need human input to continue a PRD, end your turn with a clear summary of what remains blocked and exactly which answers or decisions the human must provide.
+
 ### Instruction precedence and follow-through
 
 - Treat repository instructions, accepted PRDs, and explicit user requirements as authoritative defaults, not optional suggestions.
