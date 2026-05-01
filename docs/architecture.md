@@ -26,10 +26,12 @@ This separation is intentional: reusable harness/runtime and provider behavior b
 - **OpenAI-style tool calling** — tools are described as JSON function schemas; compatible providers can invoke them and return structured tool calls.
 - **Project Memory knowledge base** — distilled reusable project knowledge is stored as SQLite-backed graph nodes and edges, with hashtags as the lightweight organization layer; the explicit `[GLOBAL]` context is Global Knowledge for reusable cross-project facts.
 - **Event-driven TUI** — `Agent` emits `AgentEvent` variants over an `mpsc` channel; the TUI renders each event as it arrives, giving streaming token display without blocking the input loop.
+- **Multi-agent transcript attribution** — the TUI transcript now carries structured optional local-agent attribution for assistant, tool, status, remote-event, and turn-complete entries, rendering compact highlighted `[agent_id]` prefixes with deterministic session-local colors while leaving ordinary user input and genuine process-level lines neutral.
 - **Provider abstraction** — the core harness speaks through a `ChatBackend` trait so different transports and wire formats can be swapped at runtime.
 - **Separated prompt inputs** — the base system prompt, predefined coding guardrails, a predefined Codex CLI web-search instruction, and contextual instruction files such as `AGENTS.md` are treated as distinct prompt inputs rather than merged into a single message.
 - **Built-in coding guardrails stay minimal** — the predefined guardrail layer covers default coding behavior such as assumption transparency, simple solutions, targeted edits, narrow validation, preferring the smallest clear answer shape with plain prose first, 1–2 sentence replies when enough, bullets/headings/tables only when they materially help, and about 4±1 meaningful chunks by default otherwise, allowing expansion toward about 7±2 chunks only for user-requested fuller explanation, preserving important tool-learned findings in ordinary assistant chat text with concise 1–2 sentence summaries by default, and brief specific commit messages naming the actual change when the user explicitly asks for a commit.
 - **One process can describe multiple agents** — the CLI runtime stores agent descriptors in a vector, and Stylos status publishes process-level metadata plus an `agents` list rather than flattening one effective agent into top-level fields.
+- **Local team membership is CLI-owned** — the current single-instance team roster is managed in `themion-cli`, where the process-local runtime owns `agent_id`, `label`, `roles`, and runtime construction/removal for local agents, while `themion-core` exposes the tool surface and each core `Agent` keeps its own harness state.
 
 ## Component Map
 
@@ -82,12 +84,15 @@ tools.rs
   │    ├─ history_recall  ──► ctx.db.recall(RecallArgs)
   │    ├─ history_search  ──► ctx.db.search(SearchArgs)
   │    ├─ system_inspect_local ──► local runtime/tool/provider readiness snapshot
+  │    ├─ local_agent_create / local_agent_delete ──► CLI-owned local team roster mutation within the current instance
   │    ├─ board_*  ──► local durable notes board operations
   │    ├─ memory_* ──► SQLite Project Memory KB nodes, hashtags, and edges
   │    └─ workflow_*  ──► workflow state inspection / transitions
   └─ ToolCtx { db: Arc<DbHandle>, session_id, project_dir, workflow_state, system_inspection }
 
 History tools are always scoped to the caller's current project directory. Callers cannot pass a `project_dir` override; omitted `session_id` means the active session, `session_id="*"` means all sessions in the current project, and explicit UUIDs only match sessions within that same current project.
+
+Current local team-membership behavior is intentionally narrow: the built-in `master` agent remains the predefined leader, `master` is reserved and cannot be recreated or deleted through the management tools, omitted create requests allocate the next free `smith-N` worker id, and deletion currently uses a safe-refusal policy while the local runtime is busy. Created agents become available immediately in the active in-memory roster and removed agents stop being targetable in that active runtime.
 ```
 
 ## Process, runtime, task, and thread hierarchy
@@ -217,6 +222,8 @@ In the current code, this usually means:
 - the TUI loop remains responsive because it consumes summarized events rather than blocking on provider IO directly
 
 So the user-visible app behaves like one interactive process coordinating background async tasks, not like several child worker processes.
+
+For PRD-081's first local team-management slice, this also means Themion is not yet doing parallel local multi-agent turn execution. The process can host multiple local agents and target them by `agent_id`, but the current TUI/runtime still uses one global active-turn busy gate, so local agent turns are serialized and membership deletion is refused while that busy gate is active.
 
 ### Stylos-enabled background tasks
 

@@ -154,19 +154,31 @@ pub(crate) enum AppEvent {
     LocalAgentManagement(LocalAgentManagementRequest),
 }
 
+#[derive(Clone)]
 enum Entry {
     User(String),
-    Assistant(String),
+    Assistant {
+        agent_id: Option<String>,
+        text: String,
+    },
     Banner(String),
     ToolCall {
+        agent_id: Option<String>,
         detail: String,
         reason: Option<String>,
     },
     ToolDone,
-    Status(String),
+    Status {
+        agent_id: Option<String>,
+        text: String,
+    },
     #[cfg(feature = "stylos")]
-    RemoteEvent(String),
+    RemoteEvent {
+        agent_id: Option<String>,
+        text: String,
+    },
     TurnDone {
+        agent_id: Option<String>,
         summary: String,
         stats: String,
     },
@@ -190,6 +202,38 @@ const TOOL_DETAIL_MAX_CHARS: usize = 60;
 const TOOL_DETAIL_CENTER_TRIM_MARKER: &str = "󱑼";
 const CTRL_C_EXIT_CONFIRM_WINDOW: Duration = Duration::from_secs(3);
 const CONTEXT_HISTORY_TURN_DISPLAY_MAX_AGE: usize = 10;
+
+fn agent_tag_color(index: usize) -> Color {
+    const PALETTE: [Color; 6] = [
+        Color::Cyan,
+        Color::Yellow,
+        Color::Green,
+        Color::Magenta,
+        Color::Blue,
+        Color::LightRed,
+    ];
+    PALETTE[index % PALETTE.len()]
+}
+
+fn agent_tag_style(agent_id: &str, agents: &[AgentHandle]) -> Style {
+    let index = agents
+        .iter()
+        .position(|handle| handle.agent_id == agent_id)
+        .unwrap_or(0);
+    Style::default()
+        .fg(agent_tag_color(index))
+        .add_modifier(Modifier::BOLD)
+}
+
+fn agent_tag_spans(agent_id: Option<&str>, agents: &[AgentHandle]) -> Vec<Span<'static>> {
+    match agent_id {
+        Some(agent_id) => vec![
+            Span::raw("  "),
+            Span::styled(format!("[{agent_id}] "), agent_tag_style(agent_id, agents)),
+        ],
+        None => vec![Span::raw("  ")],
+    }
+}
 
 fn center_trim(s: &str, max: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
@@ -361,6 +405,13 @@ fn format_context_report(report: &PromptContextReport) -> Vec<String> {
 
 fn self_session_id_fallback() -> String {
     "session-bound".to_string()
+}
+
+fn agent_id_for_session(agents: &[AgentHandle], sid: Uuid) -> Option<String> {
+    agents
+        .iter()
+        .find(|handle| handle.session_id == sid)
+        .map(|handle| handle.agent_id.clone())
 }
 
 fn split_tool_call_detail(name: &str, args_json: &str) -> (String, Option<String>) {
@@ -1016,37 +1067,49 @@ impl App {
             Entry::Blank,
             Entry::Banner(art.to_string()),
             Entry::Blank,
-            Entry::Assistant(format!(
-                "version: {}  |  profile: {}  |  model: {}",
-                env!("CARGO_PKG_VERSION"),
-                session.active_profile,
-                session.model,
-            )),
-            Entry::Assistant(format!("project directory: {}", project_display)),
-            Entry::Assistant(
-                "type /config to change settings, /exit to quit, Alt-t transcript review"
+            Entry::Assistant {
+                agent_id: None,
+                text: format!(
+                    "version: {}  |  profile: {}  |  model: {}",
+                    env!("CARGO_PKG_VERSION"),
+                    session.active_profile,
+                    session.model,
+                ),
+            },
+            Entry::Assistant {
+                agent_id: None,
+                text: format!("project directory: {}", project_display),
+            },
+            Entry::Assistant {
+                agent_id: None,
+                text: "type /config to change settings, /exit to quit, Alt-t transcript review"
                     .to_string(),
-            ),
+            },
             Entry::Blank,
         ];
 
         #[cfg(feature = "stylos")]
         if let Some(handle) = stylos.as_ref() {
             match handle.state() {
-                StylosRuntimeState::Off => {
-                    initial_entries.push(Entry::Status("stylos disabled".to_string()))
-                }
+                StylosRuntimeState::Off => initial_entries.push(Entry::Status {
+                    agent_id: None,
+                    text: "stylos disabled".to_string(),
+                }),
                 StylosRuntimeState::Active {
                     mode,
                     realm,
                     instance,
-                } => initial_entries.push(Entry::Status(format!(
-                    "stylos ready: mode={} realm={} instance={}",
-                    mode, realm, instance
-                ))),
-                StylosRuntimeState::Error(err) => {
-                    initial_entries.push(Entry::Status(format!("stylos start failed: {}", err)))
-                }
+                } => initial_entries.push(Entry::Status {
+                    agent_id: None,
+                    text: format!(
+                        "stylos ready: mode={} realm={} instance={}",
+                        mode, realm, instance
+                    ),
+                }),
+                StylosRuntimeState::Error(err) => initial_entries.push(Entry::Status {
+                    agent_id: None,
+                    text: format!("stylos start failed: {}", err),
+                }),
             }
             initial_entries.push(Entry::Blank);
         }
@@ -1301,16 +1364,20 @@ impl App {
         if let Some(cancel) = &self.active_turn_cancellation {
             if !cancel.is_interrupted() {
                 cancel.interrupt();
-                self.push(Entry::Status("interrupt requested".to_string()));
+                self.push(Entry::Status {
+                    agent_id: None,
+                    text: "interrupt requested".to_string(),
+                });
             }
         }
     }
 
     fn arm_ctrl_c_exit(&mut self) {
         self.ctrl_c_exit_armed_until = Some(Instant::now() + CTRL_C_EXIT_CONFIRM_WINDOW);
-        self.push(Entry::Status(
-            "Press Ctrl+C again within 3s to exit".to_string(),
-        ));
+        self.push(Entry::Status {
+            agent_id: None,
+            text: "Press Ctrl+C again within 3s to exit".to_string(),
+        });
         self.mark_dirty_status();
     }
 
@@ -1592,14 +1659,18 @@ impl App {
                 self.stream_chunks += 1;
                 self.stream_chars += chunk.chars().count() as u64;
                 self.set_agent_activity(AgentActivity::StreamingResponse);
+                let agent_id = agent_id_for_session(&self.agents, sid);
                 match self.streaming_idx {
                     Some(i) => {
-                        if let Some(Entry::Assistant(ref mut text)) = self.entries.get_mut(i) {
+                        if let Some(Entry::Assistant { text, .. }) = self.entries.get_mut(i) {
                             text.push_str(&chunk);
                         }
                     }
                     None => {
-                        self.push(Entry::Assistant(chunk));
+                        self.push(Entry::Assistant {
+                            agent_id,
+                            text: chunk,
+                        });
                         self.streaming_idx = Some(self.entries.len() - 1);
                     }
                 }
@@ -1611,7 +1682,10 @@ impl App {
                 }
                 self.streaming_idx = None;
                 self.clear_agent_activity();
-                self.push(Entry::Assistant(text));
+                self.push(Entry::Assistant {
+                    agent_id: agent_id_for_session(&self.agents, sid),
+                    text,
+                });
             }
             AgentEvent::ToolStart {
                 name,
@@ -1627,7 +1701,11 @@ impl App {
                     None => detail.clone(),
                 };
                 self.set_agent_activity(AgentActivity::RunningTool(activity_detail));
-                self.push(Entry::ToolCall { detail, reason });
+                self.push(Entry::ToolCall {
+                    agent_id: agent_id_for_session(&self.agents, sid),
+                    detail,
+                    reason,
+                });
             }
             AgentEvent::ToolEnd => {
                 self.push(Entry::ToolDone);
@@ -1636,7 +1714,10 @@ impl App {
                 self.set_agent_activity(AgentActivity::WaitingAfterTool);
             }
             AgentEvent::Status(text) => {
-                self.push(Entry::Status(text));
+                self.push(Entry::Status {
+                    agent_id: agent_id_for_session(&self.agents, sid),
+                    text,
+                });
             }
             AgentEvent::WorkflowStateChanged(state) => {
                 self.workflow_state = state;
@@ -1691,6 +1772,7 @@ impl App {
                     .unwrap_or(&stats_text)
                     .to_string();
                 self.push(Entry::TurnDone {
+                    agent_id: agent_id_for_session(&self.agents, sid),
                     summary: if interrupted {
                         "󰇺 Turn interrupted".to_string()
                     } else {
@@ -1732,7 +1814,10 @@ impl App {
         let Some(Entry::ToolDone) = self.entries.last() else {
             return;
         };
-        let Some(Entry::ToolCall { detail, reason: _ }) = self.entries.iter().rev().nth(1) else {
+        let Some(Entry::ToolCall {
+            detail, reason: _, ..
+        }) = self.entries.iter().rev().nth(1)
+        else {
             return;
         };
         let Some(handle) = self.stylos.as_ref() else {
@@ -1745,10 +1830,10 @@ impl App {
 
         if detail.starts_with("stylos_request_talk") {
             if let Some(target) = extract_stylos_talk_target_from_detail(detail) {
-                self.push(Entry::RemoteEvent(format!(
-                    "Stylos talk to={} from={}",
-                    target, local_instance,
-                )));
+                self.push(Entry::RemoteEvent {
+                    agent_id: None,
+                    text: format!("Stylos talk to={} from={}", target, local_instance),
+                });
             }
             return;
         }
@@ -1759,10 +1844,13 @@ impl App {
             } else {
                 "create local"
             };
-            self.push(Entry::RemoteEvent(format!(
-                "board_create_note {} from={} detail={}",
-                mode, local_instance, detail
-            )));
+            self.push(Entry::RemoteEvent {
+                agent_id: None,
+                text: format!(
+                    "board_create_note {} from={} detail={}",
+                    mode, local_instance, detail
+                ),
+            });
         }
     }
 
@@ -1971,7 +2059,10 @@ impl App {
             }
             self.agent_busy = true;
             self.set_agent_activity(AgentActivity::LoginStarting);
-            self.push(Entry::Assistant("logging in to OpenAI Codex…".to_string()));
+            self.push(Entry::Assistant {
+                agent_id: None,
+                text: "logging in to OpenAI Codex…".to_string(),
+            });
             let tx = app_tx.clone();
             self.background_domain().spawn(async move {
                 match crate::login_codex::start_device_flow().await {
@@ -2049,9 +2140,11 @@ impl App {
                 self.set_agent_activity(AgentActivity::RunningTool(
                     "semantic-memory index pending".to_string(),
                 ));
-                self.push(Entry::Assistant(
-                    "indexing missing or pending Project Memory semantic embeddings…".to_string(),
-                ));
+                self.push(Entry::Assistant {
+                    agent_id: None,
+                    text: "indexing missing or pending Project Memory semantic embeddings…"
+                        .to_string(),
+                });
                 let tx = app_tx.clone();
                 let db = self.db.clone();
                 self.background_domain().spawn(async move {
@@ -2094,10 +2187,11 @@ impl App {
                 self.set_agent_activity(AgentActivity::RunningTool(
                     "semantic-memory full reindex".to_string(),
                 ));
-                self.push(Entry::Assistant(
-                    "rebuilding all stale or missing Project Memory semantic embeddings…"
+                self.push(Entry::Assistant {
+                    agent_id: None,
+                    text: "rebuilding all stale or missing Project Memory semantic embeddings…"
                         .to_string(),
-                ));
+                });
                 let tx = app_tx.clone();
                 let db = self.db.clone();
                 self.background_domain().spawn(async move {
@@ -2525,7 +2619,10 @@ impl App {
         self.push(Entry::User(format!("!{}", command)));
 
         if command.is_empty() {
-            self.push(Entry::Assistant("empty shell command".to_string()));
+            self.push(Entry::Assistant {
+                agent_id: None,
+                text: "empty shell command".to_string(),
+            });
             self.push(Entry::Blank);
             return;
         }
@@ -2631,7 +2728,10 @@ impl App {
             let output = self.handle_command(&text, app_tx);
             self.push(Entry::User(text));
             for line in output {
-                self.push(Entry::Assistant(line));
+                self.push(Entry::Assistant {
+                    agent_id: None,
+                    text: line,
+                });
             }
             self.push(Entry::Blank);
             self.mark_dirty_input();
@@ -2674,7 +2774,10 @@ impl App {
                                 sender, sender_agent, target_instance, target_agent
                             )
                         };
-                        self.push(Entry::RemoteEvent(message));
+                        self.push(Entry::RemoteEvent {
+                            agent_id: None,
+                            text: message,
+                        });
                         if let (Some(handle), Some(task_id)) =
                             (self.stylos.as_ref(), request.task_id.clone())
                         {
@@ -2761,7 +2864,10 @@ impl App {
             return;
         };
         self.watchdog_state.set_pending_watchdog_note(true);
-        self.push(Entry::RemoteEvent(action.log_line));
+        self.push(Entry::RemoteEvent {
+            agent_id: action.request.agent_id.clone(),
+            text: action.log_line,
+        });
         self.agents[agent_index].active_incoming_prompt = Some(action.request.clone());
         self.watchdog_state.set_active_incoming_prompt(true);
         self.submit_text(action.request.prompt, app_tx);
@@ -2787,10 +2893,16 @@ impl App {
                 self.submit_text(prompt, app_tx);
             }
             BoardTurnFollowUp::EmitDoneMention { log_line } => {
-                self.push(Entry::RemoteEvent(log_line));
+                self.push(Entry::RemoteEvent {
+                    agent_id: None,
+                    text: log_line,
+                });
             }
             BoardTurnFollowUp::EmitDoneMentionError { status_line } => {
-                self.push(Entry::Status(status_line));
+                self.push(Entry::Status {
+                    agent_id: None,
+                    text: status_line,
+                });
             }
         }
     }
@@ -2866,10 +2978,10 @@ impl App {
         frame_requester: &FrameRequester,
     ) {
         self.set_agent_activity(AgentActivity::WaitingForLoginBrowser);
-        self.push(Entry::Assistant(format!(
-            "open {} and enter code {}",
-            verification_uri, user_code
-        )));
+        self.push(Entry::Assistant {
+            agent_id: None,
+            text: format!("open {} and enter code {}", verification_uri, user_code),
+        });
         self.request_draw(frame_requester);
     }
 
@@ -2935,10 +3047,10 @@ impl App {
             Ok(auth) => {
                 self.clear_agent_activity();
                 if let Err(e) = crate::auth_store::save(&auth) {
-                    self.push(Entry::Assistant(format!(
-                        "warning: failed to save auth: {}",
-                        e
-                    )));
+                    self.push(Entry::Assistant {
+                        agent_id: None,
+                        text: format!("warning: failed to save auth: {}", e),
+                    });
                 }
                 self.session.profiles.insert(
                     "codex".to_string(),
@@ -2952,10 +3064,10 @@ impl App {
                 self.session.switch_profile("codex");
                 if let Err(e) = save_profiles(&self.session.active_profile, &self.session.profiles)
                 {
-                    self.push(Entry::Assistant(format!(
-                        "warning: failed to save config: {}",
-                        e
-                    )));
+                    self.push(Entry::Assistant {
+                        agent_id: None,
+                        text: format!("warning: failed to save config: {}", e),
+                    });
                 }
                 match build_replacement_main_agent(AgentReplacementParams {
                     session: &self.session,
@@ -2972,20 +3084,23 @@ impl App {
                     Ok((mut new_agent, new_session_id)) => {
                         new_agent.refresh_model_info().await;
                         self.replace_master_agent(new_agent, new_session_id);
-                        self.push(Entry::Assistant(format!(
-                            "logged in as {} — switched to codex profile (gpt-5.4)",
-                            auth.account_id
-                        )));
+                        self.push(Entry::Assistant {
+                            agent_id: None,
+                            text: format!(
+                                "logged in as {} — switched to codex profile (gpt-5.4)",
+                                auth.account_id
+                            ),
+                        });
                         self.push(Entry::Blank);
                         self.agent_busy = false;
                         self.mark_dirty_all();
                         self.request_draw(frame_requester);
                     }
                     Err(e) => {
-                        self.push(Entry::Assistant(format!(
-                            "login succeeded but agent build failed: {}",
-                            e
-                        )));
+                        self.push(Entry::Assistant {
+                            agent_id: None,
+                            text: format!("login succeeded but agent build failed: {}", e),
+                        });
                         self.agent_busy = false;
                         self.mark_dirty_all();
                         self.request_draw(frame_requester);
@@ -2994,7 +3109,10 @@ impl App {
             }
             Err(e) => {
                 self.clear_agent_activity();
-                self.push(Entry::Assistant(format!("login failed: {}", e)));
+                self.push(Entry::Assistant {
+                    agent_id: None,
+                    text: format!("login failed: {}", e),
+                });
                 self.agent_busy = false;
                 self.mark_dirty_all();
                 self.request_draw(frame_requester);
@@ -3051,10 +3169,16 @@ impl App {
         #[cfg(feature = "stylos")]
         self.watchdog_state.set_pending_watchdog_note(false);
         self.clear_agent_activity();
-        self.push(Entry::Assistant(output));
+        self.push(Entry::Assistant {
+            agent_id: None,
+            text: output,
+        });
         if let Some(code) = exit_code {
             if code != 0 {
-                self.push(Entry::Assistant(format!("exit code: {}", code)));
+                self.push(Entry::Assistant {
+                    agent_id: None,
+                    text: format!("exit code: {}", code),
+                });
             }
         }
         self.push(Entry::Blank);
@@ -3069,10 +3193,17 @@ impl App {
         cmd: crate::stylos::StylosCmdRequest,
         app_tx: &mpsc::UnboundedSender<AppEvent>,
     ) {
-        self.push(Entry::RemoteEvent(format!(
-            "Stylos cmd scope=local preview={}",
-            cmd.prompt.lines().next().unwrap_or("")
-        )));
+        self.push(Entry::RemoteEvent {
+            agent_id: self
+                .agents
+                .iter()
+                .find(|h| is_interactive_handle(h))
+                .map(|h| h.agent_id.clone()),
+            text: format!(
+                "Stylos cmd scope=local preview={}",
+                cmd.prompt.lines().next().unwrap_or("")
+            ),
+        });
         if let Some(index) = self.agents.iter().position(is_interactive_handle) {
             self.agents[index].active_incoming_prompt = None;
         }
@@ -3085,7 +3216,10 @@ impl App {
 
     #[cfg(feature = "stylos")]
     pub(crate) fn handle_stylos_event_text(&mut self, text: String) {
-        self.push(Entry::RemoteEvent(text));
+        self.push(Entry::RemoteEvent {
+            agent_id: None,
+            text,
+        });
     }
 
     #[cfg(feature = "stylos")]
@@ -3104,10 +3238,13 @@ impl App {
             let sender_agent = request.from_agent_id.as_deref().unwrap_or("unknown");
             let target_instance = request.to.as_deref().unwrap_or("unknown target");
             let target_agent = request.to_agent_id.as_deref().unwrap_or(target.as_str());
-            self.push(Entry::RemoteEvent(format!(
-                "Stylos hear from={} from_agent_id={} to={} to_agent_id={} rejected: target agent missing locally",
-                sender, sender_agent, target_instance, target_agent
-            )));
+            self.push(Entry::RemoteEvent {
+                agent_id: Some(target.clone()),
+                text: format!(
+                    "Stylos hear from={} from_agent_id={} to={} to_agent_id={} rejected: target agent missing locally",
+                    sender, sender_agent, target_instance, target_agent
+                ),
+            });
             if let (Some(handle), Some(task_id)) = (self.stylos.as_ref(), request.task_id.clone()) {
                 let query_context = handle.query_context();
                 self.background_domain().spawn(async move {
@@ -3128,15 +3265,21 @@ impl App {
             let target_agent = request.to_agent_id.as_deref().unwrap_or(target.as_str());
             if request.prompt.starts_with("type=stylos_note ") {
                 let note_identifier = stylos_note_display_identifier(&request.prompt);
-                self.push(Entry::RemoteEvent(format!(
-                    "Board note intake {} from={} from_agent_id={} to={} to_agent_id={} deferred: local agent busy",
-                    note_identifier, sender, sender_agent, target_instance, target_agent
-                )));
+                self.push(Entry::RemoteEvent {
+                    agent_id: Some(target.clone()),
+                    text: format!(
+                        "Board note intake {} from={} from_agent_id={} to={} to_agent_id={} deferred: local agent busy",
+                        note_identifier, sender, sender_agent, target_instance, target_agent
+                    ),
+                });
             } else {
-                self.push(Entry::RemoteEvent(format!(
-                    "Stylos hear from={} from_agent_id={} to={} to_agent_id={} rejected: local agent busy",
-                    sender, sender_agent, target_instance, target_agent
-                )));
+                self.push(Entry::RemoteEvent {
+                    agent_id: Some(target.clone()),
+                    text: format!(
+                        "Stylos hear from={} from_agent_id={} to={} to_agent_id={} rejected: local agent busy",
+                        sender, sender_agent, target_instance, target_agent
+                    ),
+                });
             }
             if let (Some(handle), Some(task_id)) = (self.stylos.as_ref(), request.task_id.clone()) {
                 let query_context = handle.query_context();
@@ -3156,15 +3299,21 @@ impl App {
                 let note_identifier = stylos_note_display_identifier(&request.prompt);
                 let column =
                     stylos_note_header_value(&request.prompt, "column").unwrap_or("unknown");
-                self.push(Entry::RemoteEvent(format!(
-                    "Board note intake {} from={} from_agent_id={} to={} to_agent_id={} column={}",
-                    note_identifier, sender, sender_agent, target_instance, target_agent, column
-                )));
+                self.push(Entry::RemoteEvent {
+                    agent_id: Some(target.clone()),
+                    text: format!(
+                        "Board note intake {} from={} from_agent_id={} to={} to_agent_id={} column={}",
+                        note_identifier, sender, sender_agent, target_instance, target_agent, column
+                    ),
+                });
             } else {
-                self.push(Entry::RemoteEvent(format!(
-                    "Stylos hear from={} from_agent_id={} to={} to_agent_id={}",
-                    sender, sender_agent, target_instance, target_agent
-                )));
+                self.push(Entry::RemoteEvent {
+                    agent_id: Some(target.clone()),
+                    text: format!(
+                        "Stylos hear from={} from_agent_id={} to={} to_agent_id={}",
+                        sender, sender_agent, target_instance, target_agent
+                    ),
+                });
             }
             self.agents[agent_index].active_incoming_prompt = Some(request.clone());
             self.watchdog_state.set_active_incoming_prompt(true);
@@ -3375,7 +3524,11 @@ pub(crate) fn dispatch_terminal_event(
     app_tx.send(app_event).is_ok()
 }
 
-fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Line<'a>> {
+fn build_lines<'a>(
+    entries: &'a [Entry],
+    pending: &'a Option<String>,
+    agents: &'a [AgentHandle],
+) -> Vec<Line<'a>> {
     let mut lines: Vec<Line> = Vec::new();
 
     for entry in entries {
@@ -3402,20 +3555,21 @@ fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Lin
                     ]));
                 }
             }
-            Entry::Assistant(text) => {
+            Entry::Assistant { agent_id, text } => {
                 for part in text.lines() {
-                    lines.push(Line::from(vec![
-                        Span::raw("  "),
-                        Span::raw(part.to_string()),
-                    ]));
+                    let mut spans = agent_tag_spans(agent_id.as_deref(), agents);
+                    spans.push(Span::raw(part.to_string()));
+                    lines.push(Line::from(spans));
                 }
             }
             #[cfg(feature = "stylos")]
-            Entry::RemoteEvent(text) => {
-                lines.push(Line::from(vec![Span::styled(
-                    format!("  󰀂 {}", text),
+            Entry::RemoteEvent { agent_id, text } => {
+                let mut spans = agent_tag_spans(agent_id.as_deref(), agents);
+                spans.push(Span::styled(
+                    format!("󰀂 {}", text),
                     Style::default().fg(Color::Magenta),
-                )]));
+                ));
+                lines.push(Line::from(spans));
             }
             Entry::Banner(text) => {
                 for part in text.lines() {
@@ -3427,46 +3581,59 @@ fn build_lines<'a>(entries: &'a [Entry], pending: &'a Option<String>) -> Vec<Lin
                     )]));
                 }
             }
-            Entry::ToolCall { detail, reason } => {
-                lines.push(Line::from(vec![
-                    Span::styled("   ", Style::default().fg(Color::Yellow)),
-                    Span::styled(detail.clone(), Style::default().fg(Color::Yellow)),
-                ]));
+            Entry::ToolCall {
+                agent_id,
+                detail,
+                reason,
+            } => {
+                let mut spans = agent_tag_spans(agent_id.as_deref(), agents);
+                spans.push(Span::styled(" ", Style::default().fg(Color::Yellow)));
+                spans.push(Span::styled(
+                    detail.clone(),
+                    Style::default().fg(Color::Yellow),
+                ));
+                lines.push(Line::from(spans));
                 if let Some(reason) = reason {
-                    lines.push(Line::from(vec![
-                        Span::raw("    "),
-                        Span::styled(reason.clone(), Style::default().fg(Color::DarkGray)),
-                    ]));
+                    let mut spans = agent_tag_spans(agent_id.as_deref(), agents);
+                    spans.push(Span::styled(
+                        reason.clone(),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                    lines.push(Line::from(spans));
                 }
             }
-            Entry::Status(text) => {
-                lines.push(Line::from(vec![Span::styled(
-                    format!("  󰇺 {}", text),
+            Entry::Status { agent_id, text } => {
+                let mut spans = agent_tag_spans(agent_id.as_deref(), agents);
+                spans.push(Span::styled(
+                    format!("󰇺 {}", text),
                     Style::default().fg(Color::DarkGray),
-                )]));
+                ));
+                lines.push(Line::from(spans));
             }
-            Entry::ToolDone => {
+            Entry::ToolDone { .. } => {
                 if let Some(last) = lines.last_mut() {
                     let mut spans = last.spans.clone();
                     spans.push(Span::styled("  ✓", Style::default().fg(Color::Green)));
                     *last = Line::from(spans);
                 }
             }
-            Entry::TurnDone { summary, stats } => {
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled("", Style::default().fg(Color::Green)),
-                    Span::styled(
-                        summary.to_string(),
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!(" [stats: {}]", stats),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]));
+            Entry::TurnDone {
+                agent_id,
+                summary,
+                stats,
+            } => {
+                let mut spans = agent_tag_spans(agent_id.as_deref(), agents);
+                spans.push(Span::styled(
+                    summary.to_string(),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    format!(" [stats: {}]", stats),
+                    Style::default().fg(Color::DarkGray),
+                ));
+                lines.push(Line::from(spans));
             }
             Entry::Stats(s) => {
                 lines.push(Line::from(vec![Span::styled(
@@ -3548,7 +3715,7 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
         ])
         .split(area);
 
-    let lines = build_lines(&app.entries, &app.pending);
+    let lines = build_lines(&app.entries, &app.pending, &app.agents);
     let height = chunks[0].height as usize;
     let width = chunks[0].width;
 
@@ -3675,7 +3842,7 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan));
         let review_inner = review_block.inner(review);
-        let review_lines = build_lines(&app.entries, &None);
+        let review_lines = build_lines(&app.entries, &None, &app.agents);
         let review_para = Paragraph::new(review_lines)
             .wrap(Wrap { trim: false })
             .block(review_block);
@@ -3716,8 +3883,8 @@ pub(crate) fn current_total_and_height(
         .map(|s| Rect::new(0, 0, s.width, s.height))
         .unwrap_or(Rect::new(0, 0, 80, 24));
     let lines = match app.review_mode {
-        ReviewMode::Transcript => build_lines(&app.entries, &None),
-        ReviewMode::Closed => build_lines(&app.entries, &app.pending),
+        ReviewMode::Transcript => build_lines(&app.entries, &None, &app.agents),
+        ReviewMode::Closed => build_lines(&app.entries, &app.pending, &app.agents),
     };
     let area = if app.review_mode == ReviewMode::Transcript {
         review_area(size)

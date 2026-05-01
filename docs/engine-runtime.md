@@ -54,7 +54,7 @@ That same core prompt-analysis path now also powers the TUI-local `/context` com
 
 `themion-core::Agent` owns per-agent harness state such as session ID, project directory, workflow state, messages, and model/backend integration. `themion-cli` owns process-local descriptors such as `agent_id`, `label`, and `roles` that describe how a given core agent is used within one Themion process.
 
-This keeps reusable harness behavior in core while allowing the CLI to publish process-level multi-agent status for Stylos.
+This keeps reusable harness behavior in core while allowing the CLI to publish process-level multi-agent status for Stylos. The first PRD-081 implementation slice extends that boundary: `themion-core` now exposes `local_agent_create` and `local_agent_delete` as tools, but actual roster mutation remains CLI-local because `themion-cli` owns the in-process `Vec<AgentHandle>` plus local agent construction and removal.
 
 ## CLI-local runtime domains
 
@@ -145,6 +145,28 @@ process
    └─ spawn_blocking worker threads
 ```
 
+## Local agent membership tools
+
+Themion now exposes two local team-membership tools through the normal tool surface:
+
+- `local_agent_create`
+- `local_agent_delete`
+
+Current behavior:
+
+- `local_agent_create` accepts optional `agent_id`, optional `label`, and optional `roles`
+- when `agent_id` is omitted, the CLI runtime allocates the next free `smith-N` worker id in the current local roster
+- `master` remains reserved for the predefined leader and cannot be recreated through the tool
+- the current implementation rejects duplicate ids, another `master`, and another `interactive` role
+- `local_agent_delete` accepts a target `agent_id` for a non-leader local agent
+- deleting `master` is rejected
+- deleting while the local runtime is busy is currently rejected explicitly rather than deferred
+- successful create/delete operations mutate the active in-memory roster immediately, so local targeting and runtime inspection stay aligned with the changed roster
+
+This is intentionally a local-runtime management slice, not yet a full parallel orchestration layer. The current TUI/runtime path still uses one global busy gate for active turns, so multiple local agents can exist and be targeted, but they do not yet execute concurrent local turns in one process.
+
+The TUI transcript layer now also carries explicit local-agent attribution for visible runtime entries. When the CLI knows which local `agent_id` produced or owned a transcript item, it stores that attribution in the TUI entry model and renders a compact highlighted `[agent_id]` prefix using a small deterministic roster-order color palette. In the current implementation, assistant replies, tool lines, status lines, remote intake/event lines, and turn-complete lines may be agent-tagged; ordinary local user-input lines remain untagged because they represent the shared operator, and genuinely process-level lines remain neutral rather than being forced onto one local agent.
+
 ## Stylos remote-request bridge
 
 Shared CLI bootstrap now lives in `crates/themion-cli/src/app_state.rs`, which resolves the project directory, opens the local DB, inserts the session row, builds `Session`, and exposes shared agent-construction helpers used by TUI mode, explicit `--headless` mode, and non-interactive prompt execution. `main.rs` stays thin and only selects which runner to invoke.
@@ -198,7 +220,7 @@ The current Stylos bridge validates requested `agent_id` values against the expo
 
 That means:
 
-- strict local `agent_id` execution targeting has landed for the current process-local agent set
+- strict local `agent_id` execution targeting has landed for the current process-local agent set, including dynamically created non-leader local agents in the active runtime
 - the query layer still relies on snapshot-based selection and a CLI-local in-process bridge rather than a durable scheduler
 - this preserves the current harness architecture while still making the query and task surface useful for discovery, request submission, and best-effort status lookup
 
