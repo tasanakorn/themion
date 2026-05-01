@@ -123,6 +123,9 @@ Typical feature checks for `themion-cli`:
 - In Testing, write each outcome as `step → verify:`.
 - For major design choices, include a brief inline `Alternative considered` note in the relevant design subsection instead of adding a standalone alternatives section.
 - Keep PRDs centered on product requirements and intended behavior, not only engineering tactics.
+- Write PRDs in terms of what the product must do, not around placeholder example tokens or temporary shorthand unless the literal token is itself the requirement.
+- If discussion includes an example marker or sketch such as `[xxxx]`, verify whether it is the real requirement or only a shorthand for a broader product distinction before baking it into the PRD.
+- When a user correction changes the intent of a PRD, rewrite the PRD around the corrected product requirement instead of merely patching the old framing.
 - When a PRD is phased, preserve the overall product outcome and make phases describe delivery slices beneath it rather than replacing it with "Phase 1" as the effective goal.
 - Treat implemented PRDs as historical specs/contracts, not living design docs.
 - Do not modify an implemented PRD unless the user explicitly instructs it.
@@ -189,6 +192,8 @@ When implementing an existing PRD, do not consider the task complete until you h
 - When implementing a PRD, automatically consider whether the work should include a version bump, and if the PRD already names a target version, treat bumping to that version as the default expectation.
 - When a task includes a version bump, validate after the bump too; do not assume pre-bump checks are sufficient for version-sensitive behavior.
 - When revising phased PRDs, keep the overall product outcome visible so the document does not collapse into a phase-only implementation plan.
+- When writing or revising a PRD, state the product requirement directly and do not silently promote placeholder discussion tokens into the requirement itself.
+- If the user corrects the framing of a PRD, rewrite the document around the corrected product intent rather than preserving misleading earlier wording.
 
 ## When updating docs
 

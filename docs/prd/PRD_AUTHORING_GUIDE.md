@@ -144,6 +144,7 @@ Rules:
 - Ground this section in existing docs first.
 - If the work is phased, explain the overall product motivation before narrowing to the current implementation slice.
 - Keep this section short by default. Explain the problem, why it matters, and why now; avoid long historical retellings unless they affect the decision.
+- Use history or prior discussion only to clarify the product problem or decision boundaries; do not let transcript archaeology replace a clear statement of the product issue.
 
 ### Design
 - Describe the proposed behavior and structure.
@@ -153,6 +154,9 @@ Rules:
   - `**Alternative considered:** <option>. Rejected: <reason>.`
 - Do not add a standalone `Alternatives` section.
 - Make each subsection easy to review: state what changes, what stays the same, and why this choice was made.
+- Prefer requirements phrased as what the product must do over placeholder tokens, temporary shorthand, or speculative implementation wording.
+- If an example token or sketch appears in discussion, verify whether it is the actual requirement or only shorthand before baking it into the PRD.
+- When a user correction narrows or reframes the intent, rewrite the PRD around the corrected product requirement rather than merely patching the old wording.
 
 ### Changes by Component
 - Use a table.
@@ -205,6 +209,7 @@ Match the style of neighboring PRDs:
 - Prefer bullets, compact paragraphs, and tables over long narrative blocks when they communicate the same information.
 - Do not repeat the same point across Summary, Goals, Background, and Design unless the later section adds new decision-relevant detail.
 - If detailed evidence is needed, prefer a short synthesis in the main body and move the supporting detail to an appendix or technical note.
+- Prefer naming the user-visible distinction or product behavior directly instead of anchoring the PRD around placeholder markers such as `[xxxx]` unless the literal marker itself is truly the requirement.
 
 The finished PRD should look visually consistent with nearby PRDs in `docs/prd/`.
 
@@ -228,6 +233,8 @@ Before finishing:
 - Summary leads with the product problem/outcome before implementation tactics.
 - Top-level sections follow the required order.
 - Goals still describe the product requirement or user/problem outcome, not only the current implementation phase.
+- Background explains the actual product problem, not just the transcript history of how the wording evolved.
+- Design states what the product must do and does not silently promote placeholder examples into requirements.
 - If the PRD is phased, the overall product intent remains visible and the current phase is clearly identified.
 - Empty sections were omitted.
 - Major design choices include inline `Alternative considered` notes.
