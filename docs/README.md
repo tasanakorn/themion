@@ -94,3 +94,4 @@ Start PRD authoring with [prd/PRD_AUTHORING_GUIDE.md](prd/PRD_AUTHORING_GUIDE.md
 | PRD-080 | [Rename the Primary Agent Identity from `main` to `master`](prd/prd-080-rename-primary-agent-main-to-master.md) | Implemented | v0.52.0 | `themion-core`, `themion-cli`, docs |
 | PRD-081 | [Single-Instance Multi-Agent Team Structure and Agent Membership Tools](prd/prd-081-single-instance-multi-agent-team-structure-and-agent-membership-tools.md) | Implemented | v0.53.0 | `themion-core`, `themion-cli`, docs |
 | PRD-082 | [Multi-Agent TUI Agent-Tagged Transcript and Event Highlighting](prd/prd-082-multi-agent-tui-agent-tagged-transcript.md) | Implemented | v0.54.0 | `themion-cli`, docs |
+| PRD-083 | [Concurrent Local Agent Harness Execution and Independent Watchdog Scheduling](prd/prd-083-concurrent-local-agent-harness-and-independent-watchdog.md) | Implemented | v0.54.0 | `themion-core`, `themion-cli`, docs |

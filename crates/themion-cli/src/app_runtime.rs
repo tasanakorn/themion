@@ -1,6 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use std::time::Duration;
+
+#[cfg(feature = "stylos")]
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
 use themion_core::agent::Agent;
 use themion_core::client_codex::ApiCallRateLimitReport;
 use themion_core::db::DbHandle;
@@ -13,6 +18,13 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::tui::{AppEvent, LocalAgentManagementRequest};
+#[cfg(feature = "stylos")]
+use crate::board_runtime::{
+    resolve_pending_board_note_injection, BoardInjectionAction, LocalBoardClaimRegistry,
+    WATCHDOG_IDLE_DELAY_MS_DEFAULT,
+};
+#[cfg(feature = "stylos")]
+use crate::runtime_domains::DomainHandle;
 use crate::Session;
 
 pub(crate) fn build_local_agent_tool_invoker(
@@ -339,6 +351,7 @@ fn create_local_agent(
         label: label.clone(),
         roles: roles.clone(),
         busy: false,
+        turn_cancellation: None,
         #[cfg(feature = "stylos")]
         active_incoming_prompt: None,
     });
@@ -385,4 +398,129 @@ fn delete_local_agent(
         "session_id": removed.session_id.to_string(),
     })
     .to_string())
+}
+
+#[cfg(feature = "stylos")]
+#[derive(Default)]
+pub(crate) struct WatchdogRuntimeState {
+    idle_started_at_ms: AtomicU64,
+    active_incoming_prompt: AtomicBool,
+    pending_watchdog_note: AtomicBool,
+}
+
+#[cfg(feature = "stylos")]
+impl WatchdogRuntimeState {
+    pub(crate) fn set_idle_started_now(&self) {
+        self.idle_started_at_ms
+            .store(unix_epoch_now_ms(), Ordering::Relaxed);
+    }
+
+    pub(crate) fn clear_idle_started(&self) {
+        self.idle_started_at_ms.store(0, Ordering::Relaxed);
+    }
+
+    fn idle_started_at_ms(&self) -> Option<u64> {
+        let value = self.idle_started_at_ms.load(Ordering::Relaxed);
+        (value != 0).then_some(value)
+    }
+
+    pub(crate) fn set_active_incoming_prompt(&self, active: bool) {
+        self.active_incoming_prompt.store(active, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_pending_watchdog_note(&self, pending: bool) {
+        self.pending_watchdog_note.store(pending, Ordering::Relaxed);
+    }
+
+    pub(crate) fn pending_watchdog_note(&self) -> bool {
+        self.pending_watchdog_note.load(Ordering::Relaxed)
+    }
+
+    fn should_trigger_watchdog_note(&self, now_ms: u64, idle_delay_ms: u64) -> bool {
+        if self.active_incoming_prompt.load(Ordering::Relaxed) {
+            return false;
+        }
+        let Some(idle_started_at_ms) = self.idle_started_at_ms() else {
+            return false;
+        };
+        now_ms.saturating_sub(idle_started_at_ms) >= idle_delay_ms
+    }
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn start_watchdog_task(
+    background_domain: &DomainHandle,
+    app_tx: mpsc::UnboundedSender<AppEvent>,
+    runtime_state: Arc<WatchdogRuntimeState>,
+) {
+    background_domain.spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(250));
+        loop {
+            interval.tick().await;
+            let now_ms = unix_epoch_now_ms();
+            if !runtime_state.should_trigger_watchdog_note(now_ms, WATCHDOG_IDLE_DELAY_MS_DEFAULT)
+            {
+                continue;
+            }
+            if app_tx.send(AppEvent::WatchdogPoll).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+
+#[cfg(feature = "stylos")]
+pub(crate) struct WatchdogDispatchSelection {
+    pub(crate) agent_index: usize,
+    pub(crate) action: BoardInjectionAction,
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn select_watchdog_dispatch(
+    agents: &[crate::tui::AgentHandle],
+    db: &Arc<DbHandle>,
+    board_claims: &Arc<LocalBoardClaimRegistry>,
+    local_instance: Option<&str>,
+) -> Option<WatchdogDispatchSelection> {
+    let instance = local_instance?;
+
+    let mut candidate_ids = agents
+        .iter()
+        .filter(|h| h.roles.iter().any(|r| r == "interactive"))
+        .map(|h| h.agent_id.clone())
+        .collect::<Vec<_>>();
+    candidate_ids.extend(
+        agents
+            .iter()
+            .filter(|h| !h.roles.iter().any(|r| r == "interactive")
+                && !h.roles.iter().any(|r| r == "master"))
+            .map(|h| h.agent_id.clone()),
+    );
+    candidate_ids.extend(
+        agents
+            .iter()
+            .filter(|h| h.roles.iter().any(|r| r == "master")
+                && !h.roles.iter().any(|r| r == "interactive"))
+            .map(|h| h.agent_id.clone()),
+    );
+
+    candidate_ids.into_iter().find_map(|agent_id| {
+        let index = agents.iter().position(|h| h.agent_id == agent_id)?;
+        let handle = agents.get(index)?;
+        if handle.busy || handle.active_incoming_prompt.is_some() {
+            return None;
+        }
+        let action = resolve_pending_board_note_injection(
+            db,
+            board_claims,
+            instance,
+            &agent_id,
+            crate::stylos::IncomingPromptSource::WatchdogBoardNote,
+        )?;
+        Some(WatchdogDispatchSelection {
+            agent_index: index,
+            action,
+        })
+    })
 }

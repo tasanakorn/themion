@@ -2,12 +2,14 @@ use crate::app_runtime::{
     build_local_agent_tool_invoker, build_main_agent, build_replacement_main_agent,
     build_system_inspection_snapshot,
     handle_local_agent_management_request as runtime_handle_local_agent_management_request,
-    AgentReplacementParams, LocalAgentRuntimeContext,
+    select_watchdog_dispatch, start_watchdog_task, AgentReplacementParams,
+    LocalAgentRuntimeContext, WatchdogRuntimeState,
 };
 #[cfg(feature = "stylos")]
 use crate::board_runtime::{
-    resolve_completed_note_follow_up, resolve_pending_board_note_injection, BoardTurnFollowUp,
-    WATCHDOG_IDLE_DELAY_MS_DEFAULT,
+    board_note_id_from_prompt, finalize_board_note_injection, release_board_note_claim,
+    resolve_completed_note_follow_up, BoardTurnFollowUp,
+    LocalBoardClaimRegistry,
 };
 use crate::chat_composer::{ChatComposer, InputAction};
 use crate::config::{save_profiles, ProfileConfig};
@@ -29,8 +31,6 @@ use ratatui::{
 };
 use std::collections::VecDeque;
 use std::path::PathBuf;
-#[cfg(feature = "stylos")]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use themion_core::agent::{Agent, AgentEvent, TurnCancellation, TurnStats};
@@ -45,80 +45,6 @@ use themion_core::{
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
-
-#[cfg(feature = "stylos")]
-#[derive(Default)]
-struct WatchdogRuntimeState {
-    busy: AtomicBool,
-    idle_started_at_ms: AtomicU64,
-    active_incoming_prompt: AtomicBool,
-    pending_watchdog_note: AtomicBool,
-}
-
-#[cfg(feature = "stylos")]
-impl WatchdogRuntimeState {
-    fn set_busy(&self, busy: bool) {
-        self.busy.store(busy, Ordering::Relaxed);
-    }
-
-    fn set_idle_started_now(&self) {
-        self.idle_started_at_ms
-            .store(unix_epoch_now_ms(), Ordering::Relaxed);
-    }
-
-    fn clear_idle_started(&self) {
-        self.idle_started_at_ms.store(0, Ordering::Relaxed);
-    }
-
-    fn idle_started_at_ms(&self) -> Option<u64> {
-        let value = self.idle_started_at_ms.load(Ordering::Relaxed);
-        (value != 0).then_some(value)
-    }
-
-    fn set_active_incoming_prompt(&self, active: bool) {
-        self.active_incoming_prompt.store(active, Ordering::Relaxed);
-    }
-
-    fn set_pending_watchdog_note(&self, pending: bool) {
-        self.pending_watchdog_note.store(pending, Ordering::Relaxed);
-    }
-
-    fn pending_watchdog_note(&self) -> bool {
-        self.pending_watchdog_note.load(Ordering::Relaxed)
-    }
-
-    fn should_trigger_watchdog_note(&self, now_ms: u64, idle_delay_ms: u64) -> bool {
-        if self.busy.load(Ordering::Relaxed) || self.active_incoming_prompt.load(Ordering::Relaxed)
-        {
-            return false;
-        }
-        let Some(idle_started_at_ms) = self.idle_started_at_ms() else {
-            return false;
-        };
-        now_ms.saturating_sub(idle_started_at_ms) >= idle_delay_ms
-    }
-}
-
-#[cfg(feature = "stylos")]
-fn start_watchdog_task(
-    background_domain: &DomainHandle,
-    app_tx: mpsc::UnboundedSender<AppEvent>,
-    runtime_state: Arc<WatchdogRuntimeState>,
-) {
-    background_domain.spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(250));
-        loop {
-            interval.tick().await;
-            let now_ms = unix_epoch_now_ms();
-            if !runtime_state.should_trigger_watchdog_note(now_ms, WATCHDOG_IDLE_DELAY_MS_DEFAULT) {
-                continue;
-            }
-            if app_tx.send(AppEvent::WatchdogPoll).is_err() {
-                break;
-            }
-        }
-    });
-}
 
 #[derive(Debug)]
 pub(crate) struct LocalAgentManagementRequest {
@@ -196,6 +122,7 @@ enum NavigationMode {
 enum ReviewMode {
     Closed,
     Transcript,
+    Watchdog,
 }
 
 const TOOL_DETAIL_MAX_CHARS: usize = 60;
@@ -565,6 +492,7 @@ pub struct AgentHandle {
     pub label: String,
     pub(crate) roles: Vec<String>,
     pub(crate) busy: bool,
+    pub(crate) turn_cancellation: Option<TurnCancellation>,
     #[cfg(feature = "stylos")]
     pub(crate) active_incoming_prompt: Option<IncomingPromptRequest>,
 }
@@ -995,9 +923,10 @@ pub struct App {
     recent_runtime_snapshots: VecDeque<RuntimeMetricsSnapshot>,
     activity_counters: ActivityCounters,
     workflow_state: WorkflowState,
-    active_turn_cancellation: Option<TurnCancellation>,
     #[cfg(feature = "stylos")]
     watchdog_state: Arc<WatchdogRuntimeState>,
+    #[cfg(feature = "stylos")]
+    board_claims: Arc<LocalBoardClaimRegistry>,
     #[cfg(feature = "stylos")]
     last_assistant_text: Option<String>,
     #[cfg(feature = "stylos")]
@@ -1025,6 +954,8 @@ impl App {
         });
         #[cfg(feature = "stylos")]
         let watchdog_state = Arc::new(WatchdogRuntimeState::default());
+        #[cfg(feature = "stylos")]
+        let board_claims = Arc::new(LocalBoardClaimRegistry::default());
         let agent = build_main_agent(
             &session,
             db.clone(),
@@ -1049,6 +980,7 @@ impl App {
             label: "master".to_string(),
             roles: vec!["master".to_string(), "interactive".to_string()],
             busy: false,
+            turn_cancellation: None,
             #[cfg(feature = "stylos")]
             active_incoming_prompt: None,
         };
@@ -1167,9 +1099,10 @@ impl App {
             recent_runtime_snapshots: VecDeque::new(),
             activity_counters: ActivityCounters::default(),
             workflow_state: WorkflowState::default(),
-            active_turn_cancellation: None,
             #[cfg(feature = "stylos")]
             watchdog_state,
+            #[cfg(feature = "stylos")]
+            board_claims,
             #[cfg(feature = "stylos")]
             last_assistant_text: None,
             #[cfg(feature = "stylos")]
@@ -1178,8 +1111,6 @@ impl App {
         };
         #[cfg(feature = "stylos")]
         start_watchdog_task(&app.background_domain, app_tx, app.watchdog_state.clone());
-        #[cfg(feature = "stylos")]
-        app.watchdog_state.set_busy(false);
         #[cfg(feature = "stylos")]
         app.watchdog_state.set_idle_started_now();
         app.record_runtime_snapshot();
@@ -1209,6 +1140,7 @@ impl App {
             label: "master".to_string(),
             roles: vec!["master".to_string(), "interactive".to_string()],
             busy: false,
+            turn_cancellation: None,
             #[cfg(feature = "stylos")]
             active_incoming_prompt: None,
         });
@@ -1223,31 +1155,13 @@ impl App {
         self.agents = next_agents;
     }
 
-    #[cfg(feature = "stylos")]
-    fn watchdog_candidate_agent_ids(&self) -> Vec<String> {
-        let mut ids = self
-            .agents
-            .iter()
-            .filter(|h| is_interactive_handle(h))
-            .map(|h| h.agent_id.clone())
-            .collect::<Vec<_>>();
-        ids.extend(
-            self.agents
-                .iter()
-                .filter(|h| !is_interactive_handle(h) && !h.roles.iter().any(|r| r == "master"))
-                .map(|h| h.agent_id.clone()),
-        );
-        ids.extend(
-            self.agents
-                .iter()
-                .filter(|h| h.roles.iter().any(|r| r == "master") && !is_interactive_handle(h))
-                .map(|h| h.agent_id.clone()),
-        );
-        ids
-    }
-
     fn background_domain(&self) -> DomainHandle {
         self.background_domain.clone()
+    }
+
+
+    fn any_agent_busy(&self) -> bool {
+        self.agents.iter().any(|h| h.busy)
     }
 
     fn handle_local_agent_management_request(
@@ -1257,13 +1171,14 @@ impl App {
     ) {
         let local_agent_tool_invoker =
             build_local_agent_tool_invoker(self.local_agent_mgmt_tx.clone());
+        let any_agent_busy = self.any_agent_busy();
         let result = runtime_handle_local_agent_management_request(
             LocalAgentRuntimeContext {
                 session: &self.session,
                 project_dir: &self.project_dir,
                 db: &self.db,
                 agents: &mut self.agents,
-                agent_busy: self.agent_busy,
+                agent_busy: any_agent_busy,
                 #[cfg(feature = "stylos")]
                 stylos_tool_bridge: self.stylos_tool_bridge.clone(),
                 #[cfg(feature = "stylos")]
@@ -1297,7 +1212,24 @@ impl App {
         self.review_scroll_offset = 0;
     }
 
-    fn close_transcript_review(&mut self) {
+    fn open_watchdog_review(&mut self) {
+        self.review_mode = ReviewMode::Watchdog;
+        self.review_scroll_offset = 0;
+    }
+
+    fn toggle_watchdog_review(&mut self) {
+        if self.review_mode == ReviewMode::Watchdog {
+            self.review_mode = ReviewMode::Closed;
+        } else {
+            self.open_watchdog_review();
+        }
+    }
+
+    fn transcript_review_open(&self) -> bool {
+        self.review_mode == ReviewMode::Transcript
+    }
+
+    fn close_review(&mut self) {
         self.review_mode = ReviewMode::Closed;
     }
 
@@ -1326,7 +1258,6 @@ impl App {
         self.idle_status_changed_at = None;
         #[cfg(feature = "stylos")]
         {
-            self.watchdog_state.set_busy(true);
             self.watchdog_state.clear_idle_started();
             self.watchdog_state.set_pending_watchdog_note(false);
         }
@@ -1342,7 +1273,6 @@ impl App {
         self.idle_status_changed_at = Some(unix_epoch_now_ms());
         #[cfg(feature = "stylos")]
         {
-            self.watchdog_state.set_busy(false);
             self.watchdog_state.set_idle_started_now();
             self.watchdog_state.set_active_incoming_prompt(
                 self.agents
@@ -1361,14 +1291,20 @@ impl App {
     }
 
     fn request_interrupt(&mut self) {
-        if let Some(cancel) = &self.active_turn_cancellation {
-            if !cancel.is_interrupted() {
-                cancel.interrupt();
-                self.push(Entry::Status {
-                    agent_id: None,
-                    text: "interrupt requested".to_string(),
-                });
+        let mut interrupted_any = false;
+        for handle in &self.agents {
+            if let Some(cancel) = &handle.turn_cancellation {
+                if !cancel.is_interrupted() {
+                    cancel.interrupt();
+                    interrupted_any = true;
+                }
             }
+        }
+        if interrupted_any {
+            self.push(Entry::Status {
+                agent_id: None,
+                text: "interrupt requested".to_string(),
+            });
         }
     }
 
@@ -1783,7 +1719,6 @@ impl App {
                 self.push(Entry::Blank);
                 self.activity_counters.agent_turn_completed_count += 1;
                 self.agent_busy = false;
-                self.active_turn_cancellation = None;
                 if let Some(last_api_call_tokens_in) = stats.last_api_call_tokens_in {
                     self.last_ctx_tokens = last_api_call_tokens_in;
                 }
@@ -2551,7 +2486,7 @@ impl App {
 
     fn scroll_up(&mut self) {
         match self.review_mode {
-            ReviewMode::Transcript => {
+            ReviewMode::Transcript | ReviewMode::Watchdog => {
                 self.review_scroll_offset += 3;
             }
             ReviewMode::Closed => {
@@ -2563,7 +2498,7 @@ impl App {
 
     fn scroll_down(&mut self) {
         match self.review_mode {
-            ReviewMode::Transcript => {
+            ReviewMode::Transcript | ReviewMode::Watchdog => {
                 self.review_scroll_offset = self.review_scroll_offset.saturating_sub(3);
             }
             ReviewMode::Closed => {
@@ -2577,7 +2512,7 @@ impl App {
 
     fn page_up(&mut self, amount: usize) {
         match self.review_mode {
-            ReviewMode::Transcript => {
+            ReviewMode::Transcript | ReviewMode::Watchdog => {
                 self.review_scroll_offset = self.review_scroll_offset.saturating_add(amount.max(1));
             }
             ReviewMode::Closed => {
@@ -2589,7 +2524,7 @@ impl App {
 
     fn page_down(&mut self, amount: usize) {
         match self.review_mode {
-            ReviewMode::Transcript => {
+            ReviewMode::Transcript | ReviewMode::Watchdog => {
                 self.review_scroll_offset = self.review_scroll_offset.saturating_sub(amount.max(1));
             }
             ReviewMode::Closed => {
@@ -2604,7 +2539,7 @@ impl App {
     fn jump_to_top(&mut self, total_visual: usize, height: usize) {
         let max_scroll = total_visual.saturating_sub(height);
         match self.review_mode {
-            ReviewMode::Transcript => {
+            ReviewMode::Transcript | ReviewMode::Watchdog => {
                 self.review_scroll_offset = max_scroll;
             }
             ReviewMode::Closed => {
@@ -2667,11 +2602,11 @@ impl App {
         app_tx: &mpsc::UnboundedSender<AppEvent>,
     ) {
         self.activity_counters.agent_turn_started_count += 1;
+        self.agent_busy = true;
         self.reset_stream_counters();
         self.set_agent_activity(AgentActivity::PreparingRequest);
 
         let cancellation = TurnCancellation::new();
-        self.active_turn_cancellation = Some(cancellation.clone());
 
         let handle_session_id = self.agents[agent_index].session_id;
         let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -2685,6 +2620,7 @@ impl App {
 
         let handle = self.agents.get_mut(agent_index).expect("agent index valid");
         handle.busy = true;
+        handle.turn_cancellation = Some(cancellation.clone());
         let mut agent = handle.agent.take().expect("agent available when not busy");
         agent.set_event_tx(event_tx);
 
@@ -2702,7 +2638,6 @@ impl App {
             let _ = app_tx_done.send(AppEvent::AgentReady(Box::new(agent), handle_session_id));
         });
     }
-
     fn submit_text(&mut self, text: String, app_tx: &mpsc::UnboundedSender<AppEvent>) {
         let text = text.trim().to_string();
         if text.is_empty() {
@@ -2717,9 +2652,6 @@ impl App {
         }
 
         if let Some(command) = text.strip_prefix('!') {
-            if self.agent_busy {
-                return;
-            }
             self.submit_shell_command(command, app_tx);
             return;
         }
@@ -2806,9 +2738,6 @@ impl App {
                     .expect("interactive agent")
             }
         } else {
-            if self.agent_busy {
-                return;
-            }
             self.agents
                 .iter()
                 .position(is_interactive_handle)
@@ -2816,9 +2745,6 @@ impl App {
         };
         #[cfg(not(feature = "stylos"))]
         let agent_index = {
-            if self.agent_busy {
-                return;
-            }
             self.agents
                 .iter()
                 .position(is_interactive_handle)
@@ -2837,40 +2763,26 @@ impl App {
 
     #[cfg(feature = "stylos")]
     fn handle_watchdog_poll(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) {
-        let Some(instance) = self.local_stylos_instance.clone() else {
-            self.watchdog_state.set_pending_watchdog_note(false);
-            return;
-        };
-        let Some((agent_index, action)) = self
-            .watchdog_candidate_agent_ids()
-            .into_iter()
-            .filter_map(|agent_id| {
-                let index = self.agents.iter().position(|h| h.agent_id == agent_id)?;
-                let handle = self.agents.get(index)?;
-                if handle.busy || handle.active_incoming_prompt.is_some() {
-                    return None;
-                }
-                let action = resolve_pending_board_note_injection(
-                    &self.db,
-                    &instance,
-                    &agent_id,
-                    IncomingPromptSource::WatchdogBoardNote,
-                )?;
-                Some((index, action))
-            })
-            .next()
-        else {
+        let Some(selection) = select_watchdog_dispatch(
+            &self.agents,
+            &self.db,
+            &self.board_claims,
+            self.local_stylos_instance.as_deref(),
+        ) else {
             self.watchdog_state.set_pending_watchdog_note(false);
             return;
         };
         self.watchdog_state.set_pending_watchdog_note(true);
+        finalize_board_note_injection(&self.db, &self.board_claims, &selection.action.note_id);
         self.push(Entry::RemoteEvent {
-            agent_id: action.request.agent_id.clone(),
-            text: action.log_line,
+            agent_id: selection.action.request.agent_id.clone(),
+            text: selection.action.log_line,
         });
-        self.agents[agent_index].active_incoming_prompt = Some(action.request.clone());
+        let prompt = selection.action.request.prompt.clone();
+        self.agents[selection.agent_index].active_incoming_prompt =
+            Some(selection.action.request.clone());
         self.watchdog_state.set_active_incoming_prompt(true);
-        self.submit_text(action.request.prompt, app_tx);
+        self.submit_text_to_agent(selection.agent_index, prompt, app_tx);
     }
 
     #[cfg(feature = "stylos")]
@@ -2878,31 +2790,34 @@ impl App {
         &mut self,
         agent_index: usize,
         app_tx: &mpsc::UnboundedSender<AppEvent>,
-    ) {
+    ) -> bool {
         let Some(remote) = self.agents[agent_index]
             .active_incoming_prompt
             .as_ref()
             .cloned()
         else {
-            return;
+            return false;
         };
         match resolve_completed_note_follow_up(&self.db, &remote) {
-            BoardTurnFollowUp::None => {}
+            BoardTurnFollowUp::None => false,
             BoardTurnFollowUp::ContinueCurrentNote { request, prompt } => {
                 self.agents[agent_index].active_incoming_prompt = Some(request);
                 self.submit_text(prompt, app_tx);
+                true
             }
             BoardTurnFollowUp::EmitDoneMention { log_line } => {
                 self.push(Entry::RemoteEvent {
                     agent_id: None,
                     text: log_line,
                 });
+                false
             }
             BoardTurnFollowUp::EmitDoneMentionError { status_line } => {
                 self.push(Entry::Status {
                     agent_id: None,
                     text: status_line,
                 });
+                false
             }
         }
     }
@@ -2965,8 +2880,9 @@ impl App {
         if let Some(h) = self.agents.iter_mut().find(|h| h.session_id == sid) {
             h.agent = Some(agent);
             h.busy = false;
+            h.turn_cancellation = None;
         }
-        self.active_turn_cancellation = None;
+        self.agent_busy = self.any_agent_busy();
         self.mark_dirty_status();
         self.request_draw(frame_requester);
     }
@@ -3092,7 +3008,6 @@ impl App {
                             ),
                         });
                         self.push(Entry::Blank);
-                        self.agent_busy = false;
                         self.mark_dirty_all();
                         self.request_draw(frame_requester);
                     }
@@ -3101,7 +3016,6 @@ impl App {
                             agent_id: None,
                             text: format!("login succeeded but agent build failed: {}", e),
                         });
-                        self.agent_busy = false;
                         self.mark_dirty_all();
                         self.request_draw(frame_requester);
                     }
@@ -3113,7 +3027,6 @@ impl App {
                     agent_id: None,
                     text: format!("login failed: {}", e),
                 });
-                self.agent_busy = false;
                 self.mark_dirty_all();
                 self.request_draw(frame_requester);
             }
@@ -3182,7 +3095,6 @@ impl App {
             }
         }
         self.push(Entry::Blank);
-        self.agent_busy = false;
         self.mark_dirty_all();
         self.request_draw(frame_requester);
     }
@@ -3259,6 +3171,9 @@ impl App {
         if self.agents[agent_index].busy
             || self.agents[agent_index].active_incoming_prompt.is_some()
         {
+            if let Some(note_id) = board_note_id_from_prompt(&request.prompt) {
+                release_board_note_claim(&self.board_claims, note_id);
+            }
             let sender = request.from.as_deref().unwrap_or("unknown sender");
             let sender_agent = request.from_agent_id.as_deref().unwrap_or("unknown");
             let target_instance = request.to.as_deref().unwrap_or("unknown target");
@@ -3315,13 +3230,14 @@ impl App {
                     ),
                 });
             }
+            let prompt = request.prompt.clone();
             self.agents[agent_index].active_incoming_prompt = Some(request.clone());
             self.watchdog_state.set_active_incoming_prompt(true);
             self.watchdog_state.set_pending_watchdog_note(matches!(
                 request.source,
                 IncomingPromptSource::WatchdogBoardNote
             ));
-            self.submit_text(request.prompt, app_tx);
+            self.submit_text_to_agent(agent_index, prompt, app_tx);
         }
     }
 
@@ -3336,8 +3252,8 @@ impl App {
 
         match self.composer.handle_key_event(
             key,
-            self.review_mode != ReviewMode::Closed,
-            self.agent_busy,
+            self.transcript_review_open(),
+            self.any_agent_busy(),
         ) {
             InputAction::None => {}
             InputAction::RequestDraw => {
@@ -3367,8 +3283,13 @@ impl App {
                 self.mark_dirty_overlay();
                 self.request_draw(frame_requester);
             }
-            InputAction::CloseTranscriptReview => {
-                self.close_transcript_review();
+            InputAction::OpenWatchdogReview => {
+                self.toggle_watchdog_review();
+                self.mark_dirty_overlay();
+                self.request_draw(frame_requester);
+            }
+            InputAction::CloseReview => {
+                self.close_review();
                 self.mark_dirty_overlay();
                 self.request_draw(frame_requester);
             }
@@ -3694,6 +3615,20 @@ fn review_area(area: Rect) -> Rect {
     }
 }
 
+fn watchdog_review_area(area: Rect, line_count: usize) -> Rect {
+    let width = area.width.saturating_mul(78).saturating_div(100).max(40);
+    let desired_height = (line_count as u16).saturating_add(2);
+    let min_height = 10u16;
+    let max_height = area.height.saturating_mul(60).saturating_div(100).max(min_height);
+    let height = desired_height.clamp(min_height, max_height);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
 pub(crate) fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
 
@@ -3760,7 +3695,7 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
         }
     }
 
-    if app.review_mode == ReviewMode::Closed {
+    if app.review_mode != ReviewMode::Transcript {
         if let Some((cursor_x, cursor_y)) = app
             .composer
             .input
@@ -3786,7 +3721,8 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
         None => "stylos: off".to_string(),
     };
     let nav = match app.review_mode {
-        ReviewMode::Transcript => "review",
+        ReviewMode::Transcript => "review:transcript",
+        ReviewMode::Watchdog => "review:watchdog",
         ReviewMode::Closed => match app.navigation_mode {
             NavigationMode::FollowTail => "tail",
             NavigationMode::BrowsedHistory => "browse",
@@ -3835,14 +3771,22 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
         chunks[2],
     );
 
-    if app.review_mode == ReviewMode::Transcript {
-        let review = review_area(area);
+    if app.review_mode == ReviewMode::Transcript || app.review_mode == ReviewMode::Watchdog {
+        let (title, review_lines) = match app.review_mode {
+            ReviewMode::Transcript => (" Transcript review ", build_lines(&app.entries, &None, &app.agents)),
+            ReviewMode::Watchdog => (" Watchdog & agents ", build_watchdog_review_lines(app)),
+            ReviewMode::Closed => unreachable!(),
+        };
+        let review = match app.review_mode {
+            ReviewMode::Transcript => review_area(area),
+            ReviewMode::Watchdog => watchdog_review_area(area, review_lines.len()),
+            ReviewMode::Closed => unreachable!(),
+        };
         let review_block = Block::default()
-            .title(" Transcript review ")
+            .title(title)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan));
         let review_inner = review_block.inner(review);
-        let review_lines = build_lines(&app.entries, &None, &app.agents);
         let review_para = Paragraph::new(review_lines)
             .wrap(Wrap { trim: false })
             .block(review_block);
@@ -3864,7 +3808,7 @@ pub(crate) fn area_page_height(
     let area = terminal.size().map(|r| r.height as usize).unwrap_or(24);
     let reserved = 8usize + 3usize;
     let conv = area.saturating_sub(reserved).max(1);
-    if app.review_mode == ReviewMode::Transcript {
+    if app.review_mode == ReviewMode::Transcript || app.review_mode == ReviewMode::Watchdog {
         conv.saturating_mul(85)
             .saturating_div(100)
             .saturating_sub(2)
@@ -3884,12 +3828,13 @@ pub(crate) fn current_total_and_height(
         .unwrap_or(Rect::new(0, 0, 80, 24));
     let lines = match app.review_mode {
         ReviewMode::Transcript => build_lines(&app.entries, &None, &app.agents),
+        ReviewMode::Watchdog => build_watchdog_review_lines(app),
         ReviewMode::Closed => build_lines(&app.entries, &app.pending, &app.agents),
     };
-    let area = if app.review_mode == ReviewMode::Transcript {
-        review_area(size)
-    } else {
-        size
+    let area = match app.review_mode {
+        ReviewMode::Transcript => review_area(size),
+        ReviewMode::Watchdog => watchdog_review_area(size, lines.len()),
+        ReviewMode::Closed => size,
     };
     let para = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
@@ -3901,6 +3846,65 @@ pub(crate) fn current_total_and_height(
     }
     .max(1);
     (para.line_count(area.width.max(1)), height)
+}
+
+
+fn build_watchdog_review_lines(app: &App) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    #[cfg(feature = "stylos")]
+    {
+        let stylos_state = match app.stylos.as_ref().map(|h| h.state()) {
+            Some(StylosRuntimeState::Off) => "off".to_string(),
+            Some(StylosRuntimeState::Active { mode, realm, instance }) => {
+                format!("active mode={} realm={} instance={}", mode, realm, instance)
+            }
+            Some(StylosRuntimeState::Error(err)) => format!("error {}", err),
+            None => "off".to_string(),
+        };
+        lines.push(Line::from(vec![Span::styled(
+            "watchdog",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )]));
+        lines.push(Line::from(format!("stylos: {}", stylos_state)));
+        lines.push(Line::from(format!(
+            "pending_watchdog_note: {}",
+            app.watchdog_state.pending_watchdog_note()
+        )));
+        lines.push(Line::from(format!(
+            "active_incoming_prompts: {}",
+            app.agents
+                .iter()
+                .filter(|handle| handle.active_incoming_prompt.is_some())
+                .count()
+        )));
+        lines.push(Line::from(format!(
+            "aggregate_busy: {}",
+            app.agents.iter().any(|handle| handle.busy)
+        )));
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(vec![Span::styled(
+        "local agents",
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )]));
+    for handle in &app.agents {
+        let roles = if handle.roles.is_empty() {
+            "-".to_string()
+        } else {
+            handle.roles.join(",")
+        };
+        #[cfg(feature = "stylos")]
+        let incoming = handle.active_incoming_prompt.is_some();
+        #[cfg(not(feature = "stylos"))]
+        let incoming = false;
+        lines.push(Line::from(format!(
+            "{} | label={} | roles={} | busy={} | incoming={}",
+            handle.agent_id, handle.label, roles, handle.busy, incoming
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from("Ctrl-t transcript review  Ctrl-w watchdog  Esc close"));
+    lines
 }
 
 fn unix_epoch_now_ms() -> u64 {

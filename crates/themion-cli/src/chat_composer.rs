@@ -20,7 +20,8 @@ pub(crate) enum InputAction {
     Quit,
     Interrupt,
     OpenTranscriptReview,
-    CloseTranscriptReview,
+    OpenWatchdogReview,
+    CloseReview,
     ScrollUp,
     ScrollDown,
     ReturnToLatest,
@@ -192,14 +193,19 @@ impl ChatComposer {
             }
         }
 
-        match (key.code, key.modifiers) {
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => InputAction::Quit,
-            (KeyCode::Esc, _) if review_open => InputAction::CloseTranscriptReview,
-            (KeyCode::Esc, _) if agent_busy => InputAction::Interrupt,
-            (KeyCode::Char('s'), KeyModifiers::CONTROL) => InputAction::Submit,
-            (KeyCode::Enter, KeyModifiers::NONE) => {
+        let mods = key.modifiers;
+        let alt = mods.contains(KeyModifiers::ALT);
+        let ctrl = mods.contains(KeyModifiers::CONTROL);
+        let shift = mods.contains(KeyModifiers::SHIFT);
+
+        match key.code {
+            KeyCode::Char('c') if ctrl => InputAction::Quit,
+            KeyCode::Esc if review_open => InputAction::CloseReview,
+            KeyCode::Esc if agent_busy => InputAction::Interrupt,
+            KeyCode::Char('s') if ctrl => InputAction::Submit,
+            KeyCode::Enter if mods.is_empty() => {
                 if review_open {
-                    InputAction::CloseTranscriptReview
+                    InputAction::CloseReview
                 } else if self
                     .paste_burst
                     .newline_should_insert_instead_of_submit(now)
@@ -211,7 +217,7 @@ impl ChatComposer {
                     InputAction::Submit
                 }
             }
-            (KeyCode::Enter, KeyModifiers::SHIFT) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+            KeyCode::Enter if shift && !alt && !ctrl => {
                 if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
                     commit_pasted_input(
                         &mut self.input,
@@ -223,24 +229,43 @@ impl ChatComposer {
                 self.input.insert_newline();
                 InputAction::RequestDraw
             }
-            (KeyCode::PageUp, _) => InputAction::PageUp,
-            (KeyCode::PageDown, _) => InputAction::PageDown,
-            (KeyCode::Up, KeyModifiers::ALT) => InputAction::ScrollUp,
-            (KeyCode::Down, KeyModifiers::ALT) => InputAction::ScrollDown,
-            (KeyCode::Char('g'), KeyModifiers::ALT) => InputAction::ReturnToLatest,
-            (KeyCode::Char('t'), KeyModifiers::ALT) => {
+            KeyCode::Char('j') if ctrl && !alt => {
+                if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
+                    commit_pasted_input(
+                        &mut self.input,
+                        &mut self.input_state,
+                        &mut self.paste_burst,
+                        pasted,
+                    );
+                }
+                self.input.insert_newline();
+                InputAction::RequestDraw
+            }
+            KeyCode::PageUp => InputAction::PageUp,
+            KeyCode::PageDown => InputAction::PageDown,
+            KeyCode::Up if alt => InputAction::ScrollUp,
+            KeyCode::Down if alt => InputAction::ScrollDown,
+            KeyCode::Char('g') if alt => InputAction::ReturnToLatest,
+            KeyCode::Char('t') if ctrl && !alt => {
                 if review_open {
-                    InputAction::CloseTranscriptReview
+                    InputAction::CloseReview
                 } else {
                     InputAction::OpenTranscriptReview
                 }
             }
-            (KeyCode::Home, KeyModifiers::ALT) => InputAction::JumpToTop,
-            (KeyCode::Up, KeyModifiers::NONE) if !review_open => {
+            KeyCode::Char('w') if ctrl && !alt => {
+                if review_open {
+                    InputAction::CloseReview
+                } else {
+                    InputAction::OpenWatchdogReview
+                }
+            }
+            KeyCode::Home if alt => InputAction::JumpToTop,
+            KeyCode::Up if mods.is_empty() && !review_open => {
                 self.history_up();
                 InputAction::RequestDraw
             }
-            (KeyCode::Down, KeyModifiers::NONE) if !review_open => {
+            KeyCode::Down if mods.is_empty() && !review_open => {
                 self.history_down();
                 InputAction::RequestDraw
             }

@@ -1,16 +1,35 @@
 #![cfg(feature = "stylos")]
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
-use themion_core::db::{DbHandle, NoteColumn, NoteKind};
+use themion_core::db::{BoardNote, DbHandle, NoteColumn, NoteKind};
 
 use crate::app_state::{create_done_mention_locally, DoneMentionRequest};
 use crate::stylos::{build_board_note_prompt, IncomingPromptRequest, IncomingPromptSource};
 
 pub const WATCHDOG_IDLE_DELAY_MS_DEFAULT: u64 = 2_000;
 
+#[derive(Default)]
+pub struct LocalBoardClaimRegistry {
+    claimed_note_ids: Mutex<HashSet<String>>,
+}
+
+impl LocalBoardClaimRegistry {
+    pub fn try_claim(&self, note_id: &str) -> bool {
+        let mut claimed = self.claimed_note_ids.lock().expect("board claims lock");
+        claimed.insert(note_id.to_string())
+    }
+
+    pub fn release(&self, note_id: &str) {
+        let mut claimed = self.claimed_note_ids.lock().expect("board claims lock");
+        claimed.remove(note_id);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BoardInjectionAction {
+    pub note_id: String,
     pub log_line: String,
     pub request: IncomingPromptRequest,
 }
@@ -30,16 +49,7 @@ pub enum BoardTurnFollowUp {
     },
 }
 
-pub fn resolve_pending_board_note_injection(
-    db: &Arc<DbHandle>,
-    local_instance: &str,
-    target_agent_id: &str,
-    trigger: IncomingPromptSource,
-) -> Option<BoardInjectionAction> {
-    let Ok(Some(note)) = db.next_board_note_for_injection(local_instance, target_agent_id) else {
-        return None;
-    };
-    let _ = db.mark_board_note_injected(&note.note_id);
+fn build_injection_action(note: &BoardNote, trigger: IncomingPromptSource) -> BoardInjectionAction {
     let prompt = build_board_note_prompt(
         &note.note_id,
         &note.note_slug,
@@ -55,7 +65,7 @@ pub fn resolve_pending_board_note_injection(
     );
     let log_line = match trigger {
         IncomingPromptSource::WatchdogBoardNote => format!(
-            "Watchdog injected board note note_slug={} to={} to_agent_id={} column={} after_idle_ms={}",
+            "Watchdog claimed board note note_slug={} to={} to_agent_id={} column={} after_idle_ms={}",
             note.note_slug,
             note.to_instance,
             note.to_agent_id,
@@ -63,14 +73,15 @@ pub fn resolve_pending_board_note_injection(
             WATCHDOG_IDLE_DELAY_MS_DEFAULT,
         ),
         IncomingPromptSource::RemoteStylos => format!(
-            "Board note injection note_slug={} to={} to_agent_id={} column={}",
+            "Board note claimed note_slug={} to={} to_agent_id={} column={}",
             note.note_slug,
             note.to_instance,
             note.to_agent_id,
             note.column.as_str()
         ),
     };
-    Some(BoardInjectionAction {
+    BoardInjectionAction {
+        note_id: note.note_id.clone(),
         log_line,
         request: IncomingPromptRequest {
             prompt,
@@ -83,7 +94,48 @@ pub fn resolve_pending_board_note_injection(
             to: Some(note.to_instance.clone()),
             to_agent_id: Some(note.to_agent_id.clone()),
         },
-    })
+    }
+}
+
+pub fn resolve_pending_board_note_injection(
+    db: &Arc<DbHandle>,
+    local_claims: &Arc<LocalBoardClaimRegistry>,
+    local_instance: &str,
+    target_agent_id: &str,
+    trigger: IncomingPromptSource,
+) -> Option<BoardInjectionAction> {
+    let Ok(Some(note)) = db.next_board_note_for_injection(local_instance, target_agent_id) else {
+        return None;
+    };
+    if !local_claims.try_claim(&note.note_id) {
+        return None;
+    }
+    Some(build_injection_action(&note, trigger))
+}
+
+pub fn finalize_board_note_injection(
+    db: &Arc<DbHandle>,
+    local_claims: &Arc<LocalBoardClaimRegistry>,
+    note_id: &str,
+) {
+    let _ = db.mark_board_note_injected(note_id);
+    local_claims.release(note_id);
+}
+
+pub fn release_board_note_claim(local_claims: &Arc<LocalBoardClaimRegistry>, note_id: &str) {
+    local_claims.release(note_id);
+}
+
+pub fn board_note_id_from_prompt(prompt: &str) -> Option<&str> {
+    if !prompt.starts_with("type=stylos_note ") {
+        return None;
+    }
+    prompt
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("note_id="))
 }
 
 pub fn resolve_completed_note_follow_up(

@@ -184,7 +184,7 @@ For debugging, the practical thread model is now:
 
 In the current CLI architecture, `crates/themion-cli/src/app_state.rs` owns shared non-UI bootstrap for TUI mode, explicit `--headless` mode, and the non-interactive one-shot prompt path. `crates/themion-cli/src/tui_runner.rs` owns terminal-mode orchestration, `crates/themion-cli/src/headless_runner.rs` owns both the long-running headless NDJSON-log entrypoint and the non-interactive one-shot path, and `crates/themion-cli/src/tui.rs` remains the terminal presentation and event-handling layer.
 
-In Stylos-enabled builds, the board-note injection and note-completion follow-up coordination that feeds the TUI now lives in `crates/themion-cli/src/board_runtime.rs`. That helper owns the direct board-note DB coordination for selecting pending note work, marking injection/completion-notified state, and deciding follow-up actions, while `tui.rs` remains responsible for when to invoke the helper, how to display the resulting events, and when to submit returned prompts.
+In Stylos-enabled builds, the board-note injection and note-completion follow-up coordination that feeds the TUI now lives in `crates/themion-cli/src/board_runtime.rs`. That helper owns the direct board-note DB coordination for selecting pending note work, local in-process note-claim tracking to avoid duplicate concurrent injection, final injected-state mutation after successful handoff, claim release on failed handoff races, and note-completion follow-up decisions, while `tui.rs` remains responsible for when to invoke the helper, how to display the resulting events, and when to submit returned prompts.
 
 Within that TUI layer, input ownership is now split into a Themion-local editor and composer pattern inspired by `codex-rs`: `crates/themion-cli/src/textarea.rs` owns the local UTF-8 text buffer, wrap-aware height and cursor calculations, and render-facing state via `TextArea` plus `TextAreaState`, while `crates/themion-cli/src/chat_composer.rs` owns higher-level input policy such as paste-burst handling, non-ASCII-sensitive input routing, history draft restore, and submit-versus-newline decisions. `App` in `crates/themion-cli/src/tui.rs` delegates input editing to that composer instead of owning a third-party textarea directly.
 
@@ -223,7 +223,7 @@ In the current code, this usually means:
 
 So the user-visible app behaves like one interactive process coordinating background async tasks, not like several child worker processes.
 
-For PRD-081's first local team-management slice, this also means Themion is not yet doing parallel local multi-agent turn execution. The process can host multiple local agents and target them by `agent_id`, but the current TUI/runtime still uses one global active-turn busy gate, so local agent turns are serialized and membership deletion is refused while that busy gate is active.
+Themion now supports overlapping local turns across multiple local agents within one process. The CLI/TUI runtime still owns the local roster and event fan-in, but turn admission is now per-agent rather than gated by one app-global active-turn lock. Process-level busy summaries remain aggregate observability fields, while targeted execution availability is determined from each local agent handle individually.
 
 ### Stylos-enabled background tasks
 

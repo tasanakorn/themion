@@ -163,7 +163,7 @@ Current behavior:
 - deleting while the local runtime is busy is currently rejected explicitly rather than deferred
 - successful create/delete operations mutate the active in-memory roster immediately, so local targeting and runtime inspection stay aligned with the changed roster
 
-This is intentionally a local-runtime management slice, not yet a full parallel orchestration layer. The current TUI/runtime path still uses one global busy gate for active turns, so multiple local agents can exist and be targeted, but they do not yet execute concurrent local turns in one process.
+This is still a local-runtime management slice rather than a separate multi-process scheduler, but the current TUI/runtime path now supports overlapping active turns across multiple local agents in one process. Turn admission is checked per local agent handle, explicit target-specific busy outcomes are preserved, and any remaining process-level busy field is only an aggregate observability summary rather than the scheduler's source of truth.
 
 The TUI transcript layer now also carries explicit local-agent attribution for visible runtime entries. When the CLI knows which local `agent_id` produced or owned a transcript item, it stores that attribution in the TUI entry model and renders a compact highlighted `[agent_id]` prefix using a small deterministic roster-order color palette. In the current implementation, assistant replies, tool lines, status lines, remote intake/event lines, and turn-complete lines may be agent-tagged; ordinary local user-input lines remain untagged because they represent the shared operator, and genuinely process-level lines remain neutral rather than being forced onto one local agent.
 
@@ -183,7 +183,7 @@ In the current implementation:
 - the TUI either rejects the request immediately if the current local execution path is already busy, or submits the prompt through the same local turn path used for normal input
 
 This means Stylos does not bypass the harness loop, call providers directly, or move history/tool execution into the transport layer. It only injects new work into the existing local input path.
-For durable board notes in TUI mode, `board_runtime.rs` is now the CLI-local coordination boundary for selecting the next pending note, mutating note injection/completion state, and resolving post-turn follow-up into typed actions that the TUI displays or submits.
+For durable board notes in TUI mode, `board_runtime.rs` is now the CLI-local coordination boundary for selecting the next pending note, claiming one note locally before handoff, mutating injected/completion state only after successful handoff, releasing local claims when a selected target loses the handoff race, and resolving post-turn follow-up into typed actions that the TUI displays or submits. This keeps the watchdog scheduler independent while preventing duplicate in-process injection of the same note across overlapping local-agent activity.
 
 ## Snapshot-driven request decisions
 
