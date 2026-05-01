@@ -80,25 +80,41 @@ impl TextArea {
         wrapped_lines(&self.text, width).len() as u16
     }
 
-    pub(crate) fn cursor_pos_with_state(&self, area: Rect, state: TextAreaState) -> Option<(u16, u16)> {
+    pub(crate) fn cursor_pos_with_state(
+        &self,
+        area: Rect,
+        state: TextAreaState,
+    ) -> Option<(u16, u16)> {
         let lines = wrapped_lines(&self.text, area.width);
         if lines.is_empty() {
             return Some((area.x, area.y));
         }
-        let effective_scroll = effective_scroll(self.cursor_byte, area.height, &lines, state.scroll);
-        let cursor_line_idx = wrapped_line_index_by_start(&lines, self.cursor_byte).unwrap_or(0) as u16;
+        let effective_scroll =
+            effective_scroll(self.cursor_byte, area.height, &lines, state.scroll);
+        let cursor_line_idx =
+            wrapped_line_index_by_start(&lines, self.cursor_byte).unwrap_or(0) as u16;
         let line = &lines[cursor_line_idx as usize];
         let col = display_width(&self.text[line.start..self.cursor_byte]);
         let screen_row = cursor_line_idx.saturating_sub(effective_scroll);
         Some((area.x + col, area.y + screen_row))
     }
 
-    pub(crate) fn overflow_state(&self, width: u16, area_height: u16, state: TextAreaState) -> OverflowState {
+    pub(crate) fn overflow_state(
+        &self,
+        width: u16,
+        area_height: u16,
+        state: TextAreaState,
+    ) -> OverflowState {
         let lines = wrapped_lines(&self.text, width);
         overflow_state_for_lines(self.cursor_byte, area_height, &lines, state.scroll)
     }
 
-    pub(crate) fn render_with_state(&self, area: Rect, buf: &mut Buffer, state: &mut TextAreaState) {
+    pub(crate) fn render_with_state(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        state: &mut TextAreaState,
+    ) {
         if area.width == 0 || area.height == 0 {
             return;
         }
@@ -222,7 +238,11 @@ fn wrapped_lines(text: &str, width: u16) -> Vec<std::ops::Range<usize>> {
 
 fn wrapped_line_index_by_start(lines: &[std::ops::Range<usize>], pos: usize) -> Option<usize> {
     let idx = lines.partition_point(|r| r.start <= pos);
-    if idx == 0 { None } else { Some(idx - 1) }
+    if idx == 0 {
+        None
+    } else {
+        Some(idx - 1)
+    }
 }
 
 fn effective_scroll(

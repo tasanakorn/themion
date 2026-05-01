@@ -2058,10 +2058,9 @@ pub fn build_board_note_prompt(
     };
     let instruction = match source {
         IncomingPromptSource::RemoteStylos => None,
-        IncomingPromptSource::WatchdogBoardNote => Some(
-            "I found that you have a pending note to handle. Below is that note."
-                .to_string(),
-        ),
+        IncomingPromptSource::WatchdogBoardNote => {
+            Some("I found that you have a pending note to handle. Below is that note.".to_string())
+        }
     };
     match instruction {
         Some(instruction) => format!(
@@ -2294,7 +2293,9 @@ mod tests {
         assert!(prompt.contains("to_agent_id=worker"));
         assert!(prompt.contains("note_kind=work_request"));
         assert!(prompt.contains("column=todo"));
-        assert!(prompt.contains("I found that you have a pending note to handle. Below is that note."));
+        assert!(
+            prompt.contains("I found that you have a pending note to handle. Below is that note.")
+        );
         assert!(prompt.contains(
             "Note body:
 please fix the tests"

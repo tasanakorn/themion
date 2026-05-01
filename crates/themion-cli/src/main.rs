@@ -1,16 +1,16 @@
-mod app_state;
 mod app_runtime;
+mod app_state;
 mod auth_store;
-mod config;
+#[cfg(feature = "stylos")]
+mod board_runtime;
 mod chat_composer;
+mod config;
 mod headless_runner;
 mod login_codex;
 mod paste_burst;
 mod runtime_domains;
 #[cfg(feature = "stylos")]
 mod stylos;
-#[cfg(feature = "stylos")]
-mod board_runtime;
 mod textarea;
 mod tui;
 mod tui_runner;
@@ -193,9 +193,13 @@ fn main() -> anyhow::Result<()> {
         if headless_mode {
             anyhow::bail!("--command cannot be combined with --headless");
         }
-        if let Some((force_full, rest_after_command)) = parse_semantic_memory_index_command(&remaining_args) {
+        if let Some((force_full, rest_after_command)) =
+            parse_semantic_memory_index_command(&remaining_args)
+        {
             if !rest_after_command.is_empty() {
-                anyhow::bail!("semantic-memory index does not accept extra arguments beyond --full");
+                anyhow::bail!(
+                    "semantic-memory index does not accept extra arguments beyond --full"
+                );
             }
             #[cfg(not(feature = "semantic-memory"))]
             {
@@ -211,7 +215,10 @@ fn main() -> anyhow::Result<()> {
                 return runtime_domains
                     .background()
                     .expect("background runtime available in headless mode")
-                    .block_on(headless_runner::run_semantic_memory_index(app_runtime, force_full));
+                    .block_on(headless_runner::run_semantic_memory_index(
+                        app_runtime,
+                        force_full,
+                    ));
             }
         }
         anyhow::bail!(

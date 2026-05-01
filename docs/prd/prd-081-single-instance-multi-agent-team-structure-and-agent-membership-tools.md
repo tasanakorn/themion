@@ -280,7 +280,7 @@ Rollout guidance:
 
 ## Implementation checklist
 
-- [ ] define the single-instance team model in docs and code-facing terminology
+- [x] define the single-instance team model in docs and code-facing terminology
 - [x] preserve the unique built-in `master` leader invariant explicitly in membership management
 - [x] reserve `master` for the predefined leader and reject its reuse for created agents
 - [x] add fallback `smith-N` worker id allocation when create requests omit `agent_id`
@@ -288,5 +288,5 @@ Rollout guidance:
 - [x] add a tool to delete a local non-leader agent team member
 - [x] validate duplicate ids, leader uniqueness, reserved-name reuse, and invalid deletion attempts at the management boundary
 - [x] make created and deleted team members affect local routing and exported status snapshots in the active instance
-- [ ] document how board and talk remain the first collaboration primitives for the local team
-- [ ] update architecture/runtime docs and PRD index references
+- [x] document how board and talk remain the first collaboration primitives for the local team
+- [x] update architecture/runtime docs and PRD index references

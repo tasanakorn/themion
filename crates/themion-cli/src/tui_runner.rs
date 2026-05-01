@@ -161,7 +161,7 @@ fn build_app(
     session_id: Uuid,
     project_dir: PathBuf,
     runtime_domains: &Arc<RuntimeDomains>,
-    #[cfg(feature = "stylos")] app_tx: &tokio::sync::mpsc::UnboundedSender<crate::tui::AppEvent>,
+    app_tx: &tokio::sync::mpsc::UnboundedSender<crate::tui::AppEvent>,
     #[cfg(feature = "stylos")] stylos_handle: Option<crate::stylos::StylosHandle>,
 ) -> App {
     App::new(
@@ -173,7 +173,6 @@ fn build_app(
             .background()
             .expect("background runtime available in TUI mode"),
         runtime_domains.core(),
-        #[cfg(feature = "stylos")]
         app_tx.clone(),
         #[cfg(feature = "stylos")]
         stylos_handle,
@@ -281,7 +280,6 @@ pub async fn run(app_runtime: AppState) -> anyhow::Result<()> {
         app_runtime.session_id,
         app_runtime.project_dir,
         &runtime_domains,
-        #[cfg(feature = "stylos")]
         &ctx.app_tx,
         #[cfg(feature = "stylos")]
         stylos_handle,

@@ -30,7 +30,6 @@ const EFFECTIVE_PROMPT_BUDGET_TOKENS: usize = 170_000;
 const EFFECTIVE_PROMPT_SPIKE_TOKENS: usize = 250_000;
 const RECENT_PRIOR_TURN_BAND: usize = 5;
 
-
 #[derive(Clone)]
 struct TokenEstimateContext {
     estimate_mode: EstimateMode,
@@ -150,17 +149,22 @@ fn codex_responses_effective_tool_estimate(
     }
 }
 
-fn trusted_tokenizer_name_for_model(model: &str) -> Option<(&'static str, TokenizerResolutionSource)> {
+fn trusted_tokenizer_name_for_model(
+    model: &str,
+) -> Option<(&'static str, TokenizerResolutionSource)> {
     if let Some(tokenizer) = tiktoken_rs::tokenizer::get_tokenizer(model) {
-        return Some((match tokenizer {
-            tiktoken_rs::tokenizer::Tokenizer::O200kBase => "o200k_base",
-            tiktoken_rs::tokenizer::Tokenizer::O200kHarmony => "o200k_harmony",
-            tiktoken_rs::tokenizer::Tokenizer::Cl100kBase => "cl100k_base",
-            tiktoken_rs::tokenizer::Tokenizer::P50kBase => "p50k_base",
-            tiktoken_rs::tokenizer::Tokenizer::P50kEdit => "p50k_edit",
-            tiktoken_rs::tokenizer::Tokenizer::R50kBase => "r50k_base",
-            tiktoken_rs::tokenizer::Tokenizer::Gpt2 => "r50k_base",
-        }, TokenizerResolutionSource::ExactModelMatch));
+        return Some((
+            match tokenizer {
+                tiktoken_rs::tokenizer::Tokenizer::O200kBase => "o200k_base",
+                tiktoken_rs::tokenizer::Tokenizer::O200kHarmony => "o200k_harmony",
+                tiktoken_rs::tokenizer::Tokenizer::Cl100kBase => "cl100k_base",
+                tiktoken_rs::tokenizer::Tokenizer::P50kBase => "p50k_base",
+                tiktoken_rs::tokenizer::Tokenizer::P50kEdit => "p50k_edit",
+                tiktoken_rs::tokenizer::Tokenizer::R50kBase => "r50k_base",
+                tiktoken_rs::tokenizer::Tokenizer::Gpt2 => "r50k_base",
+            },
+            TokenizerResolutionSource::ExactModelMatch,
+        ));
     }
 
     let trusted = [
@@ -343,6 +347,7 @@ pub struct Agent {
     local_instance_id: Option<String>,
     #[cfg(feature = "stylos")]
     stylos_tool_invoker: Option<crate::tools::StylosToolInvoker>,
+    local_agent_tool_invoker: Option<crate::tools::LocalAgentToolInvoker>,
     system_inspection: Option<crate::tools::SystemInspectionResult>,
     api_log_enabled: bool,
 }
@@ -389,6 +394,7 @@ impl Agent {
             local_instance_id: None,
             #[cfg(feature = "stylos")]
             stylos_tool_invoker: None,
+            local_agent_tool_invoker: None,
             system_inspection: None,
             api_log_enabled: false,
         }
@@ -450,6 +456,7 @@ impl Agent {
             local_instance_id: None,
             #[cfg(feature = "stylos")]
             stylos_tool_invoker: None,
+            local_agent_tool_invoker: None,
             system_inspection: None,
             api_log_enabled: false,
         }
@@ -466,6 +473,13 @@ impl Agent {
         self.system_inspection = inspection;
     }
 
+    pub fn set_local_agent_tool_invoker(
+        &mut self,
+        invoker: Option<crate::tools::LocalAgentToolInvoker>,
+    ) {
+        self.local_agent_tool_invoker = invoker;
+    }
+
     pub fn set_api_log_enabled(&mut self, enabled: bool) {
         self.api_log_enabled = enabled;
     }
@@ -478,7 +492,11 @@ impl Agent {
         finished_at_ms: u64,
         trace: ChatRoundTrace,
     ) -> ApiRoundLogArtifact {
-        let outcome = if trace.error.is_some() { "failed" } else { "ok" };
+        let outcome = if trace.error.is_some() {
+            "failed"
+        } else {
+            "ok"
+        };
         ApiRoundLogArtifact {
             session_id: self.session_id.to_string(),
             project_dir: self.project_dir.display().to_string(),
@@ -564,7 +582,6 @@ impl Agent {
     pub fn set_local_instance_id(&mut self, instance_id: Option<String>) {
         self.local_instance_id = instance_id;
     }
-
 
     fn build_prompt_context_report(&self, activation_source: &str) -> PromptContextReport {
         let token_ctx = trusted_tokenizer_name_for_model(&self.model)
@@ -709,7 +726,9 @@ impl Agent {
             messages: Vec::new(),
             extra_text: Some(tool_defs_text.clone()),
             chars: tool_defs_text.len(),
-            tokens_estimate: tool_estimate.effective_tokens.unwrap_or(tool_estimate.raw_tokens),
+            tokens_estimate: tool_estimate
+                .effective_tokens
+                .unwrap_or(tool_estimate.raw_tokens),
             tool_estimate: Some(tool_estimate),
         });
 
@@ -769,14 +788,17 @@ impl Agent {
                         .copied()
                         .unwrap_or(self.messages.len());
                     let age_from_t0 = t0_index - older_idx;
-                    let replay_form = if t0_exceeds_normal_budget && age_from_t0 <= RECENT_PRIOR_TURN_BAND {
-                        ReplayForm::PureMessage
-                    } else {
-                        ReplayForm::Full
-                    };
+                    let replay_form =
+                        if t0_exceeds_normal_budget && age_from_t0 <= RECENT_PRIOR_TURN_BAND {
+                            ReplayForm::PureMessage
+                        } else {
+                            ReplayForm::Full
+                        };
                     let candidate = match replay_form {
                         ReplayForm::Full => self.messages[start..end].to_vec(),
-                        ReplayForm::PureMessage => build_pure_message_turn(&self.messages[start..end]),
+                        ReplayForm::PureMessage => {
+                            build_pure_message_turn(&self.messages[start..end])
+                        }
                     };
                     let candidate_tokens = token_ctx.estimate_messages(&candidate);
                     let candidate_chars = estimate_messages_chars(&candidate);
@@ -816,7 +838,10 @@ impl Agent {
                         tokens_estimate: candidate_tokens,
                         messages: candidate,
                         note: if replay_form == ReplayForm::PureMessage {
-                            Some("reduced pure-message replay; raw tool payloads omitted".to_string())
+                            Some(
+                                "reduced pure-message replay; raw tool payloads omitted"
+                                    .to_string(),
+                            )
                         } else {
                             None
                         },
@@ -1566,11 +1591,9 @@ impl Agent {
             let event_tx = self.event_tx.clone();
             let cancellation_for_stream = cancellation.clone();
             let backend_name = self.client.backend_name();
-            let request_payload = self.client.build_round_request_payload(
-                &self.model,
-                &msgs_with_system,
-                &tool_defs,
-            );
+            let request_payload =
+                self.client
+                    .build_round_request_payload(&self.model, &msgs_with_system, &tool_defs);
             let response_result = self
                 .client
                 .chat_completion_stream(
@@ -1885,6 +1908,7 @@ impl Agent {
                     stylos_tool_invoker: self.stylos_tool_invoker.clone(),
                     #[cfg(feature = "stylos")]
                     stylos_enabled: self.stylos_tool_invoker.is_some(),
+                    local_agent_tool_invoker: self.local_agent_tool_invoker.clone(),
                     system_inspection: self.system_inspection.clone(),
                 };
                 let result =

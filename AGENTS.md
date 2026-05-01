@@ -42,6 +42,7 @@ When adding code:
 - Keep `themion-core` provider/backend logic separate from CLI concerns.
 - Prefer putting reusable agent/runtime logic in `themion-core`.
 - Keep file IO, config loading, TUI event handling, and user-facing flows in `themion-cli`.
+- Treat the TUI as an input/output surface, not as the owner of runtime orchestration or agent-management policy. When adding or changing behavior, prefer putting orchestration, roster mutation, session/agent lifecycle management, and other non-visual runtime control in CLI-local runtime/orchestrator modules such as `app_state.rs`, `app_runtime.rs`, or another focused non-TUI helper. `tui.rs` and `tui_runner.rs` should primarily collect input, forward intents/events, and render resulting state.
 - Preserve the `ChatBackend` abstraction when adding or changing model providers.
 - Do not collapse provider-specific behavior into ad hoc conditionals when a backend-specific module already exists.
 

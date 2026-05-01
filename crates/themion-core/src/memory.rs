@@ -2,9 +2,9 @@ use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension, ToSql};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "semantic-memory")]
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "semantic-memory")]
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -53,7 +53,9 @@ fn now_unix_ms() -> i64 {
 fn semantic_cache_dir() -> Result<PathBuf> {
     let data_dir = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("share")))
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("share"))
+        })
         .ok_or_else(|| anyhow::anyhow!("no data dir available for semantic-memory cache"))?;
     Ok(data_dir.join("themion").join("fastembed"))
 }
@@ -731,10 +733,9 @@ impl<'a> MemoryStore<'a> {
             });
         }
         let query_embedding = build_text_embeddings(&[query])?;
-        let query_vector = query_embedding
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("semantic query embedding generation returned no vector"))?;
+        let query_vector = query_embedding.into_iter().next().ok_or_else(|| {
+            anyhow::anyhow!("semantic query embedding generation returned no vector")
+        })?;
         let mut scored = Vec::new();
         for (node, blob) in candidates {
             if let Some(embedding) = decode_embedding_blob(&blob)? {
@@ -1108,7 +1109,6 @@ impl OpenGraphArgs {
     }
 }
 
-
 #[cfg(feature = "semantic-memory")]
 #[derive(Debug, Clone)]
 struct PendingEmbeddingCandidate {
@@ -1163,9 +1163,14 @@ fn write_node_embedding_now(
         .into_iter()
         .next()
         .ok_or_else(|| anyhow::anyhow!("semantic embedding generation returned no vector"))?;
-    write_embedding_values(conn, node_id, &embedding, source_updated_at_ms, now_unix_ms())
+    write_embedding_values(
+        conn,
+        node_id,
+        &embedding,
+        source_updated_at_ms,
+        now_unix_ms(),
+    )
 }
-
 
 #[cfg(feature = "semantic-memory")]
 fn pending_embedding_candidates(
@@ -1286,9 +1291,12 @@ fn remove_stale_embeddings_without_nodes(conn: &Connection) -> Result<()> {
 #[cfg(feature = "semantic-memory")]
 fn embedding_input_from_parts(title: &str, content: Option<&str>) -> String {
     match content.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(content) => format!("{}
+        Some(content) => format!(
+            "{}
 
-{}", title, content),
+{}",
+            title, content
+        ),
         None => title.to_string(),
     }
 }
@@ -1320,13 +1328,21 @@ fn semantic_candidates_for_query(
                      AND e2.relation_type = ?",
         );
         params_vec.push(Box::new(relation_type));
-        if let Some(linked) = args.linked_node_id.as_ref().filter(|v| !v.trim().is_empty()) {
+        if let Some(linked) = args
+            .linked_node_id
+            .as_ref()
+            .filter(|v| !v.trim().is_empty())
+        {
             sql.push_str(" AND (e2.from_node_id = ? OR e2.to_node_id = ?)");
             params_vec.push(Box::new(linked.clone()));
             params_vec.push(Box::new(linked.clone()));
         }
         sql.push(')');
-    } else if let Some(linked) = args.linked_node_id.as_ref().filter(|v| !v.trim().is_empty()) {
+    } else if let Some(linked) = args
+        .linked_node_id
+        .as_ref()
+        .filter(|v| !v.trim().is_empty())
+    {
         sql.push_str(
             " AND EXISTS (SELECT 1 FROM memory_edges e2
                    WHERE (e2.from_node_id = n.node_id AND e2.to_node_id = ?)
@@ -1343,9 +1359,13 @@ fn semantic_candidates_for_query(
             }
         }
         HashtagMatch::Any if !args.hashtags.is_empty() => {
-            sql.push_str(" AND n.node_id IN (SELECT node_id FROM memory_node_hashtags WHERE hashtag IN (");
+            sql.push_str(
+                " AND n.node_id IN (SELECT node_id FROM memory_node_hashtags WHERE hashtag IN (",
+            );
             for idx in 0..args.hashtags.len() {
-                if idx > 0 { sql.push_str(", "); }
+                if idx > 0 {
+                    sql.push_str(", ");
+                }
                 sql.push('?');
                 params_vec.push(Box::new(args.hashtags[idx].clone()));
             }
@@ -1355,7 +1375,10 @@ fn semantic_candidates_for_query(
     }
     sql.push_str(" ORDER BY n.updated_at_ms DESC LIMIT ?");
     params_vec.push(Box::new(limit as i64));
-    let params_ref: Vec<&dyn ToSql> = params_vec.iter().map(|v| v.as_ref() as &dyn ToSql).collect();
+    let params_ref: Vec<&dyn ToSql> = params_vec
+        .iter()
+        .map(|v| v.as_ref() as &dyn ToSql)
+        .collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_ref.as_slice(), |row| {
         Ok((

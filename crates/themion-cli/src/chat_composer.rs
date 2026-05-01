@@ -68,7 +68,11 @@ impl ChatComposer {
             Some(i) => i - 1,
         };
         self.history_pos = Some(new_pos);
-        set_input_text(&mut self.input, &mut self.input_state, &self.history[new_pos].clone());
+        set_input_text(
+            &mut self.input,
+            &mut self.input_state,
+            &self.history[new_pos].clone(),
+        );
     }
 
     pub(crate) fn history_down(&mut self) {
@@ -88,7 +92,12 @@ impl ChatComposer {
     }
 
     pub(crate) fn handle_paste_event(&mut self, text: String) {
-        commit_pasted_input(&mut self.input, &mut self.input_state, &mut self.paste_burst, text);
+        commit_pasted_input(
+            &mut self.input,
+            &mut self.input_state,
+            &mut self.paste_burst,
+            text,
+        );
     }
 
     pub(crate) fn handle_key_event(
@@ -100,7 +109,12 @@ impl ChatComposer {
         let now = Instant::now();
         match self.paste_burst.flush_if_due(now) {
             FlushResult::Paste(text) => {
-                commit_pasted_input(&mut self.input, &mut self.input_state, &mut self.paste_burst, text);
+                commit_pasted_input(
+                    &mut self.input,
+                    &mut self.input_state,
+                    &mut self.paste_burst,
+                    text,
+                );
                 return InputAction::RequestDraw;
             }
             FlushResult::Typed(ch) => {
@@ -158,13 +172,23 @@ impl ChatComposer {
             }
 
             if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-                commit_pasted_input(&mut self.input, &mut self.input_state, &mut self.paste_burst, pasted);
+                commit_pasted_input(
+                    &mut self.input,
+                    &mut self.input_state,
+                    &mut self.paste_burst,
+                    pasted,
+                );
             }
         }
 
         if !matches!(key.code, KeyCode::Char(_) | KeyCode::Enter) {
             if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-                commit_pasted_input(&mut self.input, &mut self.input_state, &mut self.paste_burst, pasted);
+                commit_pasted_input(
+                    &mut self.input,
+                    &mut self.input_state,
+                    &mut self.paste_burst,
+                    pasted,
+                );
             }
         }
 
@@ -176,7 +200,10 @@ impl ChatComposer {
             (KeyCode::Enter, KeyModifiers::NONE) => {
                 if review_open {
                     InputAction::CloseTranscriptReview
-                } else if self.paste_burst.newline_should_insert_instead_of_submit(now) {
+                } else if self
+                    .paste_burst
+                    .newline_should_insert_instead_of_submit(now)
+                {
                     self.input.insert_newline();
                     self.paste_burst.extend_window(now);
                     InputAction::RequestDraw
@@ -186,7 +213,12 @@ impl ChatComposer {
             }
             (KeyCode::Enter, KeyModifiers::SHIFT) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
                 if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-                    commit_pasted_input(&mut self.input, &mut self.input_state, &mut self.paste_burst, pasted);
+                    commit_pasted_input(
+                        &mut self.input,
+                        &mut self.input_state,
+                        &mut self.paste_burst,
+                        pasted,
+                    );
                 }
                 self.input.insert_newline();
                 InputAction::RequestDraw
@@ -236,7 +268,12 @@ impl ChatComposer {
 
     fn handle_non_ascii_char(&mut self, key: event::KeyEvent) {
         if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-            commit_pasted_input(&mut self.input, &mut self.input_state, &mut self.paste_burst, pasted);
+            commit_pasted_input(
+                &mut self.input,
+                &mut self.input_state,
+                &mut self.paste_burst,
+                pasted,
+            );
         }
         self.input.input(key);
     }

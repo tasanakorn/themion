@@ -132,9 +132,10 @@ pub async fn run_semantic_memory_index(
     force_full: bool,
 ) -> anyhow::Result<()> {
     let db = app_runtime.db.clone();
-    let report = tokio::task::spawn_blocking(move || db.memory_store().index_pending_embeddings(force_full))
-        .await
-        .map_err(|err| anyhow::anyhow!("semantic index task failed: {}", err))??;
+    let report =
+        tokio::task::spawn_blocking(move || db.memory_store().index_pending_embeddings(force_full))
+            .await
+            .map_err(|err| anyhow::anyhow!("semantic index task failed: {}", err))??;
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }

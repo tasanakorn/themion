@@ -16,16 +16,14 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use chrono::Utc;
 #[cfg(unix)]
-use libc::{ERANGE, _SC_GETPW_R_SIZE_MAX, getpwuid_r, getuid, passwd, sysconf};
+use libc::{getpwuid_r, getuid, passwd, sysconf, ERANGE, _SC_GETPW_R_SIZE_MAX};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::ffi::CStr;
 use std::fs;
-#[cfg(feature = "stylos")]
 use std::future::Future;
 use std::mem::MaybeUninit;
 use std::path::{Path, PathBuf};
-#[cfg(feature = "stylos")]
 use std::pin::Pin;
 use std::ptr;
 use std::sync::Arc;
@@ -345,6 +343,9 @@ type StylosToolFuture = Pin<Box<dyn Future<Output = Result<String>> + Send>>;
 #[cfg(feature = "stylos")]
 pub type StylosToolInvoker = Arc<dyn Fn(String, Value) -> StylosToolFuture + Send + Sync>;
 
+type LocalAgentToolFuture = Pin<Box<dyn Future<Output = Result<String>> + Send>>;
+pub type LocalAgentToolInvoker = Arc<dyn Fn(String, Value) -> LocalAgentToolFuture + Send + Sync>;
+
 const MAX_SLEEP_MS: u64 = 30_000;
 const SELF_TARGET_KEYWORD: &str = "SELF";
 const DEFAULT_READ_MODE: &str = "base64";
@@ -440,6 +441,7 @@ pub struct ToolCtx {
     pub stylos_tool_invoker: Option<StylosToolInvoker>,
     #[cfg(feature = "stylos")]
     pub stylos_enabled: bool,
+    pub local_agent_tool_invoker: Option<LocalAgentToolInvoker>,
     pub system_inspection: Option<SystemInspectionResult>,
 }
 
@@ -849,6 +851,38 @@ pub fn tool_definitions() -> Value {
                         "result_text": { "type": "string" }
                     },
                     "required": ["note_id", "result_text"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "local_agent_create",
+                "description": "Create a new local agent team member in the current Themion instance.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": { "type": "string", "description": "Optional explicit agent id. When omitted, the runtime allocates the next free smith-N worker id." },
+                        "label": { "type": "string", "description": "Optional user-visible label. Defaults to agent_id." },
+                        "roles": { "type": "array", "items": { "type": "string" }, "description": "Optional role list for the new agent. Must not violate local role invariants." },
+                        "reason": { "type": "string", "description": "Optional reason." }
+                    },
+                    "required": []
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "local_agent_delete",
+                "description": "Delete an existing non-leader local agent from the current Themion instance.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": { "type": "string", "description": "Target local agent id." },
+                        "reason": { "type": "string", "description": "Optional reason." }
+                    },
+                    "required": ["agent_id"]
                 }
             }
         }),
@@ -1396,6 +1430,13 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 .unwrap_or_default()),
                 Err(e) => Ok(format!("Error: {e}")),
             }
+        }
+        "local_agent_create" | "local_agent_delete" => {
+            let invoker = ctx
+                .local_agent_tool_invoker
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("local agent management tools unavailable"))?;
+            invoker(name.to_string(), args).await
         }
         #[cfg(feature = "stylos")]
         "stylos_query_agents_alive"

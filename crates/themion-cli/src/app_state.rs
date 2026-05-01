@@ -199,6 +199,7 @@ impl AppState {
             None,
             #[cfg(feature = "stylos")]
             "master",
+            None,
             Some(self.system_inspection_snapshot()),
             false,
         )
@@ -298,6 +299,7 @@ pub fn build_agent(
     #[cfg(feature = "stylos")] stylos_tool_bridge: Option<crate::stylos::StylosToolBridge>,
     #[cfg(feature = "stylos")] local_instance_id: Option<&str>,
     #[cfg(feature = "stylos")] local_agent_id: &str,
+    local_agent_tool_invoker: Option<themion_core::tools::LocalAgentToolInvoker>,
     system_inspection: Option<SystemInspectionResult>,
     api_log_enabled: bool,
 ) -> anyhow::Result<Agent> {
@@ -343,6 +345,7 @@ pub fn build_agent(
     );
     agent.set_api_log_enabled(api_log_enabled);
     agent.set_system_inspection(system_inspection);
+    agent.set_local_agent_tool_invoker(local_agent_tool_invoker);
 
     #[cfg(feature = "stylos")]
     {
