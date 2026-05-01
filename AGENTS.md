@@ -39,12 +39,46 @@ When adding code:
 
 ## Architecture expectations
 
+> [!IMPORTANT]
+> These architecture rules are important repository requirements, not optional preferences.
+> Changes that violate this layering or source-of-truth guidance are not acceptable unless the user explicitly asks for an exception and the docs/instructions are updated accordingly.
+
 - Keep `themion-core` provider/backend logic separate from CLI concerns.
 - Prefer putting reusable agent/runtime logic in `themion-core`.
 - Keep file IO, config loading, TUI event handling, and user-facing flows in `themion-cli`.
 - Treat the TUI as an input/output surface, not as the owner of runtime orchestration or agent-management policy. When adding or changing behavior, prefer putting orchestration, roster mutation, session/agent lifecycle management, and other non-visual runtime control in CLI-local runtime/orchestrator modules such as `app_state.rs`, `app_runtime.rs`, or another focused non-TUI helper. `tui.rs` and `tui_runner.rs` should primarily collect input, forward intents/events, and render resulting state.
+- Stylos transport, agent roster publication, board routing, agent discovery, and other multi-agent runtime logic are not TUI responsibilities. Investigate and implement those behaviors in CLI runtime/orchestrator modules first, and touch `tui.rs` only for display/input wiring that is strictly required.
+- When debugging local-agent visibility or board-targeting issues, do not assume `tui.rs` is the right fix location just because the app has a terminal UI; verify the runtime ownership path and prefer runtime-owned state/publication code.
 - Preserve the `ChatBackend` abstraction when adding or changing model providers.
 - Do not collapse provider-specific behavior into ad hoc conditionals when a backend-specific module already exists.
+
+### Runtime layering and source-of-truth rules
+
+- Preserve this layering by default:
+
+  ```text
+  | TUI | HEADLESS |
+  -----------------
+  | HUB / APP_STATE |
+  -----------------
+  | AGENT CORE | STYLOS |
+  ```
+
+- `TUI` and `HEADLESS` are surfaces. They should send intents/commands and render or report observed runtime state. They must not become the canonical owner of agent roster, workflow, or Stylos-published status.
+- `HUB / APP_STATE` is the runtime owner. It should own agent registry state, session/runtime metadata, workflow state, and the status snapshot that other layers consume.
+- `AGENT CORE` and `STYLOS` are lower-layer services/adapters used by the hub. Stylos should query or publish hub-owned state rather than asking TUI-owned state for the truth.
+- Avoid cross-layer ownership leaks such as TUI-owned agent rosters, TUI-assembled Stylos status snapshots, or direct Stylos-to-TUI dependencies. Treat these as architecture violations to fix, not acceptable end states.
+- When introducing a new runtime behavior, decide first which layer owns the state and which layers only observe or project it.
+
+### Async/eventing guidance
+
+- Prefer layered command flow: use `mpsc` for intents/commands within the runtime ownership boundary.
+- Prefer `tokio::sync::watch` for cross-layer state observation when multiple surfaces or adapters need the same current runtime truth.
+- Use `broadcast` for lossy notifications when appropriate, but do not treat it as the canonical state store.
+- The watched value should be a useful hub-owned snapshot that proves single source of truth, not scattered booleans or UI-local fragments.
+- Keep live executors/resources such as `Agent` objects outside the watched snapshot; publish cheap-to-clone runtime/view snapshots instead.
+- TUI, headless flows, and Stylos status/query paths should all derive their visible state from the same hub-owned snapshot or equivalent runtime-owned state provider.
+- If a design would require reconstructing the same runtime truth separately in TUI and Stylos, stop and move that ownership into the hub/app-state layer instead.
 
 ## Prompt / instruction handling
 
@@ -194,6 +228,8 @@ When implementing an existing PRD, do not consider the task complete until you h
 - When revising phased PRDs, keep the overall product outcome visible so the document does not collapse into a phase-only implementation plan.
 - When writing or revising a PRD, state the product requirement directly and do not silently promote placeholder discussion tokens into the requirement itself.
 - If the user corrects the framing of a PRD, rewrite the document around the corrected product intent rather than preserving misleading earlier wording.
+- Stylos logic is runtime/orchestrator work, not TUI work; when local agent creation, status publication, discovery, or board routing misbehaves, inspect runtime ownership first and only change TUI code for narrow presentation/input plumbing.
+- For cross-layer runtime state, prefer hub/app-state ownership with `watch`-observable snapshots so TUI, headless, and Stylos consume the same source of truth instead of rebuilding state separately.
 
 ## When updating docs
 
