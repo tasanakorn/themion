@@ -94,3 +94,4 @@ Active and recent product requirements documents live in `docs/prd/`. Older impl
 | PRD-082 | [Multi-Agent TUI Agent-Tagged Transcript and Event Highlighting](prd/prd-082-multi-agent-tui-agent-tagged-transcript.md) | Implemented | v0.54.0 | `themion-cli`, docs |
 | PRD-083 | [Concurrent Local Agent Harness Execution and Independent Watchdog Scheduling](prd/prd-083-concurrent-local-agent-harness-and-independent-watchdog.md) | Implemented | v0.54.0 | `themion-core`, `themion-cli`, docs |
 | PRD-084 | [Move Non-Input/Output Responsibilities out of the TUI](prd/prd-084-move-non-input-output-out-of-tui.md) | Implemented | v0.55.0 | `themion-cli`, docs |
+| PRD-085 | [Prefix Non-Agent-Associated Transcript Events with `[xxxx]`](prd/prd-085-improve-transcript-labels-for-runtime-and-board-events-in-the-tui.md) | Draft | >v0.55.0 +patch | `themion-cli`, docs |
