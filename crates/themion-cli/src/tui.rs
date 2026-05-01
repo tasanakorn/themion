@@ -76,6 +76,34 @@ pub(crate) enum AppEvent {
     LocalAgentManagement(LocalAgentManagementRequest),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NonAgentSource {
+    Board,
+    Stylos,
+    Runtime,
+    Watchdog,
+}
+
+impl NonAgentSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Board => "BOARD",
+            Self::Stylos => "STYLOS",
+            Self::Runtime => "RUNTIME",
+            Self::Watchdog => "WATCHDOG",
+        }
+    }
+
+    fn color(self) -> Color {
+        match self {
+            Self::Board => Color::Yellow,
+            Self::Stylos => Color::Cyan,
+            Self::Runtime => Color::Magenta,
+            Self::Watchdog => Color::LightRed,
+        }
+    }
+}
+
 #[derive(Clone)]
 enum Entry {
     User(String),
@@ -92,11 +120,13 @@ enum Entry {
     ToolDone,
     Status {
         agent_id: Option<String>,
+        source: Option<NonAgentSource>,
         text: String,
     },
     #[cfg(feature = "stylos")]
     RemoteEvent {
         agent_id: Option<String>,
+        source: Option<NonAgentSource>,
         text: String,
     },
     TurnDone {
@@ -156,6 +186,19 @@ fn agent_tag_spans(agent_id: Option<&str>, agents: &[AgentHandle]) -> Vec<Span<'
         ],
         None => vec![Span::raw("  ")],
     }
+}
+
+fn non_agent_source_spans(source: Option<NonAgentSource>) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::raw("  ")];
+    if let Some(source) = source {
+        spans.push(Span::styled(
+            format!("[{}] ", source.label()),
+            Style::default()
+                .fg(source.color())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans
 }
 
 fn center_trim(s: &str, max: usize) -> String {
@@ -932,6 +975,7 @@ impl App {
             match handle.state() {
                 StylosRuntimeState::Off => initial_entries.push(Entry::Status {
                     agent_id: None,
+                    source: Some(NonAgentSource::Stylos),
                     text: "stylos disabled".to_string(),
                 }),
                 StylosRuntimeState::Active {
@@ -940,6 +984,7 @@ impl App {
                     instance,
                 } => initial_entries.push(Entry::Status {
                     agent_id: None,
+                    source: Some(NonAgentSource::Stylos),
                     text: format!(
                         "stylos ready: mode={} realm={} instance={}",
                         mode, realm, instance
@@ -947,6 +992,7 @@ impl App {
                 }),
                 StylosRuntimeState::Error(err) => initial_entries.push(Entry::Status {
                     agent_id: None,
+                    source: Some(NonAgentSource::Stylos),
                     text: format!("stylos start failed: {}", err),
                 }),
             }
@@ -1210,6 +1256,7 @@ impl App {
         if interrupted_any {
             self.push(Entry::Status {
                 agent_id: None,
+                source: Some(NonAgentSource::Runtime),
                 text: "interrupt requested".to_string(),
             });
         }
@@ -1219,6 +1266,7 @@ impl App {
         self.ctrl_c_exit_armed_until = Some(Instant::now() + CTRL_C_EXIT_CONFIRM_WINDOW);
         self.push(Entry::Status {
             agent_id: None,
+            source: Some(NonAgentSource::Runtime),
             text: "Press Ctrl+C again within 3s to exit".to_string(),
         });
         self.mark_dirty_status();
@@ -1466,6 +1514,7 @@ impl App {
                 if let Some(event) = self.last_sender_side_transport_event.take() {
                     self.push(Entry::RemoteEvent {
                         agent_id: event.agent_id,
+                        source: Some(NonAgentSource::Stylos),
                         text: event.text,
                     });
                 }
@@ -1474,6 +1523,7 @@ impl App {
             AgentEvent::Status(text) => {
                 self.push(Entry::Status {
                     agent_id: agent_id_for_session(&self.agents, sid),
+                    source: None,
                     text,
                 });
             }
@@ -2478,6 +2528,7 @@ impl App {
                         };
                         self.push(Entry::RemoteEvent {
                             agent_id: None,
+                            source: Some(NonAgentSource::Board),
                             text: message,
                         });
                         if let (Some(handle), Some(task_id)) =
@@ -2546,6 +2597,7 @@ impl App {
         finalize_board_note_injection(&self.db, &self.board_claims, &selection.action.note_id);
         self.push(Entry::RemoteEvent {
             agent_id: selection.action.request.agent_id.clone(),
+            source: if selection.action.request.agent_id.is_some() { None } else { Some(NonAgentSource::Watchdog) },
             text: selection.action.log_line,
         });
         let prompt = selection.action.request.prompt.clone();
@@ -2578,6 +2630,7 @@ impl App {
             BoardTurnFollowUp::EmitDoneMention { log_line } => {
                 self.push(Entry::RemoteEvent {
                     agent_id: None,
+                    source: Some(NonAgentSource::Board),
                     text: log_line,
                 });
                 false
@@ -2585,6 +2638,7 @@ impl App {
             BoardTurnFollowUp::EmitDoneMentionError { status_line } => {
                 self.push(Entry::Status {
                     agent_id: None,
+                    source: Some(NonAgentSource::Board),
                     text: status_line,
                 });
                 false
@@ -2881,6 +2935,7 @@ impl App {
                 .iter()
                 .find(|h| is_interactive_handle(h))
                 .map(|h| h.agent_id.clone()),
+            source: None,
             text: format!(
                 "Stylos cmd scope=local preview={}",
                 cmd.prompt.lines().next().unwrap_or("")
@@ -2900,6 +2955,7 @@ impl App {
     pub(crate) fn handle_stylos_event_text(&mut self, text: String) {
         self.push(Entry::RemoteEvent {
             agent_id: None,
+            source: Some(NonAgentSource::Stylos),
             text,
         });
     }
@@ -2925,7 +2981,8 @@ impl App {
                 ..
             } => {
                 self.push(Entry::RemoteEvent {
-                    agent_id: log_agent_id,
+                    agent_id: log_agent_id.clone(),
+                    source: if log_agent_id.is_some() { None } else { Some(NonAgentSource::Stylos) },
                     text: log_text,
                 });
                 if let (Some(handle), Some(task_id)) = (self.stylos.as_ref(), failed_task_id) {
@@ -2947,7 +3004,8 @@ impl App {
                 pending_watchdog_note,
             } => {
                 self.push(Entry::RemoteEvent {
-                    agent_id: log_agent_id,
+                    agent_id: log_agent_id.clone(),
+                    source: if log_agent_id.is_some() { None } else { Some(NonAgentSource::Stylos) },
                     text: log_text,
                 });
                 self.agents[agent_index].active_incoming_prompt = Some(request);
@@ -3187,11 +3245,15 @@ fn build_lines<'a>(
                 }
             }
             #[cfg(feature = "stylos")]
-            Entry::RemoteEvent { agent_id, text } => {
-                let mut spans = agent_tag_spans(agent_id.as_deref(), agents);
+            Entry::RemoteEvent { agent_id, source, text } => {
+                let mut spans = if let Some(agent_id) = agent_id.as_deref() {
+                    agent_tag_spans(Some(agent_id), agents)
+                } else {
+                    non_agent_source_spans(*source)
+                };
                 spans.push(Span::styled(
                     format!("󰀂 {}", text),
-                    Style::default().fg(Color::Magenta),
+                    Style::default().fg(source.unwrap_or(NonAgentSource::Stylos).color()),
                 ));
                 lines.push(Line::from(spans));
             }
@@ -3226,11 +3288,15 @@ fn build_lines<'a>(
                     lines.push(Line::from(spans));
                 }
             }
-            Entry::Status { agent_id, text } => {
-                let mut spans = agent_tag_spans(agent_id.as_deref(), agents);
+            Entry::Status { agent_id, source, text } => {
+                let mut spans = if let Some(agent_id) = agent_id.as_deref() {
+                    agent_tag_spans(Some(agent_id), agents)
+                } else {
+                    non_agent_source_spans(*source)
+                };
                 spans.push(Span::styled(
                     format!("󰇺 {}", text),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(source.unwrap_or(NonAgentSource::Runtime).color()),
                 ));
                 lines.push(Line::from(spans));
             }

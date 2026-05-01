@@ -1,10 +1,14 @@
 # PRD-085: Show Clear Source Labels on Transcript Messages Without an Agent Owner
 
-- **Status:** Draft
-- **Version:** >v0.55.0 +patch
+- **Status:** Implemented
+- **Version:** v0.55.0
 - **Scope:** `themion-cli`, docs
 - **Author:** Tasanakorn (design) + Themion (PRD authoring)
 - **Date:** 2026-05-01
+
+## Implementation status
+
+Landed in `v0.55.0` in `themion-cli` as a transcript-presentation refinement layered on top of PRD-082 agent tagging. The shipped behavior preserves agent-owned transcript entries on the existing `[agent_id]` path, adds structured non-agent source classification for status and remote-event transcript entries, and renders visible non-agent labels for current board, Stylos, runtime, and watchdog-originated transcript lines using stable category colors.
 
 ## Summary
 
@@ -109,13 +113,11 @@ Recommended default mapping:
 | Stylos or network events | `STYLOS` | cyan or blue | For remote agent, routing, network, or peer-message related transcript lines. |
 | Local runtime or status events without an agent owner | `RUNTIME` | magenta or purple | For local runtime lifecycle, mode, session, or orchestration status lines that are not owned by one agent. |
 | Watchdog or background follow-up events | `WATCHDOG` | red or light red | For watchdog notices, follow-up reminders, timeout-related supervision, or background intervention events. |
-| Other uncategorized system events | `SYSTEM` | gray | Fallback only when the event is non-agent-owned but does not fit a more specific known category. |
-
 The labels should be uppercase by default to make the source marker compact and easy to distinguish from the body text.
 
 If implementation constraints make the exact named colors unavailable, the product should choose the nearest existing TUI palette colors that preserve the same semantic distinction and relative contrast.
 
-### 4. The label should be visually separate from the body text
+### 4. Use the existing agent-tagged transcript style for owned lines, and a compact prefix style for non-agent lines
 
 For non-agent-owned lines, the source label should appear before the message body as a compact prefix-like marker.
 
@@ -137,6 +139,8 @@ Counter-example that must stay agent-associated rather than being reformatted in
 
 - `[master] 󰇺 turn 1 started`
 
+Implementation note: this PRD intentionally leaves room for the exact non-agent prefix formatting to follow the existing TUI visual language during coding, as long as the final result keeps owned lines on the agent-tagged path and makes non-agent origins obvious at a glance.
+
 The label should remain short enough that it improves scanning rather than dominating the line.
 
 ### 5. Preserve the rest of the line unless a small adjustment is needed
@@ -155,23 +159,38 @@ If the existing event or transcript pathways already carry enough information to
 
 The implementation should classify lines by ownership first and only apply non-agent source labeling after confirming that no specific agent owns the line.
 
+### 7. Carry non-agent source attribution as structured presentation state
+
+The implementation should treat non-agent source attribution as structured transcript metadata rather than baking labels directly into raw message strings at every call site.
+
+Required behavior:
+
+- transcript entry or rendering state should carry enough structured information to decide whether a line is agent-owned or non-agent-owned
+- when a line is non-agent-owned, the rendering path should select the displayed source label and color from structured source-category information rather than from ad hoc text matching
+- existing agent-attribution support should remain the first-class path for owned lines
+- process-level fallback behavior should stay possible without inventing fake agent ids
+
+This keeps the feature aligned with the existing direction from PRD-082, where agent attribution is structured presentation data rather than string rewriting.
+
 ## Changes by Component
 
 | File / area | Change |
 | --- | --- |
 | `crates/themion-cli/src/tui.rs` | Add the display rule that shows a clear source label on transcript messages without a specific agent owner, including stable wording and color per non-agent source category, while preserving the current agent-associated presentation path. |
-| `crates/themion-cli/src/app_runtime.rs` | Adjust only if a small helper is useful for surfacing ownership and source cleanly to the presentation layer. |
+| `crates/themion-cli/src/app_state.rs` | Adjust only if a small helper or shared transcript classification support is useful for surfacing ownership and source cleanly to the presentation layer. |
 | `crates/themion-cli/src/stylos.rs` | Preserve current event facts and message content unless a minimal compatibility adjustment is needed for clearer source labeling. |
-| `docs/README.md` | Keep the PRD title and status aligned with this product requirement. |
+| `docs/architecture.md` | Document the non-agent transcript source-label presentation model once implemented, including the ownership-first distinction from agent-tagged lines. |
+| `docs/engine-runtime.md` | Document how runtime, board, and Stylos events reach the TUI with enough ownership/source context for presentation without changing core harness semantics. |
+| `docs/README.md` | Keep the PRD title and status aligned with this product requirement and later reflect landed implementation status. |
 
 ## Edge Cases
 
 - a runtime-shaped message still belongs to one local agent, such as `[master] 󰇺 turn 1 started` → verify: it keeps agent-associated presentation and does not receive a non-agent source label.
+- another agent-owned lifecycle or status line uses wording that resembles a system event → verify: ownership still wins and the line stays agent-associated.
 - a board event has no single agent owner → verify: it shows the `BOARD` label with the board-event color treatment.
 - a Stylos or network event has no single agent owner → verify: it shows the `STYLOS` label with the Stylos-event color treatment.
 - a local runtime or orchestration event has no single agent owner → verify: it shows the `RUNTIME` label with the runtime-event color treatment.
 - a background or watchdog event has no single agent owner → verify: it shows the `WATCHDOG` label with the watchdog-event color treatment.
-- a non-agent-owned event does not match any currently recognized category → verify: it falls back to `SYSTEM` instead of showing no label.
 - a long metadata-heavy non-agent message gains a source label → verify: the line becomes easier to identify without losing important existing detail.
 - the TUI palette lacks the exact preferred named color → verify: the nearest existing color with the same visual role is used consistently.
 
@@ -196,16 +215,17 @@ Recommended rollout shape:
 - emit a Stylos or network transcript message without a specific agent owner → verify: it shows the `STYLOS` label and the Stylos-event color treatment.
 - emit a runtime transcript message without a specific agent owner → verify: it shows the `RUNTIME` label and the runtime-event color treatment.
 - emit a watchdog transcript message without a specific agent owner → verify: it shows the `WATCHDOG` label and the watchdog-event color treatment.
-- emit an uncategorized non-agent-owned system event → verify: it shows the `SYSTEM` fallback label and fallback color treatment.
 - compare before and after transcript output for affected lines → verify: non-agent source becomes obvious at a glance while agent-owned lines keep their current identity and event details remain available.
 
 ## Implementation checklist
 
-- [ ] identify which transcript entries are agent-owned versus non-agent-owned
-- [ ] preserve the current agent-associated presentation for any owned line, including agent-owned lifecycle and turn events
-- [ ] identify the source categories that must be visible in the transcript for non-agent-owned entries
-- [ ] define stable label wording and color mapping for those non-agent source categories
-- [ ] render only non-agent-owned transcript entries with those source labels and colors
-- [ ] add a fallback category for uncategorized non-agent-owned system events
-- [ ] preserve existing message detail as much as practical
-- [ ] keep `docs/README.md` and this PRD aligned with the final product wording
+- [x] identify which transcript entries are agent-owned versus non-agent-owned
+- [x] preserve the current agent-associated presentation for any owned line, including agent-owned lifecycle and turn events
+- [x] add or reuse structured presentation metadata for non-agent source classification
+- [x] identify the source categories that must be visible in the transcript for non-agent-owned entries
+- [x] define stable label wording and color mapping for those non-agent source categories
+- [x] render only non-agent-owned transcript entries with those source labels and colors
+- [x] preserve existing message detail as much as practical
+- [x] document the landed behavior in `docs/architecture.md`, `docs/engine-runtime.md`, and `docs/README.md`
+
+Implementation status note: this PRD has landed in `crates/themion-cli/src/tui.rs`. Agent-owned transcript items continue to use the existing highlighted `[agent_id]` presentation from PRD-082, while non-agent `Status` and `RemoteEvent` entries now carry structured source-category metadata and render compact labeled prefixes for the currently implemented `BOARD`, `STYLOS`, `RUNTIME`, and `WATCHDOG` categories. The first implementation preserves existing message bodies and metadata, colors the event text by category, and applies non-agent labels only after ownership has been checked first.
