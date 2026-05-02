@@ -233,7 +233,6 @@ impl RunnerContext {
 }
 
 
-#[cfg(feature = "stylos")]
 async fn shutdown_app(_app: &mut App, ctx: RunnerContext) {
     ctx.shutdown();
     drop(ctx.app_tx);

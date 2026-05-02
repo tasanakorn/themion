@@ -2179,7 +2179,7 @@ fn stylos_note_header_value<'a>(prompt: &'a str, key: &str) -> Option<&'a str> {
 }
 
 #[cfg(feature = "stylos")]
-fn stylos_note_display_identifier(prompt: &str) -> String {
+pub(crate) fn stylos_note_display_identifier(prompt: &str) -> String {
     if let Some(note_slug) = stylos_note_header_value(prompt, "note_slug") {
         format!("note_slug={note_slug}")
     } else if let Some(note_id) = stylos_note_header_value(prompt, "note_id") {
@@ -2469,7 +2469,7 @@ pub(crate) fn build_and_publish_stylos_status_snapshot(
 
 
 
-#[cfg(test)]
+#[cfg(all(test, feature = "stylos"))]
 mod tests {
     use super::stylos_note_display_identifier;
 

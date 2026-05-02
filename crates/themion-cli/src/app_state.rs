@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{save_profiles, Config};
 use crate::tui::{AppEvent, App, Entry, FrameRequester};
 #[cfg(feature = "stylos")]
 use crate::app_runtime::{start_watchdog_task, WatchdogRuntimeState};
@@ -20,6 +20,7 @@ use crate::app_runtime::{
 };
 use themion_core::tools::SystemInspectionResult;
 use themion_core::ChatBackend;
+use tokio::process::Command;
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
@@ -593,6 +594,144 @@ pub(crate) fn on_tick(app: &mut App) {
 }
 
 
+
+
+pub(crate) fn session_config_lines(session: &Session) -> Vec<String> {
+    let key_display = match &session.api_key {
+        Some(k) if k.len() > 8 => format!("{}…", &k[..8]),
+        Some(_) => "(set)".to_string(),
+        None => "(none)".to_string(),
+    };
+    let mut out = vec![
+        format!("profile  : {}", session.active_profile),
+        format!("provider : {}", session.provider),
+        format!("model    : {}", session.model),
+        format!("endpoint : {}", session.base_url),
+        format!("api_key  : {}", key_display),
+    ];
+    if session.temporary_profile_override.is_some() || session.temporary_model_override.is_some() {
+        out.push(
+            "note     : temporary session-only override active; config on disk unchanged"
+                .to_string(),
+        );
+    }
+    out
+}
+
+pub(crate) fn session_show_lines(session: &Session) -> Vec<String> {
+    vec![
+        format!("configured profile : {}", session.configured_profile),
+        format!("effective profile   : {}", session.active_profile),
+        format!("effective provider  : {}", session.provider),
+        format!("effective model     : {}", session.model),
+        format!(
+            "temporary profile override : {}",
+            session
+                .temporary_profile_override
+                .as_deref()
+                .unwrap_or("(none)")
+        ),
+        format!(
+            "temporary model override   : {}",
+            session
+                .temporary_model_override
+                .as_deref()
+                .unwrap_or("(none)")
+        ),
+    ]
+}
+
+pub(crate) fn config_profile_list_lines(session: &Session) -> Vec<String> {
+    let mut names: Vec<String> = session.profiles.keys().cloned().collect();
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| {
+            let marker = if name == session.active_profile { "* " } else { "  " };
+            format!("{}{}", marker, name)
+        })
+        .collect()
+}
+
+pub(crate) async fn handle_login_complete_event(
+    app: &mut App,
+    profile_name: String,
+    auth_result: anyhow::Result<themion_core::CodexAuth>,
+    frame_requester: &FrameRequester,
+) {
+    match auth_result {
+        Ok(auth) => {
+            clear_agent_activity(app);
+            if let Err(e) = crate::auth_store::save_for_profile(&profile_name, &auth) {
+                app.push(Entry::Assistant {
+                    agent_id: None,
+                    text: format!("warning: failed to save auth: {}", e),
+                });
+            }
+            app.runtime
+                .session
+                .profiles
+                .insert(profile_name.clone(), crate::config::codex_profile_defaults());
+            app.runtime.session.configured_profile = profile_name.clone();
+            app.runtime.session.switch_profile(&profile_name);
+            if let Err(e) = save_profiles(&app.runtime.session.active_profile, &app.runtime.session.profiles)
+            {
+                app.push(Entry::Assistant {
+                    agent_id: None,
+                    text: format!("warning: failed to save config: {}", e),
+                });
+            }
+            match crate::app_runtime::build_replacement_main_agent(crate::app_runtime::AgentReplacementParams {
+                session: &app.runtime.session,
+                project_dir: &app.runtime.project_dir,
+                db: &app.runtime.db,
+                #[cfg(feature = "stylos")]
+                stylos_tool_bridge: app.runtime.stylos_tool_bridge.clone(),
+                #[cfg(feature = "stylos")]
+                local_stylos_instance: app.runtime.local_stylos_instance.as_deref(),
+                api_log_enabled: app.runtime.api_log_enabled,
+                local_agent_mgmt_tx: app.runtime.local_agent_mgmt_tx.clone(),
+                insert_session: true,
+            }) {
+                Ok((mut new_agent, new_session_id)) => {
+                    new_agent.refresh_model_info().await;
+                    runtime_replace_master_agent(&mut app.runtime, new_agent, new_session_id);
+                    publish_runtime_snapshot(app);
+                    app.push(Entry::Assistant {
+                        agent_id: None,
+                        text: format!(
+                            "logged in as {} — switched to Codex profile '{}' ({})",
+                            auth.account_id,
+                            profile_name,
+                            app.runtime.session.model
+                        ),
+                    });
+                    app.push(Entry::Blank);
+                    app.mark_dirty_all();
+                    app.request_draw(frame_requester);
+                }
+                Err(e) => {
+                    app.push(Entry::Assistant {
+                        agent_id: None,
+                        text: format!("login succeeded but agent build failed: {}", e),
+                    });
+                    app.mark_dirty_all();
+                    app.request_draw(frame_requester);
+                }
+            }
+        }
+        Err(e) => {
+            clear_agent_activity(app);
+            app.push(Entry::Assistant {
+                agent_id: None,
+                text: format!("login failed: {}", e),
+            });
+            app.mark_dirty_all();
+            app.request_draw(frame_requester);
+        }
+    }
+}
+
 pub(crate) fn handle_runtime_command(
     app: &mut App,
     command: crate::app_runtime::RuntimeCommand,
@@ -1111,6 +1250,74 @@ pub(crate) fn handle_shell_complete_event(
     app.request_draw(frame_requester);
 }
 
+
+pub(crate) fn submit_shell_command(app: &mut App, command: &str) {
+    let command = command.trim_start().to_string();
+    app.push(Entry::User(format!("!{}", command)));
+
+    if command.is_empty() {
+        app.push(Entry::Assistant {
+            agent_id: None,
+            text: "empty shell command".to_string(),
+        });
+        app.push(Entry::Blank);
+        return;
+    }
+
+    app.runtime.agent_busy = true;
+    set_agent_activity(app, AgentActivity::RunningShellCommand);
+
+    let tx = app.runtime.runtime_tx.clone();
+    let project_dir = app.runtime.project_dir.clone();
+    app.runtime.background_domain().spawn(async move {
+        let result = Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .current_dir(project_dir)
+            .output()
+            .await;
+
+        let (output, exit_code) = match result {
+            Ok(output) => {
+                let mut text = String::new();
+                text.push_str(&String::from_utf8_lossy(&output.stdout));
+                text.push_str(&String::from_utf8_lossy(&output.stderr));
+                let trimmed = text.trim_end_matches(['\n', '\r']);
+                let display = if trimmed.is_empty() {
+                    "(no output)".to_string()
+                } else {
+                    trimmed.to_string()
+                };
+                (display, output.status.code())
+            }
+            Err(e) => (format!("failed to run shell command: {}", e), None),
+        };
+
+        let _ = tx.send(AppRuntimeEvent::ShellComplete { output, exit_code });
+    });
+}
+
+pub(crate) fn request_app_exit(app: &mut App) {
+    app.runtime.running = false;
+}
+
+pub(crate) fn confirm_ctrl_c_exit(app: &mut App) {
+    app.runtime.ctrl_c_exit_armed_until = None;
+    app.runtime.running = false;
+}
+
+#[cfg(not(feature = "stylos"))]
+pub(crate) fn submit_text_default(app: &mut App, text: String) {
+    let agent_index = app
+        .runtime
+        .agents
+        .iter()
+        .position(crate::app_runtime::is_interactive_agent_handle)
+        .expect("interactive agent");
+    app.push(crate::tui::Entry::User(text.clone()));
+    submit_text_to_agent(app, agent_index, text);
+}
+
 pub(crate) fn submit_text_to_agent(
     app: &mut App,
     agent_index: usize,
@@ -1462,9 +1669,10 @@ pub(crate) async fn start_tui_runtime_services(
 }
 
 
+#[cfg(feature = "stylos")]
 pub async fn start_stylos(
     app_state: &AppState,
-    #[cfg(feature = "stylos")] shared_status_hub: Option<crate::app_runtime::SharedStylosStatusHub>,
+    shared_status_hub: Option<crate::app_runtime::SharedStylosStatusHub>,
 ) -> anyhow::Result<crate::stylos::StylosHandle> {
     match app_state
         .runtime_domains
@@ -1488,8 +1696,6 @@ pub async fn start_stylos(
     }
 }
 
-#[cfg(feature = "stylos")]
-#[cfg(feature = "stylos")]
 #[cfg(feature = "stylos")]
 pub fn create_done_mention_locally(
     db: &DbHandle,

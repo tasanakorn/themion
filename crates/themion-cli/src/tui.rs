@@ -1,18 +1,12 @@
-use crate::app_runtime::{
-    build_replacement_main_agent, is_interactive_agent_handle,
-    AgentReplacementParams, LocalAgentManagementRequest, RuntimeCommand,
-};
+use crate::app_runtime::{is_interactive_agent_handle, LocalAgentManagementRequest, RuntimeCommand};
 #[cfg(feature = "stylos")]
 use crate::app_runtime::agent_has_role;
-#[cfg(feature = "stylos")]
-use crate::app_state::{activity_status_value, clear_agent_activity as app_state_clear_agent_activity, on_tick as app_state_on_tick, publish_runtime_snapshot as app_state_publish_runtime_snapshot, AppRuntimeEvent, AppRuntimeState, set_agent_activity as app_state_set_agent_activity, AgentActivity, AppSnapshot};
+use crate::app_state::{activity_status_value, on_tick as app_state_on_tick, publish_runtime_snapshot as app_state_publish_runtime_snapshot, AppRuntimeState, set_agent_activity as app_state_set_agent_activity, AgentActivity, AppSnapshot};
 use crate::chat_composer::{ChatComposer, InputAction};
-use crate::config::save_profiles;
 use crate::runtime_domains::DomainHandle;
 #[cfg(feature = "stylos")]
 use crate::stylos::StylosRuntimeState;
 
-#[cfg(feature = "stylos")]
 use crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
 use ratatui::{
     backend::CrosstermBackend,
@@ -30,7 +24,6 @@ use themion_core::{
     EstimateMode, PromptContextReport, PromptSectionKind, ReplayForm, TokenizerResolutionSource,
     ToolEstimateMode,
 };
-use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
@@ -814,20 +807,8 @@ impl App {
         self.runtime.agents.iter_mut().find(|h| agent_has_role(h, "master"))
     }
 
-    fn replace_master_agent(&mut self, new_agent: Agent, new_session_id: Uuid) {
-        crate::app_state::runtime_replace_master_agent(&mut self.runtime, new_agent, new_session_id);
-        app_state_publish_runtime_snapshot(self);
-    }
     pub(crate) fn any_agent_busy(&self) -> bool {
         crate::app_state::runtime_any_agent_busy(&self.runtime)
-    }
-
-    pub(crate) fn handle_local_agent_management_request(
-        &mut self,
-        request: LocalAgentManagementRequest,
-        frame_requester: &FrameRequester,
-    ) {
-        crate::app_state::handle_local_agent_management_request(self, request, frame_requester);
     }
 
     fn enter_browsed_history(&mut self) {
@@ -872,9 +853,6 @@ impl App {
         app_state_set_agent_activity(self, activity);
     }
 
-    fn clear_agent_activity(&mut self) {
-        app_state_clear_agent_activity(self);
-    }
 
 
     fn request_interrupt(&mut self) {
@@ -1165,53 +1143,11 @@ impl App {
         }
 
         if input == "/config" {
-            let key_display = match &self.runtime.session.api_key {
-                Some(k) if k.len() > 8 => format!("{}…", &k[..8]),
-                Some(_) => "(set)".to_string(),
-                None => "(none)".to_string(),
-            };
-            out.push(format!("profile  : {}", self.runtime.session.active_profile));
-            out.push(format!("provider : {}", self.runtime.session.provider));
-            out.push(format!("model    : {}", self.runtime.session.model));
-            out.push(format!("endpoint : {}", self.runtime.session.base_url));
-            out.push(format!("api_key  : {}", key_display));
-            if self.runtime.session.temporary_profile_override.is_some()
-                || self.runtime.session.temporary_model_override.is_some()
-            {
-                out.push(
-                    "note     : temporary session-only override active; config on disk unchanged"
-                        .to_string(),
-                );
-            }
-            return out;
+            return crate::app_state::session_config_lines(&self.runtime.session);
         }
 
         if input == "/session show" {
-            out.push(format!(
-                "configured profile : {}",
-                self.runtime.session.configured_profile
-            ));
-            out.push(format!(
-                "effective profile   : {}",
-                self.runtime.session.active_profile
-            ));
-            out.push(format!("effective provider  : {}", self.runtime.session.provider));
-            out.push(format!("effective model     : {}", self.runtime.session.model));
-            out.push(format!(
-                "temporary profile override : {}",
-                self.runtime.session
-                    .temporary_profile_override
-                    .as_deref()
-                    .unwrap_or("(none)")
-            ));
-            out.push(format!(
-                "temporary model override   : {}",
-                self.runtime.session
-                    .temporary_model_override
-                    .as_deref()
-                    .unwrap_or("(none)")
-            ));
-            return out;
+            return crate::app_state::session_show_lines(&self.runtime.session);
         }
 
         if let Some(rest) = input.strip_prefix("/session ") {
@@ -1254,28 +1190,10 @@ impl App {
             let parts: Vec<&str> = rest.splitn(3, ' ').collect();
             match parts.as_slice() {
                 ["profile"] | ["profile", "list"] => {
-                    let mut names: Vec<String> = self.runtime.session.profiles.keys().cloned().collect();
-                    names.sort();
-                    for name in names {
-                        let marker = if name == self.runtime.session.active_profile {
-                            "* "
-                        } else {
-                            "  "
-                        };
-                        out.push(format!("{}{}", marker, name));
-                    }
+                    out.extend(crate::app_state::config_profile_list_lines(&self.runtime.session));
                 }
                 ["profile", "show"] => {
-                    let key_display = match &self.runtime.session.api_key {
-                        Some(k) if k.len() > 8 => format!("{}…", &k[..8]),
-                        Some(_) => "(set)".to_string(),
-                        None => "(none)".to_string(),
-                    };
-                    out.push(format!("profile  : {}", self.runtime.session.active_profile));
-                    out.push(format!("provider : {}", self.runtime.session.provider));
-                    out.push(format!("model    : {}", self.runtime.session.model));
-                    out.push(format!("endpoint : {}", self.runtime.session.base_url));
-                    out.push(format!("api_key  : {}", key_display));
+                    out.extend(crate::app_state::session_config_lines(&self.runtime.session));
                 }
                 ["profile", "create", name] => {
                     app_tx
@@ -1405,51 +1323,7 @@ impl App {
         }
     }
 
-    fn submit_shell_command(&mut self, command: &str) {
-        let command = command.trim_start().to_string();
-        self.push(Entry::User(format!("!{}", command)));
 
-        if command.is_empty() {
-            self.push(Entry::Assistant {
-                agent_id: None,
-                text: "empty shell command".to_string(),
-            });
-            self.push(Entry::Blank);
-            return;
-        }
-
-        self.runtime.agent_busy = true;
-        self.set_agent_activity(AgentActivity::RunningShellCommand);
-
-        let tx = self.runtime.runtime_tx.clone();
-        let project_dir = self.runtime.project_dir.clone();
-        self.runtime.background_domain().spawn(async move {
-            let result = Command::new("sh")
-                .arg("-c")
-                .arg(&command)
-                .current_dir(project_dir)
-                .output()
-                .await;
-
-            let (output, exit_code) = match result {
-                Ok(output) => {
-                    let mut text = String::new();
-                    text.push_str(&String::from_utf8_lossy(&output.stdout));
-                    text.push_str(&String::from_utf8_lossy(&output.stderr));
-                    let trimmed = text.trim_end_matches(['\n', '\r']);
-                    let display = if trimmed.is_empty() {
-                        "(no output)".to_string()
-                    } else {
-                        trimmed.to_string()
-                    };
-                    (display, output.status.code())
-                }
-                Err(e) => (format!("failed to run shell command: {}", e), None),
-            };
-
-            let _ = tx.send(AppRuntimeEvent::ShellComplete { output, exit_code });
-        });
-    }
 
     pub(crate) fn submit_text(&mut self, text: String, app_tx: &mpsc::UnboundedSender<AppEvent>) {
         let text = text.trim().to_string();
@@ -1460,12 +1334,12 @@ impl App {
         self.return_to_latest();
 
         if text == "/exit" || text == "/quit" {
-            self.runtime.running = false;
+            crate::app_state::request_app_exit(self);
             return;
         }
 
         if let Some(command) = text.strip_prefix('!') {
-            self.submit_shell_command(command);
+            crate::app_state::submit_shell_command(self, command);
             return;
         }
 
@@ -1489,18 +1363,7 @@ impl App {
             return;
         }
         #[cfg(not(feature = "stylos"))]
-        let agent_index = {
-            self.runtime.agents
-                .iter()
-                .position(is_interactive_agent_handle)
-                .expect("interactive agent")
-        };
-
-        #[cfg(not(feature = "stylos"))]
-        self.push(Entry::User(text.clone()));
-
-        #[cfg(not(feature = "stylos"))]
-        crate::app_state::submit_text_to_agent(self, agent_index, text);
+        crate::app_state::submit_text_default(self, text);
     }
 
     fn submit_input(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) -> bool {
@@ -1595,91 +1458,16 @@ impl App {
                 self.handle_login_prompt_event(user_code, verification_uri, frame_requester);
             }
             AppEvent::LoginComplete { profile_name, auth_result } => {
-                self.handle_login_complete_event(profile_name, auth_result, frame_requester)
+                crate::app_state::handle_login_complete_event(self, profile_name, auth_result, frame_requester)
                     .await;
             }
             AppEvent::LocalAgentManagement(request) => {
-                self.handle_local_agent_management_request(request, frame_requester);
+                crate::app_state::handle_local_agent_management_request(self, request, frame_requester);
             }
         }
     }
 
-    pub(crate) async fn handle_login_complete_event(
-        &mut self,
-        profile_name: String,
-        auth_result: anyhow::Result<themion_core::CodexAuth>,
-        frame_requester: &FrameRequester,
-    ) {
-        match auth_result {
-            Ok(auth) => {
-                self.clear_agent_activity();
-                if let Err(e) = crate::auth_store::save_for_profile(&profile_name, &auth) {
-                    self.push(Entry::Assistant {
-                        agent_id: None,
-                        text: format!("warning: failed to save auth: {}", e),
-                    });
-                }
-                self.runtime.session
-                    .profiles
-                    .insert(profile_name.clone(), crate::config::codex_profile_defaults());
-                self.runtime.session.configured_profile = profile_name.clone();
-                self.runtime.session.switch_profile(&profile_name);
-                if let Err(e) = save_profiles(&self.runtime.session.active_profile, &self.runtime.session.profiles)
-                {
-                    self.push(Entry::Assistant {
-                        agent_id: None,
-                        text: format!("warning: failed to save config: {}", e),
-                    });
-                }
-                match build_replacement_main_agent(AgentReplacementParams {
-                    session: &self.runtime.session,
-                    project_dir: &self.runtime.project_dir,
-                    db: &self.runtime.db,
-                    #[cfg(feature = "stylos")]
-                    stylos_tool_bridge: self.runtime.stylos_tool_bridge.clone(),
-                    #[cfg(feature = "stylos")]
-                    local_stylos_instance: self.runtime.local_stylos_instance.as_deref(),
-                    api_log_enabled: self.runtime.api_log_enabled,
-                    local_agent_mgmt_tx: self.runtime.local_agent_mgmt_tx.clone(),
-                    insert_session: true,
-                }) {
-                    Ok((mut new_agent, new_session_id)) => {
-                        new_agent.refresh_model_info().await;
-                        self.replace_master_agent(new_agent, new_session_id);
-                        self.push(Entry::Assistant {
-                            agent_id: None,
-                            text: format!(
-                                "logged in as {} — switched to Codex profile '{}' ({})",
-                                auth.account_id,
-                                profile_name,
-                                self.runtime.session.model
-                            ),
-                        });
-                        self.push(Entry::Blank);
-                        self.mark_dirty_all();
-                        self.request_draw(frame_requester);
-                    }
-                    Err(e) => {
-                        self.push(Entry::Assistant {
-                            agent_id: None,
-                            text: format!("login succeeded but agent build failed: {}", e),
-                        });
-                        self.mark_dirty_all();
-                        self.request_draw(frame_requester);
-                    }
-                }
-            }
-            Err(e) => {
-                self.clear_agent_activity();
-                self.push(Entry::Assistant {
-                    agent_id: None,
-                    text: format!("login failed: {}", e),
-                });
-                self.mark_dirty_all();
-                self.request_draw(frame_requester);
-            }
-        }
-    }
+
 
     pub(crate) fn handle_draw_event(
         &mut self,
@@ -1727,8 +1515,7 @@ impl App {
             InputAction::Quit => {
                 let now = Instant::now();
                 if self.ctrl_c_exit_is_armed(now) {
-                    self.runtime.ctrl_c_exit_armed_until = None;
-                    self.runtime.running = false;
+                    crate::app_state::confirm_ctrl_c_exit(self);
                 } else {
                     self.expire_ctrl_c_exit_if_needed(now);
                     self.arm_ctrl_c_exit();
@@ -2319,8 +2106,8 @@ pub(crate) fn unix_epoch_now_ms() -> u64 {
 #[cfg(all(test, feature = "stylos"))]
 mod tests {
     use super::*;
-    use crate::app_runtime::{allocate_default_local_agent_id, roster_entry, validate_agent_roles};
-    use crate::stylos::IncomingPromptSource;
+    use crate::app_runtime::{allocate_default_local_agent_id, build_local_agent_roster, validate_agent_roles};
+    use crate::stylos::{IncomingPromptRequest, IncomingPromptSource};
 
     fn handle(agent_id: &str, roles: &[&str]) -> AgentHandle {
         AgentHandle {
@@ -2338,7 +2125,7 @@ mod tests {
     fn stylos_note_display_identifier_prefers_slug() {
         let prompt = "type=stylos_note note_id=123e4567-e89b-12d3-a456-426614174000 note_slug=fix-tests-123e4567 column=todo\n\nbody";
         assert_eq!(
-            stylos_note_display_identifier(prompt),
+            crate::app_runtime::stylos_note_display_identifier(prompt),
             "note_slug=fix-tests-123e4567"
         );
     }
@@ -2348,7 +2135,7 @@ mod tests {
         let prompt =
             "type=stylos_note note_id=123e4567-e89b-12d3-a456-426614174000 column=todo\n\nbody";
         assert_eq!(
-            stylos_note_display_identifier(prompt),
+            crate::app_runtime::stylos_note_display_identifier(prompt),
             "note_id=123e4567-e89b-12d3-a456-426614174000"
         );
     }
@@ -2359,19 +2146,19 @@ mod tests {
             handle("master", &["master", "interactive"]),
             handle("worker", &["background"]),
         ];
-        validate_agent_roles(&local_agent_roster(&agents)).unwrap();
+        validate_agent_roles(&build_local_agent_roster(&agents)).unwrap();
     }
 
     #[test]
     fn validate_agent_roles_rejects_zero_master() {
         let agents = vec![handle("worker", &["background"])];
-        assert!(validate_agent_roles(&local_agent_roster(&agents)).is_err());
+        assert!(validate_agent_roles(&build_local_agent_roster(&agents)).is_err());
     }
 
     #[test]
     fn validate_agent_roles_rejects_two_master() {
         let agents = vec![handle("a", &["master"]), handle("b", &["master"])];
-        assert!(validate_agent_roles(&local_agent_roster(&agents)).is_err());
+        assert!(validate_agent_roles(&build_local_agent_roster(&agents)).is_err());
     }
 
     #[test]
@@ -2382,7 +2169,7 @@ mod tests {
             handle("smith-2", &["worker"]),
             handle("smith-4", &["worker"]),
         ];
-        assert_eq!(allocate_default_local_agent_id(&local_agent_roster(&agents)), "smith-3");
+        assert_eq!(allocate_default_local_agent_id(&build_local_agent_roster(&agents)), "smith-3");
     }
 
     #[test]
