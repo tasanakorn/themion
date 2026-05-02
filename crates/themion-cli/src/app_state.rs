@@ -442,6 +442,20 @@ pub fn start_tui_watchdog_loop(
 }
 
 
+
+pub(crate) fn context_report_lines(runtime: &AppRuntimeState) -> Vec<String> {
+    if let Some(handle) = runtime
+        .agents
+        .iter()
+        .find(|h| crate::app_runtime::is_interactive_agent_handle(h))
+    {
+        if let Some(agent) = handle.agent.as_ref() {
+            return crate::tui::format_context_report(&agent.prompt_context_report());
+        }
+    }
+    vec!["context report unavailable".to_string()]
+}
+
 pub(crate) fn runtime_any_agent_busy(runtime: &AppRuntimeState) -> bool {
     runtime.agents.iter().any(|h| h.busy)
 }

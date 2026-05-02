@@ -1,6 +1,4 @@
-use crate::app_runtime::{is_interactive_agent_handle, LocalAgentManagementRequest, RuntimeCommand};
-#[cfg(feature = "stylos")]
-use crate::app_runtime::agent_has_role;
+use crate::app_runtime::{LocalAgentManagementRequest, RuntimeCommand};
 use crate::app_state::{activity_status_value, on_tick as app_state_on_tick, publish_runtime_snapshot as app_state_publish_runtime_snapshot, AppRuntimeState, set_agent_activity as app_state_set_agent_activity, AgentActivity, AppSnapshot};
 use crate::chat_composer::{ChatComposer, InputAction};
 use crate::runtime_domains::DomainHandle;
@@ -202,7 +200,7 @@ fn format_count(n: usize) -> String {
     out.chars().rev().collect()
 }
 
-fn format_context_report(report: &PromptContextReport) -> Vec<String> {
+pub(crate) fn format_context_report(report: &PromptContextReport) -> Vec<String> {
     let mut out = Vec::new();
     out.push(format!(
         "prompt estimate: {} chars ≈ {} tokens",
@@ -795,17 +793,6 @@ impl App {
     }
 
 
-    #[cfg(feature = "stylos")]
-    #[allow(dead_code)]
-    fn interactive_agent_mut(&mut self) -> Option<&mut AgentHandle> {
-        self.runtime.agents.iter_mut().find(|h| agent_has_role(h, "interactive"))
-    }
-
-    #[cfg(feature = "stylos")]
-    #[allow(dead_code)]
-    fn main_agent_mut(&mut self) -> Option<&mut AgentHandle> {
-        self.runtime.agents.iter_mut().find(|h| agent_has_role(h, "master"))
-    }
 
     pub(crate) fn any_agent_busy(&self) -> bool {
         crate::app_state::runtime_any_agent_busy(&self.runtime)
@@ -1084,12 +1071,7 @@ impl App {
         }
 
         if input == "/context" {
-            if let Some(handle) = self.runtime.agents.iter().find(|h| is_interactive_agent_handle(h)) {
-                if let Some(agent) = handle.agent.as_ref() {
-                    return format_context_report(&agent.prompt_context_report());
-                }
-            }
-            return vec!["context report unavailable".to_string()];
+            return crate::app_state::context_report_lines(&self.runtime);
         }
 
         if input == "/debug api-log enable" {
@@ -2106,7 +2088,7 @@ pub(crate) fn unix_epoch_now_ms() -> u64 {
 #[cfg(all(test, feature = "stylos"))]
 mod tests {
     use super::*;
-    use crate::app_runtime::{allocate_default_local_agent_id, build_local_agent_roster, validate_agent_roles};
+    use crate::app_runtime::{allocate_default_local_agent_id, build_local_agent_roster, is_interactive_agent_handle, validate_agent_roles};
     use crate::stylos::{IncomingPromptRequest, IncomingPromptSource};
 
     fn handle(agent_id: &str, roles: &[&str]) -> AgentHandle {
