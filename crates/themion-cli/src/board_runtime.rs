@@ -28,13 +28,6 @@ impl LocalBoardClaimRegistry {
 }
 
 #[derive(Clone, Debug)]
-pub struct BoardInjectionAction {
-    pub note_id: String,
-    pub log_line: String,
-    pub request: IncomingPromptRequest,
-}
-
-#[derive(Clone, Debug)]
 pub enum BoardTurnFollowUp {
     None,
     ContinueCurrentNote {
@@ -49,7 +42,7 @@ pub enum BoardTurnFollowUp {
     },
 }
 
-fn build_injection_action(note: &BoardNote, trigger: IncomingPromptSource) -> BoardInjectionAction {
+fn build_injection_request(note: &BoardNote, trigger: IncomingPromptSource) -> IncomingPromptRequest {
     let prompt = build_board_note_prompt(
         &note.note_id,
         &note.note_slug,
@@ -80,20 +73,17 @@ fn build_injection_action(note: &BoardNote, trigger: IncomingPromptSource) -> Bo
             note.column.as_str()
         ),
     };
-    BoardInjectionAction {
-        note_id: note.note_id.clone(),
-        log_line,
-        request: IncomingPromptRequest {
-            prompt,
-            source: trigger,
-            agent_id: Some(note.to_agent_id.clone()),
-            task_id: None,
-            request_id: None,
-            from: note.from_instance.clone(),
-            from_agent_id: note.from_agent_id.clone(),
-            to: Some(note.to_instance.clone()),
-            to_agent_id: Some(note.to_agent_id.clone()),
-        },
+    let _ = log_line;
+    IncomingPromptRequest {
+        prompt,
+        source: trigger,
+        agent_id: Some(note.to_agent_id.clone()),
+        task_id: None,
+        request_id: None,
+        from: note.from_instance.clone(),
+        from_agent_id: note.from_agent_id.clone(),
+        to: Some(note.to_instance.clone()),
+        to_agent_id: Some(note.to_agent_id.clone()),
     }
 }
 
@@ -103,23 +93,14 @@ pub fn resolve_pending_board_note_injection(
     local_instance: &str,
     target_agent_id: &str,
     trigger: IncomingPromptSource,
-) -> Option<BoardInjectionAction> {
+) -> Option<IncomingPromptRequest> {
     let Ok(Some(note)) = db.next_board_note_for_injection(local_instance, target_agent_id) else {
         return None;
     };
     if !local_claims.try_claim(&note.note_id) {
         return None;
     }
-    Some(build_injection_action(&note, trigger))
-}
-
-pub fn finalize_board_note_injection(
-    db: &Arc<DbHandle>,
-    local_claims: &Arc<LocalBoardClaimRegistry>,
-    note_id: &str,
-) {
-    let _ = db.mark_board_note_injected(note_id);
-    local_claims.release(note_id);
+    Some(build_injection_request(&note, trigger))
 }
 
 pub fn release_board_note_claim(local_claims: &Arc<LocalBoardClaimRegistry>, note_id: &str) {

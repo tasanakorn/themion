@@ -46,8 +46,8 @@ When adding code:
 - Keep `themion-core` provider/backend logic separate from CLI concerns.
 - Prefer putting reusable agent/runtime logic in `themion-core`.
 - Keep file IO, config loading, TUI event handling, and user-facing flows in `themion-cli`.
-- Treat the TUI as an input/output surface, not as the owner of runtime orchestration or agent-management policy. When adding or changing behavior, prefer putting orchestration, roster mutation, session/agent lifecycle management, and other non-visual runtime control in CLI-local runtime/orchestrator modules such as `app_state.rs`, `app_runtime.rs`, or another focused non-TUI helper. `tui.rs` and `tui_runner.rs` should primarily collect input, forward intents/events, and render resulting state.
-- Stylos transport, agent roster publication, board routing, agent discovery, and other multi-agent runtime logic are not TUI responsibilities. Investigate and implement those behaviors in CLI runtime/orchestrator modules first, and touch `tui.rs` only for display/input wiring that is strictly required.
+- Treat the TUI as a strict human input/output surface only. `tui.rs` and `tui_runner.rs` should only collect human input, translate that input into runtime/app-state intents, observe runtime/app-state outputs, and render those outputs back to the human. They must not own or interpret runtime orchestration, agent-management policy, watchdog behavior, Stylos coordination, board routing, incoming-prompt admission, or other non-visual system decisions.
+- Stylos transport, watchdog behavior, agent roster publication, board routing, agent discovery, incoming-prompt handling, and other multi-agent runtime logic are not TUI responsibilities. Investigate and implement those behaviors in CLI runtime/orchestrator modules first, and touch `tui.rs` only for display/input wiring that is strictly required.
 - When debugging local-agent visibility or board-targeting issues, do not assume `tui.rs` is the right fix location just because the app has a terminal UI; verify the runtime ownership path and prefer runtime-owned state/publication code.
 - Preserve the `ChatBackend` abstraction when adding or changing model providers.
 - Do not collapse provider-specific behavior into ad hoc conditionals when a backend-specific module already exists.
@@ -64,11 +64,14 @@ When adding code:
   | AGENT CORE | STYLOS |
   ```
 
-- `TUI` and `HEADLESS` are surfaces. They should send intents/commands and render or report observed runtime state. They must not become the canonical owner of agent roster, workflow, or Stylos-published status.
-- `HUB / APP_STATE` is the runtime owner. It should own agent registry state, session/runtime metadata, workflow state, and the status snapshot that other layers consume.
+- `TUI` and `HEADLESS` are surfaces. They should send human or external intents/commands and render or report observed runtime state. They must not become the canonical owner of agent roster, workflow, watchdog policy, board-routing policy, incoming-prompt admission, or Stylos-published status.
+- `HUB / APP_STATE` is the runtime owner. It should own agent registry state, session/runtime metadata, workflow state, watchdog/board/stylos coordination state, admission/scheduling decisions, and the status snapshot that other layers consume.
 - `AGENT CORE` and `STYLOS` are lower-layer services/adapters used by the hub. Stylos should query or publish hub-owned state rather than asking TUI-owned state for the truth.
-- Avoid cross-layer ownership leaks such as TUI-owned agent rosters, TUI-assembled Stylos status snapshots, or direct Stylos-to-TUI dependencies. Treat these as architecture violations to fix, not acceptable end states.
+- Avoid cross-layer ownership leaks such as TUI-owned agent rosters, TUI-assembled Stylos status snapshots, direct Stylos-to-TUI dependencies, or TUI-side runtime decision trees. Treat these as architecture violations to fix, not acceptable end states.
 - When introducing a new runtime behavior, decide first which layer owns the state and which layers only observe or project it.
+- If a behavior can be described as “the system decided”, that decision belongs outside TUI. The TUI may display the decision or forward a human request that influences it, but should not be the layer that makes it.
+- TUI-owned state should be limited to presentation concerns such as focus, scrolling, cursor/composer buffers, view-local formatting, and other ephemeral render/input details.
+- If a new event path would require `tui.rs` to branch on Stylos/watchdog-specific policy or reconstruct runtime truth, stop and move that logic into the runtime/app-state layer instead.
 
 ### Async/eventing guidance
 

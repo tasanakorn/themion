@@ -1,8 +1,9 @@
 #[cfg(feature = "stylos")]
-use crate::app_runtime::{start_watchdog_task, SharedStylosStatusHub, WatchdogRuntimeState};
+use crate::app_runtime::SharedStylosStatusHub;
+use crate::app_runtime::{AppRuntimeObserverPublisher, AppSnapshotPublisher};
 #[cfg(feature = "stylos")]
 use crate::board_runtime::LocalBoardClaimRegistry;
-use crate::app_state::AppState;
+use crate::app_state::{start_tick_loop, AppRuntimeEvent, AppState};
 use crate::runtime_domains::{DomainHandle, RuntimeDomains};
 use crate::tui::{dispatch_terminal_event, draw, App, AppEvent, FrameRequester};
 use crossterm::{
@@ -22,26 +23,6 @@ use crate::Session;
 
 type TerminalBackend = CrosstermBackend<std::io::Stdout>;
 type TuiTerminal = Terminal<TerminalBackend>;
-
-pub fn start_tick_loop<T, F>(
-    tui_domain: &DomainHandle,
-    app_tx: tokio::sync::mpsc::UnboundedSender<T>,
-    mut make_tick: F,
-) where
-    T: Send + 'static,
-    F: FnMut() -> T + Send + 'static,
-{
-    let tui_domain_for_tick = tui_domain.clone();
-    tui_domain_for_tick.spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(150));
-        loop {
-            interval.tick().await;
-            if app_tx.send(make_tick()).is_err() {
-                break;
-            }
-        }
-    });
-}
 
 pub fn start_terminal_input_loop(
     dispatch_event: impl Fn(&crossterm::event::Event) -> bool + Send + Sync + 'static,
@@ -145,47 +126,35 @@ fn install_panic_cleanup_hook() {
 }
 
 #[cfg(feature = "stylos")]
-fn wire_stylos_app(
-    app: &mut App,
-    runtime_domains: &Arc<RuntimeDomains>,
-    app_tx: &mpsc::UnboundedSender<AppEvent>,
-) {
-    let tui_domain = runtime_domains
-        .tui()
-        .expect("tui runtime available in TUI mode");
-    start_watchdog_task(&tui_domain, app_tx.clone(), app.watchdog_state().clone());
-}
-
-#[cfg(feature = "stylos")]
 fn wire_stylos_event_streams(
     runtime_domains: &Arc<RuntimeDomains>,
     handle: &mut crate::stylos::StylosHandle,
-    app_tx: &mpsc::UnboundedSender<AppEvent>,
+    runtime_tx: &mpsc::UnboundedSender<AppRuntimeEvent>,
 ) {
     let tui_domain = runtime_domains
         .tui()
         .expect("tui runtime available in TUI mode");
     if let Some(mut cmd_rx) = handle.take_cmd_rx() {
-        let app_tx_cmd = app_tx.clone();
+        let runtime_tx_cmd = runtime_tx.clone();
         tui_domain.spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
-                let _ = app_tx_cmd.send(AppEvent::StylosCmd(cmd));
+                let _ = runtime_tx_cmd.send(AppRuntimeEvent::StylosCmd(cmd));
             }
         });
     }
     if let Some(mut prompt_rx) = handle.take_prompt_rx() {
-        let app_tx_prompt = app_tx.clone();
+        let runtime_tx_prompt = runtime_tx.clone();
         tui_domain.spawn(async move {
             while let Some(prompt) = prompt_rx.recv().await {
-                let _ = app_tx_prompt.send(AppEvent::IncomingPrompt(prompt));
+                let _ = runtime_tx_prompt.send(AppRuntimeEvent::IncomingPrompt(prompt));
             }
         });
     }
     if let Some(mut event_rx) = handle.take_event_rx() {
-        let app_tx_event = app_tx.clone();
+        let runtime_tx_event = runtime_tx.clone();
         tui_domain.spawn(async move {
             while let Some(event) = event_rx.recv().await {
-                let _ = app_tx_event.send(AppEvent::StylosEvent(event));
+                let _ = runtime_tx_event.send(AppRuntimeEvent::StylosEvent(event));
             }
         });
     }
@@ -198,13 +167,15 @@ fn build_app(
     project_dir: PathBuf,
     runtime_domains: &Arc<RuntimeDomains>,
     app_tx: &tokio::sync::mpsc::UnboundedSender<crate::tui::AppEvent>,
+    runtime_tx: &tokio::sync::mpsc::UnboundedSender<crate::app_state::AppRuntimeEvent>,
+    runtime_observer_publisher: AppRuntimeObserverPublisher,
+    initial_snapshot: crate::app_state::AppSnapshot,
     #[cfg(feature = "stylos")] stylos_handle: Option<crate::stylos::StylosHandle>,
+    #[cfg(feature = "stylos")] watchdog_state: Arc<crate::app_runtime::WatchdogRuntimeState>,
     #[cfg(feature = "stylos")] shared_status_hub: SharedStylosStatusHub,
 ) -> App {
     #[cfg(feature = "stylos")]
     let stylos_tool_bridge = stylos_handle.as_ref().and_then(crate::stylos::tool_bridge);
-    #[cfg(feature = "stylos")]
-    let watchdog_state = Arc::new(WatchdogRuntimeState::default());
     #[cfg(feature = "stylos")]
     let board_claims = Arc::new(LocalBoardClaimRegistry::default());
 
@@ -218,6 +189,7 @@ fn build_app(
             .expect("background runtime available in TUI mode"),
         runtime_domains.core(),
         app_tx.clone(),
+        runtime_tx.clone(),
         #[cfg(feature = "stylos")]
         stylos_handle,
         #[cfg(feature = "stylos")]
@@ -228,7 +200,36 @@ fn build_app(
         board_claims,
         #[cfg(feature = "stylos")]
         shared_status_hub,
+        runtime_observer_publisher,
+        initial_snapshot,
     )
+}
+
+
+fn start_snapshot_watch_loop(
+    runtime_domains: &Arc<RuntimeDomains>,
+    snapshot_hub: &crate::app_state::AppSnapshotHub,
+    app_tx: &mpsc::UnboundedSender<AppEvent>,
+) {
+    let tui_domain = runtime_domains
+        .tui()
+        .expect("tui runtime available in TUI mode");
+    let mut snapshot_rx = snapshot_hub.subscribe();
+    let app_tx_snapshot = app_tx.clone();
+    tui_domain.spawn(async move {
+        loop {
+            if snapshot_rx.changed().await.is_err() {
+                break;
+            }
+            let snapshot = snapshot_rx.borrow().clone();
+            if app_tx_snapshot
+                .send(AppEvent::SnapshotUpdated(snapshot))
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
 }
 
 fn perform_initial_draw(
@@ -258,6 +259,11 @@ async fn run_event_loop(
                     app.handle_app_event(event, &ctx.frame_requester, &ctx.app_tx, terminal).await;
                 }
             }
+            runtime_event = ctx.runtime_rx.recv() => {
+                if let Some(runtime_event) = runtime_event {
+                    crate::app_state::handle_runtime_event(app, runtime_event, &ctx.frame_requester, &ctx.app_tx).await;
+                }
+            }
         }
     }
     Ok(())
@@ -281,6 +287,8 @@ async fn shutdown_app(_app: &mut App, ctx: RunnerContext) {
 struct RunnerContext {
     app_tx: mpsc::UnboundedSender<AppEvent>,
     app_rx: mpsc::UnboundedReceiver<AppEvent>,
+    runtime_tx: mpsc::UnboundedSender<AppRuntimeEvent>,
+    runtime_rx: mpsc::UnboundedReceiver<AppRuntimeEvent>,
     input_shutdown_tx: broadcast::Sender<()>,
     draw_rx: broadcast::Receiver<()>,
     frame_requester: FrameRequester,
@@ -289,6 +297,7 @@ struct RunnerContext {
 impl RunnerContext {
     fn build(runtime_domains: &Arc<RuntimeDomains>) -> Self {
         let (app_tx, app_rx) = mpsc::unbounded_channel::<AppEvent>();
+        let (runtime_tx, runtime_rx) = mpsc::unbounded_channel::<AppRuntimeEvent>();
         let tui_domain = runtime_domains
             .tui()
             .expect("tui runtime available in TUI mode");
@@ -300,11 +309,13 @@ impl RunnerContext {
             },
             input_shutdown_rx,
         );
-        start_tick_loop(&tui_domain, app_tx.clone(), || AppEvent::Tick);
+        start_tick_loop(runtime_domains, app_tx.clone(), || AppEvent::Tick);
         let (_draw_tx, draw_rx, frame_requester) = create_frame_requester(&tui_domain);
         Self {
             app_tx,
             app_rx,
+            runtime_tx,
+            runtime_rx,
             input_shutdown_tx,
             draw_rx,
             frame_requester,
@@ -329,8 +340,17 @@ pub async fn run(app_runtime: AppState) -> anyhow::Result<()> {
     let mut stylos_handle = Some(crate::app_state::start_stylos(&app_runtime, Some(shared_status_hub.clone())).await?);
     #[cfg(feature = "stylos")]
     if let Some(handle) = stylos_handle.as_mut() {
-        wire_stylos_event_streams(&runtime_domains, handle, &ctx.app_tx);
+        wire_stylos_event_streams(&runtime_domains, handle, &ctx.runtime_tx);
     }
+
+    let snapshot_hub = app_runtime.snapshot_hub.clone();
+    let initial_snapshot = snapshot_hub.current();
+    let snapshot_publisher = AppSnapshotPublisher::new(snapshot_hub.clone());
+    let runtime_observer_publisher = AppRuntimeObserverPublisher::new(snapshot_publisher);
+    start_snapshot_watch_loop(&runtime_domains, &snapshot_hub, &ctx.app_tx);
+
+    #[cfg(feature = "stylos")]
+    crate::app_state::start_tui_watchdog_loop(&app_runtime, ctx.runtime_tx.clone());
 
     let mut app = build_app(
         app_runtime.session,
@@ -339,14 +359,16 @@ pub async fn run(app_runtime: AppState) -> anyhow::Result<()> {
         app_runtime.project_dir,
         &runtime_domains,
         &ctx.app_tx,
+        &ctx.runtime_tx,
+        runtime_observer_publisher,
+        initial_snapshot,
         #[cfg(feature = "stylos")]
         stylos_handle,
         #[cfg(feature = "stylos")]
+        app_runtime.watchdog_state.clone(),
+        #[cfg(feature = "stylos")]
         shared_status_hub,
     );
-
-    #[cfg(feature = "stylos")]
-    wire_stylos_app(&mut app, &runtime_domains, &ctx.app_tx);
 
     perform_initial_draw(terminal.terminal_mut(), &mut app, &ctx.frame_requester)?;
 

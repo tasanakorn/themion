@@ -194,10 +194,10 @@ In the current implementation:
 - Stylos queryables are registered in `crates/themion-cli/src/stylos.rs` and their long-lived serving/publishing/subscription tasks now run on the CLI-owned `network` runtime domain
 - query handlers read the current exported process snapshot from a snapshot provider owned by the Stylos runtime path rather than by `tui.rs`
 - accepted `talk`, durable `notes/request`, and `tasks/request` queries are converted into `IncomingPromptRequest` values or persisted note records and sent over an in-process/local-runtime path
-- in Stylos-enabled TUI mode, CLI-local incoming-prompt admission and rejection policy now lives in `crates/themion-cli/src/app_runtime.rs` rather than inline in `tui.rs`
-- in Stylos-enabled TUI mode, CLI-local board-note coordination for pending note injection and note-completion follow-up now lives in `crates/themion-cli/src/board_runtime.rs` rather than inline in `tui.rs`
-- the TUI event loop receives those requests as `AppEvent::IncomingPrompt`
-- the TUI renders the returned outcome and submits accepted work through the same local turn path used for normal input
+- CLI-local incoming-prompt admission and rejection policy belongs in `crates/themion-cli/src/app_runtime.rs`, not in `tui.rs`
+- CLI-local board-note coordination for pending note injection and note-completion follow-up belongs in `crates/themion-cli/src/board_runtime.rs`, not in `tui.rs`
+- TUI should not be a Stylos/watchdog policy endpoint; it should receive runtime/app-state outcomes and render them, while human-originated input flows the other direction as intents
+- accepted remote work should enter the same runtime-owned local turn path used for normal human input, with TUI only observing/rendering that path rather than controlling it
 
 This means Stylos does not bypass the harness loop, call providers directly, or move history/tool execution into the transport layer. It only injects new work into the existing local input path.
 For durable board notes in TUI mode, `board_runtime.rs` is now the CLI-local coordination boundary for selecting the next pending note, claiming one note locally before handoff, mutating injected/completion state only after successful handoff, releasing local claims when a selected target loses the handoff race, and resolving post-turn follow-up into typed actions that the TUI displays or submits. This keeps the watchdog scheduler independent while preventing duplicate in-process injection of the same note across overlapping local-agent activity.
