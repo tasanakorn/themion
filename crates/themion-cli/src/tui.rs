@@ -1,22 +1,18 @@
 use crate::app_runtime::{
-    apply_master_agent_replacement,
-    build_local_agent_roster,
-    build_local_agent_tool_invoker, build_main_agent, build_replacement_main_agent,
-    handle_local_agent_management_request as runtime_handle_local_agent_management_request,
-    is_interactive_agent_handle, launch_agent_turn_runtime, prepare_agent_turn_runtime_launch,
+    build_main_agent, build_replacement_main_agent, is_interactive_agent_handle,
     AgentReplacementParams, AppRuntimeObserverPublisher, LocalAgentManagementRequest,
-    LocalAgentRuntimeContext, RuntimeCommand,
+    RuntimeCommand,
 };
 #[cfg(feature = "stylos")]
 use crate::app_runtime::{agent_has_role, SharedStylosStatusHub};
 #[cfg(feature = "stylos")]
 use crate::board_runtime::LocalBoardClaimRegistry;
-use crate::app_state::{activity_status_value, clear_agent_activity as app_state_clear_agent_activity, on_tick as app_state_on_tick, publish_runtime_snapshot as app_state_publish_runtime_snapshot, AppRuntimeEvent, set_agent_activity as app_state_set_agent_activity, AgentActivity, AppSnapshot};
+use crate::app_state::{activity_status_value, clear_agent_activity as app_state_clear_agent_activity, on_tick as app_state_on_tick, publish_runtime_snapshot as app_state_publish_runtime_snapshot, AppRuntimeEvent, AppRuntimeState, set_agent_activity as app_state_set_agent_activity, AgentActivity, AppSnapshot};
 use crate::chat_composer::{ChatComposer, InputAction};
 use crate::config::save_profiles;
 use crate::runtime_domains::DomainHandle;
 #[cfg(feature = "stylos")]
-use crate::stylos::{IncomingPromptRequest, StylosHandle, StylosRuntimeState, StylosToolBridge};
+use crate::stylos::{StylosHandle, StylosRuntimeState, StylosToolBridge};
 
 #[cfg(feature = "stylos")]
 use crate::app_runtime::WatchdogRuntimeState;
@@ -30,11 +26,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
     Frame, Terminal,
 };
-use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use themion_core::agent::{Agent, TurnCancellation, TurnStats};
+use themion_core::agent::{Agent, TurnCancellation};
 use themion_core::client_codex::ApiCallRateLimitReport;
 use themion_core::db::DbHandle;
 use themion_core::workflow::WorkflowState;
@@ -143,7 +138,6 @@ enum ReviewMode {
 
 const TOOL_DETAIL_MAX_CHARS: usize = 60;
 const TOOL_DETAIL_CENTER_TRIM_MARKER: &str = "󱑼";
-const CTRL_C_EXIT_CONFIRM_WINDOW: Duration = Duration::from_secs(3);
 const CONTEXT_HISTORY_TURN_DISPLAY_MAX_AGE: usize = 10;
 
 fn agent_tag_color(index: usize) -> Color {
@@ -524,8 +518,6 @@ pub struct AgentHandle {
     pub(crate) roles: Vec<String>,
     pub(crate) busy: bool,
     pub(crate) turn_cancellation: Option<TurnCancellation>,
-    #[cfg(feature = "stylos")]
-    pub(crate) active_incoming_prompt: Option<IncomingPromptRequest>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -660,6 +652,10 @@ pub(crate) struct ActivityCounters {
 }
 
 impl ActivityCounters {
+    pub(crate) fn record_agent_turn_started(&mut self) {
+        self.agent_turn_started_count += 1;
+    }
+
     fn snapshot(&self) -> ActivityCountersSnapshot {
         ActivityCountersSnapshot {
             draw_count: self.draw_count,
@@ -738,63 +734,17 @@ pub(crate) struct TimedRuntimeDelta {
 }
 
 pub struct App {
-    #[cfg(feature = "stylos")]
-    pub(crate) stylos: Option<StylosHandle>,
-    #[cfg(feature = "stylos")]
-    pub(crate) local_stylos_instance: Option<String>,
-    pub(crate) session: Session,
     pub(crate) entries: Vec<Entry>,
-    pub(crate) pending: Option<String>,
     composer: ChatComposer,
-    pub(crate) running: bool,
-    pub(crate) ctrl_c_exit_armed_until: Option<Instant>,
-    pub(crate) agent_busy: bool,
     scroll_offset: usize,
     navigation_mode: NavigationMode,
     review_mode: ReviewMode,
     review_scroll_offset: usize,
-    pub(crate) streaming_idx: Option<usize>,
     pub(crate) anim_frame: u8,
     pub(crate) dirty: UiDirty,
-    pub(crate) agents: Vec<AgentHandle>,
-    pub(crate) db: Arc<DbHandle>,
-    pub(crate) project_dir: PathBuf,
-    #[allow(dead_code)]
-    pub(crate) startup_project_dir: PathBuf,
-    pub(crate) session_tokens: TurnStats,
-    pub(crate) last_ctx_tokens: u64,
-    pub(crate) agent_activity: Option<AgentActivity>,
-    pub(crate) idle_since: Option<Instant>,
-    pub(crate) idle_status_changed_at: Option<u64>,
-    pub(crate) agent_activity_changed_at: Option<u64>,
-    pub(crate) stream_chunks: u64,
-    pub(crate) stream_chars: u64,
-    pub(crate) status_rate_limits: Option<ApiCallRateLimitReport>,
-    pub(crate) status_model_info: Option<ModelInfo>,
-    pub(crate) api_log_enabled: bool,
-    pub(crate) process_started_at: Instant,
-    pub(crate) process_started_at_ms: u64,
-    pub(crate) background_domain: DomainHandle,
-    core_domain: DomainHandle,
-    pub(crate) recent_runtime_snapshots: VecDeque<RuntimeMetricsSnapshot>,
-    pub(crate) activity_counters: ActivityCounters,
-    pub(crate) workflow_state: WorkflowState,
-    #[cfg(feature = "stylos")]
-    pub(crate) stylos_tool_bridge: Option<StylosToolBridge>,
-    #[cfg(feature = "stylos")]
-    pub(crate) watchdog_state: Arc<WatchdogRuntimeState>,
-    #[cfg(feature = "stylos")]
-    pub(crate) board_claims: Arc<LocalBoardClaimRegistry>,
-    #[cfg(feature = "stylos")]
-    pub(crate) shared_status_hub: SharedStylosStatusHub,
-    #[cfg(feature = "stylos")]
-    pub(crate) last_sender_side_transport_event: Option<crate::stylos::SenderSideTransportEvent>,
-    #[cfg(feature = "stylos")]
-    pub(crate) last_assistant_text: Option<String>,
-    pub(crate) local_agent_mgmt_tx: mpsc::UnboundedSender<AppEvent>,
-    pub(crate) runtime_tx: mpsc::UnboundedSender<AppRuntimeEvent>,
-    pub(crate) runtime_observer_publisher: AppRuntimeObserverPublisher,
-    app_snapshot: AppSnapshot,
+    pub(crate) runtime: AppRuntimeState,
+    recent_runtime_snapshots: std::collections::VecDeque<RuntimeMetricsSnapshot>,
+    snapshot_hub: crate::app_state::AppSnapshotHub,
 }
 
 impl App {
@@ -845,8 +795,6 @@ impl App {
             roles: vec!["master".to_string(), "interactive".to_string()],
             busy: false,
             turn_cancellation: None,
-            #[cfg(feature = "stylos")]
-            active_incoming_prompt: None,
         };
 
         let art = concat!(
@@ -913,77 +861,75 @@ impl App {
             initial_entries.push(Entry::Blank);
         }
 
-        let app_snapshot = initial_snapshot;
+        let process_started_at = std::time::Instant::now();
+        let process_started_at_ms = unix_epoch_now_ms();
 
         let mut app = Self {
-            #[cfg(feature = "stylos")]
-            stylos,
-            #[cfg(feature = "stylos")]
-            local_stylos_instance,
-            session,
             entries: initial_entries,
-            pending: None,
             composer: ChatComposer::new(),
-            ctrl_c_exit_armed_until: None,
-            running: true,
-            agent_busy: false,
             scroll_offset: 0,
             navigation_mode: NavigationMode::FollowTail,
             review_mode: ReviewMode::Closed,
             review_scroll_offset: 0,
-            streaming_idx: None,
             anim_frame: 0,
             dirty: {
                 let mut d = UiDirty::default();
                 d.mark_all();
                 d
             },
-            agents: vec![handle],
-            db,
-            startup_project_dir: project_dir.clone(),
-            project_dir,
-            session_tokens: TurnStats {
-                llm_rounds: 0,
-                tool_calls: 0,
-                tokens_in: 0,
-                tokens_out: 0,
-                tokens_cached: 0,
-                last_api_call_tokens_in: None,
-                elapsed_ms: 0,
+            runtime: AppRuntimeState {
+                agents: vec![handle],
+                workflow_state: WorkflowState::default(),
+                session,
+                db,
+                project_dir: project_dir.clone(),
+                session_id,
+                background_domain,
+                core_domain,
+                startup_project_dir: project_dir.clone(),
+                local_agent_mgmt_tx: app_tx.clone(),
+                runtime_tx: runtime_tx.clone(),
+                runtime_observer_publisher,
+                api_log_enabled: false,
+                status_model_info: initial_model_info,
+                status_rate_limits: None,
+                last_ctx_tokens: 0,
+                session_tokens: Default::default(),
+                agent_busy: false,
+                pending: None,
+                running: true,
+                ctrl_c_exit_armed_until: None,
+                streaming_idx: None,
+                process_started_at,
+                process_started_at_ms,
+                idle_since: Some(process_started_at),
+                idle_status_changed_at: Some(process_started_at_ms),
+                agent_activity: None,
+                agent_activity_changed_at: None,
+                stream_chunks: 0,
+                stream_chars: 0,
+                activity_counters: Default::default(),
+                #[cfg(feature = "stylos")]
+                stylos,
+                #[cfg(feature = "stylos")]
+                local_stylos_instance,
+                #[cfg(feature = "stylos")]
+                stylos_tool_bridge,
+                #[cfg(feature = "stylos")]
+                watchdog_state,
+                #[cfg(feature = "stylos")]
+                board_claims,
+                #[cfg(feature = "stylos")]
+                shared_status_hub,
+                #[cfg(feature = "stylos")]
+                last_sender_side_transport_event: None,
+                #[cfg(feature = "stylos")]
+                incoming_prompts: Default::default(),
+                #[cfg(feature = "stylos")]
+                last_assistant_text: None,
             },
-            last_ctx_tokens: 0,
-            agent_activity: None,
-            idle_since: Some(Instant::now()),
-            idle_status_changed_at: Some(unix_epoch_now_ms()),
-            agent_activity_changed_at: None,
-            stream_chunks: 0,
-            stream_chars: 0,
-            status_rate_limits: None,
-            status_model_info: initial_model_info,
-            api_log_enabled: false,
-            process_started_at: Instant::now(),
-            process_started_at_ms: unix_epoch_now_ms(),
-            background_domain,
-            core_domain,
-            recent_runtime_snapshots: VecDeque::new(),
-            activity_counters: ActivityCounters::default(),
-            workflow_state: WorkflowState::default(),
-            #[cfg(feature = "stylos")]
-            stylos_tool_bridge,
-            #[cfg(feature = "stylos")]
-            watchdog_state,
-            #[cfg(feature = "stylos")]
-            board_claims,
-            #[cfg(feature = "stylos")]
-            shared_status_hub,
-            #[cfg(feature = "stylos")]
-            last_sender_side_transport_event: None,
-            #[cfg(feature = "stylos")]
-            last_assistant_text: None,
-            local_agent_mgmt_tx: app_tx.clone(),
-            runtime_tx: runtime_tx.clone(),
-            runtime_observer_publisher,
-            app_snapshot,
+            recent_runtime_snapshots: std::collections::VecDeque::new(),
+            snapshot_hub: crate::app_state::AppSnapshotHub::new(initial_snapshot),
         };
         app.record_runtime_snapshot();
         app_state_publish_runtime_snapshot(&mut app);
@@ -993,32 +939,21 @@ impl App {
     #[cfg(feature = "stylos")]
     #[allow(dead_code)]
     fn interactive_agent_mut(&mut self) -> Option<&mut AgentHandle> {
-        self.agents.iter_mut().find(|h| agent_has_role(h, "interactive"))
+        self.runtime.agents.iter_mut().find(|h| agent_has_role(h, "interactive"))
     }
 
     #[cfg(feature = "stylos")]
     #[allow(dead_code)]
     fn main_agent_mut(&mut self) -> Option<&mut AgentHandle> {
-        self.agents.iter_mut().find(|h| agent_has_role(h, "master"))
+        self.runtime.agents.iter_mut().find(|h| agent_has_role(h, "master"))
     }
 
     fn replace_master_agent(&mut self, new_agent: Agent, new_session_id: Uuid) {
-        apply_master_agent_replacement(
-            &mut self.agents,
-            &mut self.status_model_info,
-            &mut self.workflow_state,
-            new_agent,
-            new_session_id,
-        );
+        crate::app_state::runtime_replace_master_agent(&mut self.runtime, new_agent, new_session_id);
         app_state_publish_runtime_snapshot(self);
     }
-
-    pub(crate) fn background_domain(&self) -> DomainHandle {
-        self.background_domain.clone()
-    }
-
     pub(crate) fn any_agent_busy(&self) -> bool {
-        self.agents.iter().any(|h| h.busy)
+        crate::app_state::runtime_any_agent_busy(&self.runtime)
     }
 
     pub(crate) fn handle_local_agent_management_request(
@@ -1026,32 +961,7 @@ impl App {
         request: LocalAgentManagementRequest,
         frame_requester: &FrameRequester,
     ) {
-        let local_agent_tool_invoker =
-            build_local_agent_tool_invoker(self.local_agent_mgmt_tx.clone());
-        let any_agent_busy = self.any_agent_busy();
-        let roster = build_local_agent_roster(&self.agents);
-        let result = runtime_handle_local_agent_management_request(
-            LocalAgentRuntimeContext {
-                session: &self.session,
-                project_dir: &self.project_dir,
-                db: &self.db,
-                agents: &mut self.agents,
-                roster: &roster,
-                agent_busy: any_agent_busy,
-                #[cfg(feature = "stylos")]
-                stylos_tool_bridge: self.stylos_tool_bridge.clone(),
-                #[cfg(feature = "stylos")]
-                local_stylos_instance: self.local_stylos_instance.as_deref(),
-                local_agent_tool_invoker: Some(local_agent_tool_invoker),
-                api_log_enabled: self.api_log_enabled,
-            },
-            &request.action,
-            request.args,
-        );
-        app_state_publish_runtime_snapshot(self);
-        self.mark_dirty_all();
-        self.request_draw(frame_requester);
-        let _ = request.reply_tx.send(result);
+        crate::app_state::handle_local_agent_management_request(self, request, frame_requester);
     }
 
     fn enter_browsed_history(&mut self) {
@@ -1092,17 +1002,6 @@ impl App {
         self.review_mode = ReviewMode::Closed;
     }
 
-    pub(crate) fn pending_str(&self) -> String {
-        const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-        let ch = SPINNER[self.anim_frame as usize % SPINNER.len()];
-        let activity = self
-            .agent_activity
-            .as_ref()
-            .map(|p| p.label(self.stream_chunks, self.stream_chars))
-            .unwrap_or_else(|| "thinking…".to_string());
-        format!("  {} {}", ch, activity)
-    }
-
     fn set_agent_activity(&mut self, activity: AgentActivity) {
         app_state_set_agent_activity(self, activity);
     }
@@ -1112,50 +1011,20 @@ impl App {
     }
 
 
-    pub(crate) fn reset_stream_counters(&mut self) {
-        self.stream_chunks = 0;
-        self.stream_chars = 0;
-    }
-
     fn request_interrupt(&mut self) {
-        let mut interrupted_any = false;
-        for handle in &self.agents {
-            if let Some(cancel) = &handle.turn_cancellation {
-                if !cancel.is_interrupted() {
-                    cancel.interrupt();
-                    interrupted_any = true;
-                }
-            }
-        }
-        if interrupted_any {
-            self.push(Entry::Status {
-                agent_id: None,
-                source: Some(NonAgentSource::Runtime),
-                text: "interrupt requested".to_string(),
-            });
-        }
+        crate::app_state::runtime_request_interrupt(self);
     }
 
     fn arm_ctrl_c_exit(&mut self) {
-        self.ctrl_c_exit_armed_until = Some(Instant::now() + CTRL_C_EXIT_CONFIRM_WINDOW);
-        self.push(Entry::Status {
-            agent_id: None,
-            source: Some(NonAgentSource::Runtime),
-            text: "Press Ctrl+C again within 3s to exit".to_string(),
-        });
-        self.mark_dirty_status();
+        crate::app_state::runtime_arm_ctrl_c_exit(self);
     }
 
     fn ctrl_c_exit_is_armed(&self, now: Instant) -> bool {
-        matches!(self.ctrl_c_exit_armed_until, Some(deadline) if deadline > now)
+        crate::app_state::runtime_ctrl_c_exit_is_armed(&self.runtime, now)
     }
 
     pub(crate) fn expire_ctrl_c_exit_if_needed(&mut self, now: Instant) -> bool {
-        if matches!(self.ctrl_c_exit_armed_until, Some(deadline) if deadline <= now) {
-            self.ctrl_c_exit_armed_until = None;
-            return true;
-        }
-        false
+        crate::app_state::runtime_expire_ctrl_c_exit_if_needed(&mut self.runtime, now)
     }
 
     fn on_tick(&mut self) {
@@ -1183,7 +1052,7 @@ impl App {
     }
 
     pub(crate) fn request_draw(&mut self, frame_requester: &FrameRequester) {
-        self.activity_counters.draw_request_count += 1;
+        self.runtime.activity_counters.draw_request_count += 1;
         frame_requester.schedule_frame();
     }
 
@@ -1192,7 +1061,7 @@ impl App {
     }
 
     pub(crate) fn is_running(&self) -> bool {
-        self.running
+        self.runtime.running
     }
 
     pub(crate) fn finish_initial_draw(&mut self, frame_requester: &FrameRequester) {
@@ -1202,7 +1071,7 @@ impl App {
 
     #[cfg(feature = "stylos")]
     pub(crate) fn shutdown_stylos(&mut self) -> Option<StylosHandle> {
-        self.stylos.take()
+        self.runtime.stylos.take()
     }
 
     pub(crate) fn push(&mut self, entry: Entry) {
@@ -1212,10 +1081,10 @@ impl App {
 
     pub(crate) fn activity_status_value(&self) -> String {
         activity_status_value(
-            self.agent_activity.as_ref(),
-            self.idle_since,
-            self.stream_chunks,
-            self.stream_chars,
+            self.runtime.agent_activity.as_ref(),
+            self.runtime.idle_since,
+            self.runtime.stream_chunks,
+            self.runtime.stream_chars,
         )
     }
 
@@ -1223,8 +1092,8 @@ impl App {
     fn current_runtime_snapshot(&self) -> RuntimeMetricsSnapshot {
         RuntimeMetricsSnapshot {
             at_ms: unix_epoch_now_ms(),
-            uptime_ms: self.process_started_at.elapsed().as_millis() as u64,
-            counters: self.activity_counters.snapshot(),
+            uptime_ms: self.runtime.process_started_at.elapsed().as_millis() as u64,
+            counters: self.runtime.activity_counters.snapshot(),
         }
     }
 
@@ -1251,48 +1120,36 @@ impl App {
         })
     }
 
-    #[cfg(feature = "stylos")]
-    pub(crate) fn stylos_status_value(&self) -> String {
-        match self.stylos.as_ref().map(|h| h.state()) {
-            Some(StylosRuntimeState::Off) => "off".to_string(),
-            Some(StylosRuntimeState::Active { mode, realm, instance }) => {
-                format!("active mode={} realm={} instance={}", mode, realm, instance)
-            }
-            Some(StylosRuntimeState::Error(err)) => format!("error {}", err),
-            None => "off".to_string(),
-        }
-    }
-
     pub(crate) fn debug_runtime_lines(&self) -> Vec<String> {
         let mut out = Vec::new();
         let now_ms = unix_epoch_now_ms();
-        let uptime_ms = self.process_started_at.elapsed().as_millis() as u64;
+        let uptime_ms = self.runtime.process_started_at.elapsed().as_millis() as u64;
         out.push("debug runtime snapshot: themion process/thread/task activity".to_string());
         out.push(format!(
             "process pid={} uptime={} started_at_ms={}",
             std::process::id(),
             format_duration_ms(uptime_ms),
-            self.process_started_at_ms,
+            self.runtime.process_started_at_ms,
         ));
         out.push(format!(
             "app busy={} activity={} session={} project={}",
-            self.agent_busy,
+            self.runtime.agent_busy,
             self.activity_status_value(),
-            self.agents
+            self.runtime.agents
                 .first()
                 .map(|h| h.session_id.to_string())
                 .unwrap_or_else(|| "unknown".to_string()),
-            self.project_dir.display()
+            self.runtime.project_dir.display()
         ));
         out.push(format!(
             "workflow flow={} phase={} status={}",
-            self.workflow_state.workflow_name,
-            self.workflow_state.phase_name,
-            format!("{:?}", self.workflow_state.status)
+            self.runtime.workflow_state.workflow_name,
+            self.runtime.workflow_state.phase_name,
+            format!("{:?}", self.runtime.workflow_state.status)
         ));
         #[cfg(feature = "stylos")]
         {
-            let stylos_state = match self.stylos.as_ref().map(|h| h.state()) {
+            let stylos_state = match self.runtime.stylos.as_ref().map(|h| h.state()) {
                 Some(StylosRuntimeState::Off) => "off".to_string(),
                 Some(StylosRuntimeState::Active {
                     mode,
@@ -1329,13 +1186,14 @@ impl App {
         } else {
             out.push("recent window=unavailable (need more than one sample)".to_string());
             out.extend(format_runtime_lifetime_lines(
-                &self.activity_counters.snapshot(),
+                &self.runtime.activity_counters.snapshot(),
             ));
         }
 
         if let Some(changed_at) = self
+            .runtime
             .agent_activity_changed_at
-            .or(self.idle_status_changed_at)
+            .or(self.runtime.idle_status_changed_at)
         {
             out.push(format!(
                 "activity_status_changed {} ago",
@@ -1343,7 +1201,7 @@ impl App {
             ));
         }
         #[cfg(feature = "stylos")]
-        if let Some(handle) = self.stylos.as_ref() {
+        if let Some(handle) = self.runtime.stylos.as_ref() {
             if let Some(snapshot) = handle.activity_snapshot() {
                 out.push("stylos activity:".to_string());
                 out.extend(format_stylos_activity_lines(snapshot));
@@ -1360,7 +1218,7 @@ impl App {
         app_tx: &mpsc::UnboundedSender<AppEvent>,
     ) -> Vec<String> {
         let mut out = Vec::new();
-        self.activity_counters.command_count += 1;
+        self.runtime.activity_counters.command_count += 1;
 
         if let Some(rest) = input.strip_prefix("/login codex") {
             let profile_name = rest.trim();
@@ -1385,7 +1243,7 @@ impl App {
         }
 
         if input == "/context" {
-            if let Some(handle) = self.agents.iter().find(|h| is_interactive_agent_handle(h)) {
+            if let Some(handle) = self.runtime.agents.iter().find(|h| is_interactive_agent_handle(h)) {
                 if let Some(agent) = handle.agent.as_ref() {
                     return format_context_report(&agent.prompt_context_report());
                 }
@@ -1444,18 +1302,18 @@ impl App {
         }
 
         if input == "/config" {
-            let key_display = match &self.session.api_key {
+            let key_display = match &self.runtime.session.api_key {
                 Some(k) if k.len() > 8 => format!("{}…", &k[..8]),
                 Some(_) => "(set)".to_string(),
                 None => "(none)".to_string(),
             };
-            out.push(format!("profile  : {}", self.session.active_profile));
-            out.push(format!("provider : {}", self.session.provider));
-            out.push(format!("model    : {}", self.session.model));
-            out.push(format!("endpoint : {}", self.session.base_url));
+            out.push(format!("profile  : {}", self.runtime.session.active_profile));
+            out.push(format!("provider : {}", self.runtime.session.provider));
+            out.push(format!("model    : {}", self.runtime.session.model));
+            out.push(format!("endpoint : {}", self.runtime.session.base_url));
             out.push(format!("api_key  : {}", key_display));
-            if self.session.temporary_profile_override.is_some()
-                || self.session.temporary_model_override.is_some()
+            if self.runtime.session.temporary_profile_override.is_some()
+                || self.runtime.session.temporary_model_override.is_some()
             {
                 out.push(
                     "note     : temporary session-only override active; config on disk unchanged"
@@ -1468,24 +1326,24 @@ impl App {
         if input == "/session show" {
             out.push(format!(
                 "configured profile : {}",
-                self.session.configured_profile
+                self.runtime.session.configured_profile
             ));
             out.push(format!(
                 "effective profile   : {}",
-                self.session.active_profile
+                self.runtime.session.active_profile
             ));
-            out.push(format!("effective provider  : {}", self.session.provider));
-            out.push(format!("effective model     : {}", self.session.model));
+            out.push(format!("effective provider  : {}", self.runtime.session.provider));
+            out.push(format!("effective model     : {}", self.runtime.session.model));
             out.push(format!(
                 "temporary profile override : {}",
-                self.session
+                self.runtime.session
                     .temporary_profile_override
                     .as_deref()
                     .unwrap_or("(none)")
             ));
             out.push(format!(
                 "temporary model override   : {}",
-                self.session
+                self.runtime.session
                     .temporary_model_override
                     .as_deref()
                     .unwrap_or("(none)")
@@ -1533,10 +1391,10 @@ impl App {
             let parts: Vec<&str> = rest.splitn(3, ' ').collect();
             match parts.as_slice() {
                 ["profile"] | ["profile", "list"] => {
-                    let mut names: Vec<String> = self.session.profiles.keys().cloned().collect();
+                    let mut names: Vec<String> = self.runtime.session.profiles.keys().cloned().collect();
                     names.sort();
                     for name in names {
-                        let marker = if name == self.session.active_profile {
+                        let marker = if name == self.runtime.session.active_profile {
                             "* "
                         } else {
                             "  "
@@ -1545,15 +1403,15 @@ impl App {
                     }
                 }
                 ["profile", "show"] => {
-                    let key_display = match &self.session.api_key {
+                    let key_display = match &self.runtime.session.api_key {
                         Some(k) if k.len() > 8 => format!("{}…", &k[..8]),
                         Some(_) => "(set)".to_string(),
                         None => "(none)".to_string(),
                     };
-                    out.push(format!("profile  : {}", self.session.active_profile));
-                    out.push(format!("provider : {}", self.session.provider));
-                    out.push(format!("model    : {}", self.session.model));
-                    out.push(format!("endpoint : {}", self.session.base_url));
+                    out.push(format!("profile  : {}", self.runtime.session.active_profile));
+                    out.push(format!("provider : {}", self.runtime.session.provider));
+                    out.push(format!("model    : {}", self.runtime.session.model));
+                    out.push(format!("endpoint : {}", self.runtime.session.base_url));
                     out.push(format!("api_key  : {}", key_display));
                 }
                 ["profile", "create", name] => {
@@ -1697,12 +1555,12 @@ impl App {
             return;
         }
 
-        self.agent_busy = true;
+        self.runtime.agent_busy = true;
         self.set_agent_activity(AgentActivity::RunningShellCommand);
 
-        let tx = self.runtime_tx.clone();
-        let project_dir = self.project_dir.clone();
-        self.background_domain().spawn(async move {
+        let tx = self.runtime.runtime_tx.clone();
+        let project_dir = self.runtime.project_dir.clone();
+        self.runtime.background_domain().spawn(async move {
             let result = Command::new("sh")
                 .arg("-c")
                 .arg(&command)
@@ -1730,27 +1588,6 @@ impl App {
         });
     }
 
-    pub(crate) fn submit_text_to_agent(
-        &mut self,
-        agent_index: usize,
-        text: String,
-        _app_tx: &mpsc::UnboundedSender<AppEvent>,
-    ) {
-        self.activity_counters.agent_turn_started_count += 1;
-        self.agent_busy = true;
-        self.reset_stream_counters();
-        self.set_agent_activity(AgentActivity::PreparingRequest);
-
-        let runtime_launch = prepare_agent_turn_runtime_launch(&mut self.agents, agent_index);
-
-        launch_agent_turn_runtime(
-            &self.background_domain(),
-            &self.core_domain,
-            self.runtime_tx.clone(),
-            text,
-            runtime_launch,
-        );
-    }
     pub(crate) fn submit_text(&mut self, text: String, app_tx: &mpsc::UnboundedSender<AppEvent>) {
         let text = text.trim().to_string();
         if text.is_empty() {
@@ -1760,7 +1597,7 @@ impl App {
         self.return_to_latest();
 
         if text == "/exit" || text == "/quit" {
-            self.running = false;
+            self.runtime.running = false;
             return;
         }
 
@@ -1790,7 +1627,7 @@ impl App {
         }
         #[cfg(not(feature = "stylos"))]
         let agent_index = {
-            self.agents
+            self.runtime.agents
                 .iter()
                 .position(is_interactive_agent_handle)
                 .expect("interactive agent")
@@ -1800,7 +1637,7 @@ impl App {
         self.push(Entry::User(text.clone()));
 
         #[cfg(not(feature = "stylos"))]
-        self.submit_text_to_agent(agent_index, text, app_tx);
+        crate::app_state::submit_text_to_agent(self, agent_index, text);
     }
 
     fn submit_input(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) -> bool {
@@ -1818,7 +1655,7 @@ impl App {
         mouse: event::MouseEvent,
         frame_requester: &FrameRequester,
     ) {
-        self.activity_counters.input_mouse_count += 1;
+        self.runtime.activity_counters.input_mouse_count += 1;
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 self.scroll_up();
@@ -1835,7 +1672,7 @@ impl App {
     }
 
     pub(crate) fn handle_paste_event(&mut self, text: String, frame_requester: &FrameRequester) {
-        self.activity_counters.input_paste_count += 1;
+        self.runtime.activity_counters.input_paste_count += 1;
         self.composer.handle_paste_event(text);
         self.mark_dirty_input();
         self.request_draw(frame_requester);
@@ -1881,7 +1718,7 @@ impl App {
                 self.handle_tick_event(frame_requester);
             }
             AppEvent::SnapshotUpdated(snapshot) => {
-                self.app_snapshot = snapshot;
+                self.snapshot_hub.publish(snapshot);
                 self.mark_dirty_all();
                 self.request_draw(frame_requester);
             }
@@ -1919,12 +1756,12 @@ impl App {
                         text: format!("warning: failed to save auth: {}", e),
                     });
                 }
-                self.session
+                self.runtime.session
                     .profiles
                     .insert(profile_name.clone(), crate::config::codex_profile_defaults());
-                self.session.configured_profile = profile_name.clone();
-                self.session.switch_profile(&profile_name);
-                if let Err(e) = save_profiles(&self.session.active_profile, &self.session.profiles)
+                self.runtime.session.configured_profile = profile_name.clone();
+                self.runtime.session.switch_profile(&profile_name);
+                if let Err(e) = save_profiles(&self.runtime.session.active_profile, &self.runtime.session.profiles)
                 {
                     self.push(Entry::Assistant {
                         agent_id: None,
@@ -1932,15 +1769,15 @@ impl App {
                     });
                 }
                 match build_replacement_main_agent(AgentReplacementParams {
-                    session: &self.session,
-                    project_dir: &self.project_dir,
-                    db: &self.db,
+                    session: &self.runtime.session,
+                    project_dir: &self.runtime.project_dir,
+                    db: &self.runtime.db,
                     #[cfg(feature = "stylos")]
-                    stylos_tool_bridge: self.stylos_tool_bridge.clone(),
+                    stylos_tool_bridge: self.runtime.stylos_tool_bridge.clone(),
                     #[cfg(feature = "stylos")]
-                    local_stylos_instance: self.local_stylos_instance.as_deref(),
-                    api_log_enabled: self.api_log_enabled,
-                    local_agent_mgmt_tx: self.local_agent_mgmt_tx.clone(),
+                    local_stylos_instance: self.runtime.local_stylos_instance.as_deref(),
+                    api_log_enabled: self.runtime.api_log_enabled,
+                    local_agent_mgmt_tx: self.runtime.local_agent_mgmt_tx.clone(),
                     insert_session: true,
                 }) {
                     Ok((mut new_agent, new_session_id)) => {
@@ -1952,7 +1789,7 @@ impl App {
                                 "logged in as {} — switched to Codex profile '{}' ({})",
                                 auth.account_id,
                                 profile_name,
-                                self.session.model
+                                self.runtime.session.model
                             ),
                         });
                         self.push(Entry::Blank);
@@ -1989,12 +1826,12 @@ impl App {
             let draw_started = Instant::now();
             terminal.draw(|f| draw(f, self))?;
             let draw_us = draw_started.elapsed().as_micros() as u64;
-            self.activity_counters.draw_count += 1;
-            self.activity_counters.draw_total_us += draw_us;
-            self.activity_counters.draw_max_us = self.activity_counters.draw_max_us.max(draw_us);
+            self.runtime.activity_counters.draw_count += 1;
+            self.runtime.activity_counters.draw_total_us += draw_us;
+            self.runtime.activity_counters.draw_max_us = self.runtime.activity_counters.draw_max_us.max(draw_us);
             self.dirty.clear();
         } else {
-            self.activity_counters.draw_skip_clean_count += 1;
+            self.runtime.activity_counters.draw_skip_clean_count += 1;
         }
         Ok(())
     }
@@ -2006,7 +1843,7 @@ impl App {
         app_tx: &mpsc::UnboundedSender<AppEvent>,
         terminal: &Terminal<CrosstermBackend<std::io::Stdout>>,
     ) {
-        self.activity_counters.input_key_count += 1;
+        self.runtime.activity_counters.input_key_count += 1;
 
         match self.composer.handle_key_event(
             key,
@@ -2027,8 +1864,8 @@ impl App {
             InputAction::Quit => {
                 let now = Instant::now();
                 if self.ctrl_c_exit_is_armed(now) {
-                    self.ctrl_c_exit_armed_until = None;
-                    self.running = false;
+                    self.runtime.ctrl_c_exit_armed_until = None;
+                    self.runtime.running = false;
                 } else {
                     self.expire_ctrl_c_exit_if_needed(now);
                     self.arm_ctrl_c_exit();
@@ -2359,7 +2196,7 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
         ])
         .split(area);
 
-    let lines = build_lines(&app.entries, &app.pending, &app.agents);
+    let lines = build_lines(&app.entries, &app.runtime.pending, &app.runtime.agents);
     let height = chunks[0].height as usize;
     let width = chunks[0].width;
 
@@ -2417,13 +2254,13 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
     }
 
     let project_leaf = app
-        .project_dir
+        .runtime.project_dir
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("/");
     let activity = app.activity_status_value();
     #[cfg(feature = "stylos")]
-    let stylos_status = match app.stylos.as_ref().map(|h| h.state()) {
+    let stylos_status = match app.runtime.stylos.as_ref().map(|h| h.state()) {
         Some(StylosRuntimeState::Off) => "stylos: off".to_string(),
         Some(StylosRuntimeState::Active { mode, .. }) => format!("stylos: {}", mode),
         Some(StylosRuntimeState::Error(_)) => "stylos: error".to_string(),
@@ -2440,33 +2277,33 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
     #[cfg(feature = "stylos")]
     let bar_top = format!(
         " {} | {} | {} | {} | flow: {} | phase: {} | agent: {} | nav: {}",
-        app.session.active_profile,
-        app.session.model,
+        app.runtime.session.active_profile,
+        app.runtime.session.model,
         project_leaf,
         stylos_status,
-        app.workflow_state.workflow_name,
-        app.workflow_state.phase_name,
+        app.runtime.workflow_state.workflow_name,
+        app.runtime.workflow_state.phase_name,
         activity,
         nav,
     );
     #[cfg(not(feature = "stylos"))]
     let bar_top = format!(
         " {} | {} | {} | flow: {} | phase: {} | agent: {} | nav: {}",
-        app.session.active_profile,
-        app.session.model,
+        app.runtime.session.active_profile,
+        app.runtime.session.model,
         project_leaf,
-        app.workflow_state.workflow_name,
-        app.workflow_state.phase_name,
+        app.runtime.workflow_state.workflow_name,
+        app.runtime.workflow_state.phase_name,
         activity,
         nav,
     );
     let bar_bottom = format!(
         " {} | in:{} out:{} cached:{} | ctx:{}",
-        build_rate_limit_statusline(app.status_rate_limits.as_ref()),
-        format_human_count(app.session_tokens.tokens_in),
-        format_human_count(app.session_tokens.tokens_out),
-        format_human_count(app.session_tokens.tokens_cached),
-        build_context_statusline(app.last_ctx_tokens, app.status_model_info.as_ref()),
+        build_rate_limit_statusline(app.runtime.status_rate_limits.as_ref()),
+        format_human_count(app.runtime.session_tokens.tokens_in),
+        format_human_count(app.runtime.session_tokens.tokens_out),
+        format_human_count(app.runtime.session_tokens.tokens_cached),
+        build_context_statusline(app.runtime.last_ctx_tokens, app.runtime.status_model_info.as_ref()),
     );
     f.render_widget(Clear, chunks[2]);
     f.render_widget(
@@ -2482,7 +2319,7 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
 
     if app.review_mode == ReviewMode::Transcript || app.review_mode == ReviewMode::Watchdog {
         let (title, review_lines) = match app.review_mode {
-            ReviewMode::Transcript => (" Transcript review ", build_lines(&app.entries, &None, &app.agents)),
+            ReviewMode::Transcript => (" Transcript review ", build_lines(&app.entries, &None, &app.runtime.agents)),
             ReviewMode::Watchdog => (" Watchdog & agents ", build_watchdog_review_lines(app)),
             ReviewMode::Closed => unreachable!(),
         };
@@ -2536,9 +2373,9 @@ pub(crate) fn current_total_and_height(
         .map(|s| Rect::new(0, 0, s.width, s.height))
         .unwrap_or(Rect::new(0, 0, 80, 24));
     let lines = match app.review_mode {
-        ReviewMode::Transcript => build_lines(&app.entries, &None, &app.agents),
+        ReviewMode::Transcript => build_lines(&app.entries, &None, &app.runtime.agents),
         ReviewMode::Watchdog => build_watchdog_review_lines(app),
-        ReviewMode::Closed => build_lines(&app.entries, &app.pending, &app.agents),
+        ReviewMode::Closed => build_lines(&app.entries, &app.runtime.pending, &app.runtime.agents),
     };
     let area = match app.review_mode {
         ReviewMode::Transcript => review_area(size),
@@ -2560,9 +2397,10 @@ pub(crate) fn current_total_and_height(
 
 fn build_watchdog_review_lines(app: &App) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    let snapshot = app.snapshot_hub.current();
     #[cfg(feature = "stylos")]
     {
-        let snapshot = app.app_snapshot.clone();
+        let snapshot = app.snapshot_hub.current();
         let stylos_state = snapshot
             .stylos_status
             .clone()
@@ -2590,7 +2428,7 @@ fn build_watchdog_review_lines(app: &App) -> Vec<Line<'static>> {
         "local agents",
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
     )]));
-    for agent in &app.app_snapshot.local_agents {
+    for agent in &snapshot.local_agents {
         let roles = if agent.roles.is_empty() {
             "-".to_string()
         } else {
@@ -2628,7 +2466,6 @@ mod tests {
             roles: roles.iter().map(|r| r.to_string()).collect(),
             busy: false,
             turn_cancellation: None,
-            active_incoming_prompt: None,
         }
     }
 

@@ -26,6 +26,8 @@ use crate::board_runtime::{
     WATCHDOG_IDLE_DELAY_MS_DEFAULT,
 };
 use crate::app_state::{AppRuntimeEvent, AppSnapshot, AppSnapshotAgent, AppSnapshotHub};
+#[cfg(feature = "stylos")]
+use std::collections::HashMap;
 use crate::config::save_profiles;
 use crate::runtime_domains::DomainHandle;
 use crate::Session;
@@ -38,6 +40,42 @@ pub(crate) type StylosSnapshotFuture = std::pin::Pin<Box<dyn std::future::Future
 
 #[cfg(feature = "stylos")]
 pub(crate) type StylosSnapshotProvider = std::sync::Arc<dyn Fn() -> StylosSnapshotFuture + Send + Sync>;
+
+
+#[cfg(feature = "stylos")]
+pub(crate) type IncomingPromptState = HashMap<String, crate::stylos::IncomingPromptRequest>;
+
+#[cfg(feature = "stylos")]
+pub(crate) fn incoming_prompt_request<'a>(
+    incoming_prompts: &'a IncomingPromptState,
+    agent_id: &str,
+) -> Option<&'a crate::stylos::IncomingPromptRequest> {
+    incoming_prompts.get(agent_id)
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn take_incoming_prompt_request(
+    incoming_prompts: &mut IncomingPromptState,
+    agent_id: &str,
+) -> Option<crate::stylos::IncomingPromptRequest> {
+    incoming_prompts.remove(agent_id)
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn set_incoming_prompt_request(
+    incoming_prompts: &mut IncomingPromptState,
+    agent_id: String,
+    request: Option<crate::stylos::IncomingPromptRequest>,
+) {
+    match request {
+        Some(request) => {
+            incoming_prompts.insert(agent_id, request);
+        }
+        None => {
+            incoming_prompts.remove(&agent_id);
+        }
+    }
+}
 
 #[cfg(feature = "stylos")]
 #[derive(Clone, Debug, Default)]
@@ -300,6 +338,8 @@ pub(crate) fn spawn_agent_event_relay(
 
 pub(crate) struct AppSnapshotBuildState<'a> {
     pub agents: &'a [crate::tui::AgentHandle],
+    #[cfg(feature = "stylos")]
+    pub incoming_prompts: &'a IncomingPromptState,
     pub agent_busy: bool,
     pub activity_status: String,
     #[cfg(feature = "stylos")]
@@ -334,7 +374,7 @@ pub(crate) fn build_app_snapshot(
                 roles: handle.roles.clone(),
                 busy: handle.busy,
                 #[cfg(feature = "stylos")]
-                incoming: handle.active_incoming_prompt.is_some(),
+                incoming: state.incoming_prompts.contains_key(&handle.agent_id),
                 #[cfg(not(feature = "stylos"))]
                 incoming: false,
             })
@@ -347,7 +387,7 @@ pub(crate) fn build_app_snapshot(
         active_incoming_prompt_count: state
             .agents
             .iter()
-            .filter(|handle| handle.active_incoming_prompt.is_some())
+            .filter(|handle| state.incoming_prompts.contains_key(&handle.agent_id))
             .count(),
         #[cfg(feature = "stylos")]
         aggregate_busy_agents: state.agents.iter().any(|handle| handle.busy),
@@ -395,6 +435,8 @@ impl AppRuntimeObserverPublisher {
 
         self.snapshot_publisher.publish(AppSnapshotBuildState {
             agents: &*agents,
+            #[cfg(feature = "stylos")]
+            incoming_prompts: snapshot.incoming_prompts,
             agent_busy: snapshot.agent_busy,
             activity_status: snapshot.activity_status,
             #[cfg(feature = "stylos")]
@@ -421,7 +463,7 @@ impl AppRuntimeObserverPublisher {
                     primary_activity_label: stylos.primary_activity_label,
                     primary_activity_changed_at_ms: stylos.primary_activity_changed_at_ms,
                     primary_workflow: stylos.primary_workflow,
-                    agents: &*agents,
+                    agents: &stylos.agent_status_entries,
                 },
             );
         }
@@ -443,6 +485,8 @@ pub(crate) struct AppRuntimeSnapshotPublishState<'a> {
     pub stylos_status: Option<String>,
     #[cfg(feature = "stylos")]
     pub watchdog_state: &'a crate::app_runtime::WatchdogRuntimeState,
+    #[cfg(feature = "stylos")]
+    pub incoming_prompts: &'a IncomingPromptState,
     #[cfg(not(feature = "stylos"))]
     _marker: std::marker::PhantomData<&'a ()>,
 }
@@ -472,6 +516,7 @@ pub(crate) struct StylosRuntimeStatusPublishState<'a> {
     pub primary_activity_label: Option<String>,
     pub primary_activity_changed_at_ms: Option<u64>,
     pub primary_workflow: &'a WorkflowState,
+    pub agent_status_entries: Vec<LocalAgentStatusEntry>,
 }
 
 pub(crate) fn build_main_agent(
@@ -1018,8 +1063,6 @@ pub(crate) fn build_master_agent_handle(
         roles: vec!["master".to_string(), "interactive".to_string()],
         busy: false,
         turn_cancellation: None,
-        #[cfg(feature = "stylos")]
-        active_incoming_prompt: None,
     }
 }
 
@@ -1057,6 +1100,7 @@ pub(crate) fn apply_agent_ready_update(
     sid: Uuid,
     agent: Agent,
     #[cfg(feature = "stylos")] watchdog_state: &Arc<WatchdogRuntimeState>,
+    #[cfg(feature = "stylos")] incoming_prompts: &IncomingPromptState,
 ) {
     *status_model_info = agent.model_info().cloned();
     *workflow_state = agent.workflow_state().clone();
@@ -1066,7 +1110,7 @@ pub(crate) fn apply_agent_ready_update(
         handle.turn_cancellation = None;
     }
     #[cfg(feature = "stylos")]
-    sync_watchdog_runtime_state(watchdog_state, agents);
+    sync_watchdog_runtime_state(watchdog_state, agents, incoming_prompts);
 }
 
 pub(crate) fn apply_system_inspection_to_interactive_agent(
@@ -1277,6 +1321,7 @@ pub(crate) fn build_local_agent_roster(
 #[cfg(feature = "stylos")]
 pub(crate) fn build_local_agent_status_entries(
     agents: &[crate::tui::AgentHandle],
+    incoming_prompts: &IncomingPromptState,
 ) -> Vec<LocalAgentStatusEntry> {
     agents
         .iter()
@@ -1289,7 +1334,7 @@ pub(crate) fn build_local_agent_status_entries(
                 handle.agent.as_ref().map(|agent| agent.workflow_state().clone()),
                 handle.agent.as_ref().map(|agent| agent.project_dir.clone()),
                 handle.busy,
-                handle.active_incoming_prompt.is_some(),
+                incoming_prompts.contains_key(&handle.agent_id),
             )
         })
         .collect()
@@ -1312,8 +1357,6 @@ pub(crate) fn build_local_agent_handle(parts: NewLocalAgentHandleParts) -> crate
         roles: parts.roles,
         busy: false,
         turn_cancellation: None,
-        #[cfg(feature = "stylos")]
-        active_incoming_prompt: None,
     }
 }
 
@@ -1829,11 +1872,12 @@ pub(crate) struct IncomingPromptApplyPlan {
 #[cfg(feature = "stylos")]
 pub(crate) fn recompute_watchdog_state_from_app(
     agents: &[crate::tui::AgentHandle],
+    incoming_prompts: &IncomingPromptState,
 ) -> (bool, bool, bool) {
     let agent_busy = agents.iter().any(|handle| handle.busy);
     let has_active_incoming_prompt = agents
         .iter()
-        .any(|handle| handle.active_incoming_prompt.is_some());
+        .any(|handle| incoming_prompts.contains_key(&handle.agent_id));
     let pending_watchdog_note = has_active_incoming_prompt;
     (
         agent_busy,
@@ -1846,9 +1890,10 @@ pub(crate) fn recompute_watchdog_state_from_app(
 pub(crate) fn sync_watchdog_runtime_state(
     watchdog_state: &Arc<WatchdogRuntimeState>,
     agents: &[crate::tui::AgentHandle],
+    incoming_prompts: &IncomingPromptState,
 ) {
     let (agent_busy, has_active_incoming_prompt, pending_watchdog_note) =
-        recompute_watchdog_state_from_app(agents);
+        recompute_watchdog_state_from_app(agents, incoming_prompts);
     watchdog_state.sync_from_runtime_state(
         agent_busy,
         has_active_incoming_prompt,
@@ -1858,28 +1903,36 @@ pub(crate) fn sync_watchdog_runtime_state(
 
 #[cfg(feature = "stylos")]
 pub(crate) fn set_active_incoming_prompt(
-    agents: &mut [crate::tui::AgentHandle],
+    agents: &[crate::tui::AgentHandle],
+    incoming_prompts: &mut IncomingPromptState,
     watchdog_state: &Arc<WatchdogRuntimeState>,
     agent_index: usize,
     request: Option<crate::stylos::IncomingPromptRequest>,
     _pending_watchdog_note: bool,
 ) {
-    agents[agent_index].active_incoming_prompt = request;
-    sync_watchdog_runtime_state(watchdog_state, agents);
+    let agent_id = agents
+        .get(agent_index)
+        .expect("agent index valid")
+        .agent_id
+        .clone();
+    set_incoming_prompt_request(incoming_prompts, agent_id, request);
+    sync_watchdog_runtime_state(watchdog_state, agents, incoming_prompts);
 }
 
 #[cfg(feature = "stylos")]
 pub(crate) fn clear_active_incoming_prompt(
-    agents: &mut [crate::tui::AgentHandle],
+    agents: &[crate::tui::AgentHandle],
+    incoming_prompts: &mut IncomingPromptState,
     watchdog_state: &Arc<WatchdogRuntimeState>,
     agent_index: usize,
 ) {
-    set_active_incoming_prompt(agents, watchdog_state, agent_index, None, false);
+    set_active_incoming_prompt(agents, incoming_prompts, watchdog_state, agent_index, None, false);
 }
 
 #[cfg(feature = "stylos")]
 pub(crate) fn continue_current_note_follow_up(
-    agents: &mut [crate::tui::AgentHandle],
+    agents: &[crate::tui::AgentHandle],
+    incoming_prompts: &mut IncomingPromptState,
     watchdog_state: &Arc<WatchdogRuntimeState>,
     agent_index: usize,
     request: crate::stylos::IncomingPromptRequest,
@@ -1887,6 +1940,7 @@ pub(crate) fn continue_current_note_follow_up(
     let pending_watchdog_note = watchdog_state.pending_watchdog_note();
     set_active_incoming_prompt(
         agents,
+        incoming_prompts,
         watchdog_state,
         agent_index,
         Some(request),
@@ -1896,7 +1950,8 @@ pub(crate) fn continue_current_note_follow_up(
 
 #[cfg(feature = "stylos")]
 pub(crate) fn apply_active_incoming_prompt(
-    agents: &mut [crate::tui::AgentHandle],
+    agents: &[crate::tui::AgentHandle],
+    incoming_prompts: &mut IncomingPromptState,
     watchdog_state: &Arc<WatchdogRuntimeState>,
     agent_index: usize,
     request: crate::stylos::IncomingPromptRequest,
@@ -1904,6 +1959,7 @@ pub(crate) fn apply_active_incoming_prompt(
 ) {
     set_active_incoming_prompt(
         agents,
+        incoming_prompts,
         watchdog_state,
         agent_index,
         Some(request),
@@ -2292,7 +2348,7 @@ pub(crate) struct StylosAppStatusRefreshState<'a> {
     pub primary_activity_label: Option<String>,
     pub primary_activity_changed_at_ms: Option<u64>,
     pub primary_workflow: &'a WorkflowState,
-    pub agents: &'a [crate::tui::AgentHandle],
+    pub agents: &'a [LocalAgentStatusEntry],
 }
 
 #[cfg(feature = "stylos")]
@@ -2300,7 +2356,6 @@ pub(crate) fn refresh_stylos_status_snapshot(
     hub: &SharedStylosStatusHub,
     state: StylosAppStatusRefreshState<'_>,
 ) {
-    let agent_status_entries = build_local_agent_status_entries(state.agents);
     build_and_publish_stylos_status_snapshot(
         hub,
         StylosAppStatusSnapshotInput {
@@ -2315,7 +2370,7 @@ pub(crate) fn refresh_stylos_status_snapshot(
             primary_activity_label: state.primary_activity_label,
             primary_activity_changed_at_ms: state.primary_activity_changed_at_ms,
             primary_workflow: state.primary_workflow.clone(),
-            agents: &agent_status_entries,
+            agents: state.agents,
         },
     );
 }

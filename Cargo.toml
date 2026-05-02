@@ -34,7 +34,6 @@ edition = "2021"
 [profile.dev]
 debug = false
 incremental = true
-strip = "symbols"
 
 [profile.release]
 lto = true

@@ -353,10 +353,10 @@ pub async fn run(app_runtime: AppState) -> anyhow::Result<()> {
     crate::app_state::start_tui_watchdog_loop(&app_runtime, ctx.runtime_tx.clone());
 
     let mut app = build_app(
-        app_runtime.session,
-        app_runtime.db,
-        app_runtime.session_id,
-        app_runtime.project_dir,
+        app_runtime.runtime.session,
+        app_runtime.runtime.db,
+        app_runtime.runtime.session_id,
+        app_runtime.runtime.project_dir,
         &runtime_domains,
         &ctx.app_tx,
         &ctx.runtime_tx,
@@ -365,7 +365,7 @@ pub async fn run(app_runtime: AppState) -> anyhow::Result<()> {
         #[cfg(feature = "stylos")]
         stylos_handle,
         #[cfg(feature = "stylos")]
-        app_runtime.watchdog_state.clone(),
+        app_runtime.runtime.watchdog_state.clone(),
         #[cfg(feature = "stylos")]
         shared_status_hub,
     );
