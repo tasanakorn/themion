@@ -597,25 +597,64 @@ pub(crate) fn execute_runtime_command(
 }
 
 
-pub(crate) fn apply_runtime_command_outcome_to_agents(
-    agents: &mut [crate::tui::AgentHandle],
+pub(crate) struct RuntimeCommandApplication {
+    pub output_lines: Vec<String>,
+    pub had_effect: bool,
+}
+
+pub(crate) fn apply_runtime_command_outcome_to_app_runtime(
+    agents: &mut Vec<crate::tui::AgentHandle>,
+    status_model_info: &mut Option<ModelInfo>,
+    workflow_state: &mut WorkflowState,
     api_log_enabled: &mut bool,
     last_ctx_tokens: &mut u64,
-    outcome: &RuntimeCommandOutcome,
-) {
+    outcome: RuntimeCommandOutcome,
+) -> RuntimeCommandApplication {
     match outcome {
-        RuntimeCommandOutcome::SetInteractiveApiLogEnabled { enabled, .. } => {
-            *api_log_enabled = *enabled;
+        RuntimeCommandOutcome::Noop => RuntimeCommandApplication {
+            output_lines: Vec::new(),
+            had_effect: false,
+        },
+        RuntimeCommandOutcome::Lines(output_lines) => RuntimeCommandApplication {
+            output_lines,
+            had_effect: true,
+        },
+        RuntimeCommandOutcome::ReplaceMasterAgent {
+            new_agent,
+            new_session_id,
+            output_lines,
+        } => {
+            apply_master_agent_replacement(
+                agents,
+                status_model_info,
+                workflow_state,
+                new_agent,
+                new_session_id,
+            );
+            RuntimeCommandApplication {
+                output_lines,
+                had_effect: true,
+            }
+        }
+        RuntimeCommandOutcome::SetInteractiveApiLogEnabled {
+            enabled,
+            output_lines,
+        } => {
+            *api_log_enabled = enabled;
             if let Some(handle) = agents
                 .iter_mut()
                 .find(|h| h.roles.iter().any(|role| role == "interactive"))
             {
                 if let Some(agent) = handle.agent.as_mut() {
-                    agent.set_api_log_enabled(*enabled);
+                    agent.set_api_log_enabled(enabled);
                 }
             }
+            RuntimeCommandApplication {
+                output_lines,
+                had_effect: true,
+            }
         }
-        RuntimeCommandOutcome::ClearInteractiveContext { .. } => {
+        RuntimeCommandOutcome::ClearInteractiveContext { output_lines } => {
             if let Some(handle) = agents
                 .iter_mut()
                 .find(|h| h.roles.iter().any(|role| role == "interactive"))
@@ -625,20 +664,14 @@ pub(crate) fn apply_runtime_command_outcome_to_agents(
                 }
             }
             *last_ctx_tokens = 0;
+            RuntimeCommandApplication {
+                output_lines,
+                had_effect: true,
+            }
         }
-        _ => {}
     }
 }
 
-pub(crate) fn take_runtime_command_output_lines(outcome: &mut RuntimeCommandOutcome) -> Vec<String> {
-    match outcome {
-        RuntimeCommandOutcome::Noop => Vec::new(),
-        RuntimeCommandOutcome::Lines(lines) => std::mem::take(lines),
-        RuntimeCommandOutcome::ReplaceMasterAgent { output_lines, .. } => std::mem::take(output_lines),
-        RuntimeCommandOutcome::SetInteractiveApiLogEnabled { output_lines, .. } => std::mem::take(output_lines),
-        RuntimeCommandOutcome::ClearInteractiveContext { output_lines } => std::mem::take(output_lines),
-    }
-}
 
 pub(crate) fn current_activity_label(activity: Option<&crate::tui::AgentActivity>) -> Option<String> {
     activity.map(|activity| match activity {
@@ -1304,6 +1337,44 @@ fn delete_local_agent(
         "session_id": removed.session_id.to_string(),
     })
     .to_string())
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn publish_stylos_task_running(
+    background_domain: &DomainHandle,
+    query_context: crate::stylos::StylosQueryContext,
+    task_id: String,
+) {
+    background_domain.spawn(async move {
+        query_context.task_registry().set_running(&task_id).await;
+    });
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn publish_stylos_task_completed(
+    background_domain: &DomainHandle,
+    query_context: crate::stylos::StylosQueryContext,
+    task_id: String,
+    result_text: Option<String>,
+) {
+    background_domain.spawn(async move {
+        query_context
+            .task_registry()
+            .set_completed(&task_id, result_text, None)
+            .await;
+    });
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn publish_stylos_task_failed(
+    background_domain: &DomainHandle,
+    query_context: crate::stylos::StylosQueryContext,
+    task_id: String,
+    reason: String,
+) {
+    background_domain.spawn(async move {
+        query_context.task_registry().set_failed(&task_id, reason).await;
+    });
 }
 
 #[cfg(feature = "stylos")]

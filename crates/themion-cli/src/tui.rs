@@ -1,13 +1,13 @@
 use crate::app_runtime::{
     apply_agent_ready_update, apply_master_agent_replacement,
-    apply_runtime_command_outcome_to_agents, build_local_agent_roster,
+    apply_runtime_command_outcome_to_app_runtime, build_local_agent_roster,
     build_local_agent_tool_invoker, build_main_agent,
     build_replacement_main_agent,
     execute_runtime_command,
     handle_local_agent_management_request as runtime_handle_local_agent_management_request,
     is_interactive_agent_handle, launch_agent_turn_runtime, prepare_agent_turn_runtime_launch,
-    take_runtime_command_output_lines, AgentReplacementParams, LocalAgentManagementRequest,
-    LocalAgentRuntimeContext, RuntimeCommand, RuntimeCommandContext, RuntimeCommandOutcome,
+    AgentReplacementParams, LocalAgentManagementRequest, LocalAgentRuntimeContext, RuntimeCommand,
+    RuntimeCommandContext,
     SystemInspectionRuntimeRefreshState, refresh_interactive_agent_system_inspection_from_runtime,
 };
 #[cfg(feature = "stylos")]
@@ -15,10 +15,10 @@ use crate::app_runtime::{
     agent_has_role, build_local_agent_status_entries,
     apply_active_incoming_prompt, refresh_stylos_status_snapshot,
     clear_active_incoming_prompt, completed_note_follow_up_apply_plan,
-    continue_current_note_follow_up, incoming_prompt_apply_plan,
-    resolve_submit_target, submit_target_failure_effect,
-    watchdog_dispatch_apply_plan, watchdog_dispatch_effect, SharedStylosStatusHub,
-    StylosAppStatusRefreshState,
+    continue_current_note_follow_up, incoming_prompt_apply_plan, publish_stylos_task_completed,
+    publish_stylos_task_failed, publish_stylos_task_running, resolve_submit_target,
+    submit_target_failure_effect, watchdog_dispatch_apply_plan, watchdog_dispatch_effect,
+    SharedStylosStatusHub, StylosAppStatusRefreshState,
 };
 #[cfg(feature = "stylos")]
 use crate::board_runtime::{finalize_board_note_injection, LocalBoardClaimRegistry};
@@ -1384,10 +1384,11 @@ impl App {
                             self.agents[agent_index].active_incoming_prompt.as_ref()
                         {
                             if let Some(task_id) = remote.task_id.clone() {
-                                let query_context = handle.query_context();
-                                self.background_domain.spawn(async move {
-                                    query_context.task_registry().set_running(&task_id).await;
-                                });
+                                publish_stylos_task_running(
+                                    &self.background_domain,
+                                    handle.query_context(),
+                                    task_id,
+                                );
                             }
                         }
                     }
@@ -1525,13 +1526,12 @@ impl App {
                         {
                             if let Some(task_id) = remote.task_id {
                                 let result_text = self.last_assistant_text.clone();
-                                let query_context = handle.query_context();
-                                self.background_domain().spawn(async move {
-                                    query_context
-                                        .task_registry()
-                                        .set_completed(&task_id, result_text, None)
-                                        .await;
-                                });
+                                publish_stylos_task_completed(
+                                    &self.background_domain,
+                                    handle.query_context(),
+                                    task_id,
+                                    result_text,
+                                );
                             }
                         }
                     }
@@ -1855,7 +1855,7 @@ impl App {
             | RuntimeCommand::ConfigProfileSet { .. }
             | RuntimeCommand::SetApiLogEnabled { .. }
             | RuntimeCommand::ClearContext => {
-                let mut outcome = execute_runtime_command(
+                let outcome = execute_runtime_command(
                     command,
                     RuntimeCommandContext {
                         session: &mut self.session,
@@ -1869,29 +1869,25 @@ impl App {
                         local_agent_mgmt_tx: self.local_agent_mgmt_tx.clone(),
                     },
                 );
-                let had_effect = !matches!(outcome, RuntimeCommandOutcome::Noop);
-                apply_runtime_command_outcome_to_agents(
+                let application = apply_runtime_command_outcome_to_app_runtime(
                     &mut self.agents,
+                    &mut self.status_model_info,
+                    &mut self.workflow_state,
                     &mut self.api_log_enabled,
                     &mut self.last_ctx_tokens,
-                    &outcome,
+                    outcome,
                 );
-                let output_lines = take_runtime_command_output_lines(&mut outcome);
-                if let RuntimeCommandOutcome::ReplaceMasterAgent {
-                    new_agent,
-                    new_session_id,
-                    ..
-                } = outcome
-                {
-                    self.replace_master_agent(new_agent, new_session_id);
+                #[cfg(feature = "stylos")]
+                if application.had_effect {
+                    self.refresh_stylos_status();
                 }
-                for line in output_lines {
+                for line in application.output_lines {
                     self.push(Entry::Assistant {
                         agent_id: None,
                         text: line,
                     });
                 }
-                if had_effect {
+                if application.had_effect {
                     self.push(Entry::Blank);
                     self.mark_dirty_all();
                 }
@@ -2347,14 +2343,12 @@ impl App {
                 if let (Some(handle), Some(task_id)) =
                     (self.stylos.as_ref(), effect.failed_task_id)
                 {
-                    let query_context = handle.query_context();
-                    let failure_reason = effect.failure_reason.to_string();
-                    self.background_domain().spawn(async move {
-                        query_context
-                            .task_registry()
-                            .set_failed(&task_id, failure_reason)
-                            .await;
-                    });
+                    publish_stylos_task_failed(
+                        &self.background_domain,
+                        handle.query_context(),
+                        task_id,
+                        effect.failure_reason.to_string(),
+                    );
                 }
                 clear_active_incoming_prompt(
                     &mut self.agents,
@@ -2809,15 +2803,12 @@ impl App {
                         self.stylos.as_ref(),
                         task_failure.split_once(':'),
                     ) {
-                        let query_context = handle.query_context();
-                        let task_id = task_id.to_string();
-                        let reason = reason.to_string();
-                        self.background_domain().spawn(async move {
-                            query_context
-                                .task_registry()
-                                .set_failed(&task_id, reason)
-                                .await;
-                        });
+                        publish_stylos_task_failed(
+                            &self.background_domain,
+                            handle.query_context(),
+                            task_id.to_string(),
+                            reason.to_string(),
+                        );
                     }
                 }
                 return;

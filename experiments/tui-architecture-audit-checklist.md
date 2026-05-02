@@ -89,9 +89,8 @@ Recommended order:
    - planning/apply-plan helpers are extracted, but TUI still owns final prompt submission, log-entry emission, and task-failure publication side effects
 3. [~] move watchdog and board-note follow-up policy
    - follow-up planning/apply-plan helpers are extracted, but TUI still owns final done-mention emission display and prompt submission side effects
-4. [~] move task-registry side effects out of `process_agent_event`
-   - `set_running` / `set_completed` still happen directly in `process_agent_event`
-   - `set_failed` still happens in `submit_text` missing-target handling and `handle_incoming_prompt_request`
+4. [x] move task-registry side effects out of `process_agent_event`
+   - direct `set_running` / `set_completed` / `set_failed` calls now live behind runtime-owned publication helpers in `app_runtime.rs`; `App` still decides when to invoke them from the current event flow
 5. [~] move system-inspection snapshot/publication ownership
 6. [~] verify TUI is only rendering Stylos/runtime state
    - current blocker is that TUI still owns several final side effects around prompt submission, board/task follow-up, and live agent-handle mutation
@@ -200,7 +199,7 @@ Exit criteria for Slice 5:
    - current answer appears to be “yes, but narrower than before”: command-side and snapshot assembly work moved out, while live agent-handle mutation and Stylos/task side effects still remain in `App`
 2. [~] re-check whether `AgentHandle`, `is_interactive_handle`, and `normalize_primary_role` still block the intended boundary
    - `AgentHandle` and direct `self.agents` access remain the main blocker for moving final prompt/task/status side effects out of TUI-owned code paths
-3. [ ] update this checklist’s classifications based on the new ownership reality
+3. [x] update this checklist’s classifications based on the new ownership reality
 4. [x] decide whether further extraction is justified by a real remaining ownership problem rather than by checklist inertia
    - yes: the remaining issue is no longer command/helper cleanup; it is specifically the live agent/stylos side-effect ownership boundary
 
@@ -240,6 +239,19 @@ Command-seam status after the current extraction pass:
 - no obvious additional narrow command-branch extraction remains without moving into broader `App`/live-agent ownership questions or non-command TUI concerns
 
 ## Latest progress notes
+
+Second big-bang completion pass:
+- moved the remaining direct Stylos task-registry publications (`set_running`, `set_completed`, `set_failed`) out of `tui.rs` and behind `app_runtime.rs` helpers.
+- `process_agent_event`, submit-target failure handling, and incoming-prompt rejection handling now invoke runtime publication helpers instead of spawning task-registry mutations inline.
+- direct task-registry side-effect ownership in `App::process_agent_event` is complete for the current seam; `App` still owns higher-level event-flow decisions until a broader live-agent/App hub redesign lands.
+
+
+Big-bang completion pass:
+- moved runtime-command outcome application into `app_runtime.rs` via `apply_runtime_command_outcome_to_app_runtime`, including the profile/model/session-reset/config-profile master-agent replacement path.
+- `App::handle_runtime_command` now executes the runtime command, delegates canonical runtime mutation/rebuild outcome application, refreshes Stylos status when the runtime helper reports an effect, and renders returned lines.
+- removed the stale command-output helper so command rebuild paths no longer require TUI-side outcome unpacking.
+- validation passed for `cargo check -p themion-cli`, `cargo check -p themion-cli --features stylos`, and `cargo check -p themion-cli --all-features`.
+
 
 - audited the remaining `process_agent_event` / incoming-prompt / task-registry paths: the extracted planners already cover most narrow helper work, and the real leftover issue is final side-effect ownership around `self.agents`, prompt submission, and Stylos task-registry publication rather than another obvious local helper extraction
 - reconciled the `handle_command` branch map with the current code: command-side runtime-mutation branches are already routed through `AppEvent::RuntimeCommand`, so the remaining post-Slice-1 work is primarily larger ownership follow-through rather than another narrow command extraction
@@ -541,7 +553,7 @@ Suggested execution order:
 1. [x] move Stylos receiver wiring out of TUI surface
 2. [~] move incoming prompt and Stylos command policy out of `App`
 3. [~] move watchdog/board-note follow-up policy out of `App`
-4. [~] move task-registry and inspection snapshot side effects out of `App::process_agent_event`
+4. [x] move task-registry and inspection snapshot side effects out of `App::process_agent_event`
 5. [~] re-check that TUI only renders Stylos/runtime state, not owns it
 
 ### Set 2 — `VIOLATION` related to agent management / orchestration
@@ -557,7 +569,7 @@ Items:
 - [x] `App::handle_local_agent_management_request`
 - [x] `App::submit_text_to_agent`
 - [x] `App::submit_text`
-- [ ] runtime-rebuild branches inside `App::handle_command`
+- [x] runtime-rebuild branches inside `App::handle_command`
 
 Expected destination:
 - app-state/app-runtime/hub modules own canonical roster, agent lifecycle, orchestration state, and submission policy
@@ -567,8 +579,8 @@ Suggested execution order:
 1. [~] define or confirm runtime-owned roster/submission interfaces
 2. [~] move local-agent management request handling out of `App`
 3. [~] move live-agent submission logic out of `submit_text_to_agent` / `submit_text`
-4. [ ] move profile/model-triggered runtime rebuild logic out of `handle_command`
-5. [ ] shrink `App` so it no longer owns canonical runtime state
+4. [x] move profile/model-triggered runtime rebuild logic out of `handle_command`
+5. [~] shrink `App` so it no longer owns canonical runtime state
 
 ### Set 3 — `VIOLATION` related to other runtime ownership
 
@@ -582,9 +594,9 @@ Notes:
 - When working this set, split the function rather than moving the whole thing blindly.
 
 Sub-actions:
-- [ ] separate pure UI/display commands from runtime-owned commands
-- [ ] route runtime-owned commands through app-state/runtime intents
-- [ ] leave only formatting or local-view command behavior in `tui.rs`
+- [x] separate pure UI/display commands from runtime-owned commands
+- [x] route runtime-owned commands through app-state/runtime intents
+- [x] leave only formatting or local-view command behavior in `tui.rs`
 
 ### Set 4 — `MIXED`
 
@@ -643,7 +655,7 @@ Validate and migrate these one by one, in order.
 12. [x] `task_runtime_snapshot` `[phaseC]`
 13. [x] `system_inspection_snapshot` `[phaseC]`
 14. [x] `refresh_main_agent_system_inspection` `[phaseC]`
-15. [ ] runtime-rebuild paths inside `handle_command` `[phaseD]`
+15. [x] runtime-rebuild paths inside `handle_command` `[phaseD]`
 
 ## Validation workflow for each item
 
@@ -684,5 +696,5 @@ Current stopping-point assessment:
 
 - The checklist is now updated against the current codebase rather than left as a stale speculative queue.
 - Most easy ownership wins from this cleanup sequence have landed, and the final pass also closed the default-build feature-gating regression that briefly remained.
-- The remaining open items are now only larger-scope refactors: profile/model rebuild paths in `handle_command`, deeper `App` de-ownership, and any future hub-owned replacement for the thin system-inspection gather step.
+- The remaining open items are now only larger-scope refactors: deeper `App` de-ownership and any future hub-owned replacement for the thin system-inspection gather step. Profile/model runtime rebuild outcomes and Stylos task-registry publication calls now apply through `app_runtime.rs` rather than direct `tui.rs` mutation/publication code.
 - Treat this checklist as complete for the current audit pass: no routine stale review work or immediate build-fix follow-up remains.
