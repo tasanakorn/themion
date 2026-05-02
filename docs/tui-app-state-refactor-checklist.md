@@ -401,3 +401,14 @@ watch<AppSnapshot> --latest snapshot--> headless/other surfaces
 7.12. Watchdog simplification update: the live watchdog path now matches the intended product behavior. The control loop only looks for an idle window and triggers dispatch; `app_state.rs` selects an idle agent plus a pending board note and injects it into the normal incoming-prompt / agent-loop path. The abandoned `WatchdogDispatch*` abstraction stack was removed instead of preserved.
 7.13. Remaining `tui*.rs` work summary: `tui_runner.rs` is largely in the desired shape as a bridge that wires input, starts runtime-owned loops, subscribes to `AppSnapshotHub`, and forwards `SnapshotUpdated` events. The heavier remaining work is all in `tui.rs`: move canonical `App` / `AgentHandle` ownership out, remove `active_incoming_prompt` from TUI-owned agent state, and delete the remaining TUI-owned snapshot publication trigger sites.
 7.14. Next slice: start with Sequence E and the linked publication follow-through items. Do not spend more time on `tui_runner.rs` watch wiring or display-only `tui.rs` edits first.
+
+
+7.15. Best next fix checklist:
+- [ ] 7.15.1. Move `active_incoming_prompt` off `tui::AgentHandle`.
+- [ ] 7.15.2. Move `agent_busy`, workflow, roster, watchdog, and Stylos status ownership into app-state/runtime-owned canonical state and snapshot projection.
+- [ ] 7.15.3. Make `submit_text_to_agent(...)` a runtime/app-state action instead of a TUI method.
+- [ ] 7.15.4. Reduce `tui::App` to UI-local state only:
+  - [ ] 7.15.4.a. composer
+  - [ ] 7.15.4.b. scroll/review/focus
+  - [ ] 7.15.4.c. dirty flags
+  - [ ] 7.15.4.d. local render cache
