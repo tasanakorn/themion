@@ -1,22 +1,18 @@
 use crate::app_runtime::{
-    build_main_agent, build_replacement_main_agent, is_interactive_agent_handle,
-    AgentReplacementParams, AppRuntimeObserverPublisher, LocalAgentManagementRequest,
-    RuntimeCommand,
+    build_replacement_main_agent, is_interactive_agent_handle,
+    AgentReplacementParams, LocalAgentManagementRequest, RuntimeCommand,
 };
 #[cfg(feature = "stylos")]
-use crate::app_runtime::{agent_has_role, SharedStylosStatusHub};
+use crate::app_runtime::agent_has_role;
 #[cfg(feature = "stylos")]
-use crate::board_runtime::LocalBoardClaimRegistry;
 use crate::app_state::{activity_status_value, clear_agent_activity as app_state_clear_agent_activity, on_tick as app_state_on_tick, publish_runtime_snapshot as app_state_publish_runtime_snapshot, AppRuntimeEvent, AppRuntimeState, set_agent_activity as app_state_set_agent_activity, AgentActivity, AppSnapshot};
 use crate::chat_composer::{ChatComposer, InputAction};
 use crate::config::save_profiles;
 use crate::runtime_domains::DomainHandle;
 #[cfg(feature = "stylos")]
-use crate::stylos::{StylosHandle, StylosRuntimeState, StylosToolBridge};
+use crate::stylos::StylosRuntimeState;
 
 #[cfg(feature = "stylos")]
-use crate::app_runtime::WatchdogRuntimeState;
-use crate::Session;
 use crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
 use ratatui::{
     backend::CrosstermBackend,
@@ -26,13 +22,9 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
     Frame, Terminal,
 };
-use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use themion_core::agent::{Agent, TurnCancellation};
 use themion_core::client_codex::ApiCallRateLimitReport;
-use themion_core::db::DbHandle;
-use themion_core::workflow::WorkflowState;
 use themion_core::ModelInfo;
 use themion_core::{
     EstimateMode, PromptContextReport, PromptSectionKind, ReplayForm, TokenizerResolutionSource,
@@ -749,54 +741,9 @@ pub struct App {
 
 impl App {
     pub fn new(
-        session: Session,
-        db: Arc<DbHandle>,
-        session_id: Uuid,
-        project_dir: PathBuf,
-        background_domain: DomainHandle,
-        core_domain: DomainHandle,
-        app_tx: mpsc::UnboundedSender<AppEvent>,
-        runtime_tx: mpsc::UnboundedSender<AppRuntimeEvent>,
-        #[cfg(feature = "stylos")] stylos: Option<StylosHandle>,
-        #[cfg(feature = "stylos")] stylos_tool_bridge: Option<StylosToolBridge>,
-        #[cfg(feature = "stylos")] watchdog_state: Arc<WatchdogRuntimeState>,
-        #[cfg(feature = "stylos")] board_claims: Arc<LocalBoardClaimRegistry>,
-        #[cfg(feature = "stylos")] shared_status_hub: SharedStylosStatusHub,
-        runtime_observer_publisher: AppRuntimeObserverPublisher,
+        runtime: AppRuntimeState,
         initial_snapshot: AppSnapshot,
     ) -> Self {
-        #[cfg(feature = "stylos")]
-        let local_stylos_instance = stylos.as_ref().and_then(|handle| match handle.state() {
-            StylosRuntimeState::Active { instance, .. } => Some(instance.clone()),
-            _ => Some(crate::stylos::derive_local_instance_id()),
-        });
-        let agent = build_main_agent(
-            &session,
-            db.clone(),
-            session_id,
-            project_dir.clone(),
-            app_tx.clone(),
-            #[cfg(feature = "stylos")]
-            stylos_tool_bridge.clone(),
-            #[cfg(feature = "stylos")]
-            local_stylos_instance.as_deref(),
-            #[cfg(feature = "stylos")]
-            "master",
-            None,
-            false,
-        )
-        .expect("failed to build agent");
-        let initial_model_info = session.model_info.clone();
-        let handle = AgentHandle {
-            agent: Some(agent),
-            session_id,
-            agent_id: "master".to_string(),
-            label: "master".to_string(),
-            roles: vec!["master".to_string(), "interactive".to_string()],
-            busy: false,
-            turn_cancellation: None,
-        };
-
         let art = concat!(
             "████████╗██╗  ██╗███████╗███╗   ███╗██╗ ██████╗ ███╗   ██╗\n",
             "╚══██╔══╝██║  ██║██╔════╝████╗ ████║██║██╔═══██╗████╗  ██║\n",
@@ -805,7 +752,7 @@ impl App {
             "   ██║   ██║  ██║███████╗██║ ╚═╝ ██║██║╚██████╔╝██║ ╚████║\n",
             "   ╚═╝   ╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝",
         );
-        let project_display = project_dir.display().to_string();
+        let project_display = runtime.project_dir.display().to_string();
         #[allow(unused_mut)]
         let mut initial_entries = vec![
             Entry::Blank,
@@ -816,8 +763,8 @@ impl App {
                 text: format!(
                     "version: {}  |  profile: {}  |  model: {}",
                     env!("CARGO_PKG_VERSION"),
-                    session.active_profile,
-                    session.model,
+                    runtime.session.active_profile,
+                    runtime.session.model
                 ),
             },
             Entry::Assistant {
@@ -832,38 +779,6 @@ impl App {
             Entry::Blank,
         ];
 
-        #[cfg(feature = "stylos")]
-        if let Some(handle) = stylos.as_ref() {
-            match handle.state() {
-                StylosRuntimeState::Off => initial_entries.push(Entry::Status {
-                    agent_id: None,
-                    source: Some(NonAgentSource::Stylos),
-                    text: "stylos disabled".to_string(),
-                }),
-                StylosRuntimeState::Active {
-                    mode,
-                    realm,
-                    instance,
-                } => initial_entries.push(Entry::Status {
-                    agent_id: None,
-                    source: Some(NonAgentSource::Stylos),
-                    text: format!(
-                        "stylos ready: mode={} realm={} instance={}",
-                        mode, realm, instance
-                    ),
-                }),
-                StylosRuntimeState::Error(err) => initial_entries.push(Entry::Status {
-                    agent_id: None,
-                    source: Some(NonAgentSource::Stylos),
-                    text: format!("stylos start failed: {}", err),
-                }),
-            }
-            initial_entries.push(Entry::Blank);
-        }
-
-        let process_started_at = std::time::Instant::now();
-        let process_started_at_ms = unix_epoch_now_ms();
-
         let mut app = Self {
             entries: initial_entries,
             composer: ChatComposer::new(),
@@ -877,57 +792,7 @@ impl App {
                 d.mark_all();
                 d
             },
-            runtime: AppRuntimeState {
-                agents: vec![handle],
-                workflow_state: WorkflowState::default(),
-                session,
-                db,
-                project_dir: project_dir.clone(),
-                session_id,
-                background_domain,
-                core_domain,
-                startup_project_dir: project_dir.clone(),
-                local_agent_mgmt_tx: app_tx.clone(),
-                runtime_tx: runtime_tx.clone(),
-                runtime_observer_publisher,
-                api_log_enabled: false,
-                status_model_info: initial_model_info,
-                status_rate_limits: None,
-                last_ctx_tokens: 0,
-                session_tokens: Default::default(),
-                agent_busy: false,
-                pending: None,
-                running: true,
-                ctrl_c_exit_armed_until: None,
-                streaming_idx: None,
-                process_started_at,
-                process_started_at_ms,
-                idle_since: Some(process_started_at),
-                idle_status_changed_at: Some(process_started_at_ms),
-                agent_activity: None,
-                agent_activity_changed_at: None,
-                stream_chunks: 0,
-                stream_chars: 0,
-                activity_counters: Default::default(),
-                #[cfg(feature = "stylos")]
-                stylos,
-                #[cfg(feature = "stylos")]
-                local_stylos_instance,
-                #[cfg(feature = "stylos")]
-                stylos_tool_bridge,
-                #[cfg(feature = "stylos")]
-                watchdog_state,
-                #[cfg(feature = "stylos")]
-                board_claims,
-                #[cfg(feature = "stylos")]
-                shared_status_hub,
-                #[cfg(feature = "stylos")]
-                last_sender_side_transport_event: None,
-                #[cfg(feature = "stylos")]
-                incoming_prompts: Default::default(),
-                #[cfg(feature = "stylos")]
-                last_assistant_text: None,
-            },
+            runtime,
             recent_runtime_snapshots: std::collections::VecDeque::new(),
             snapshot_hub: crate::app_state::AppSnapshotHub::new(initial_snapshot),
         };
@@ -935,6 +800,7 @@ impl App {
         app_state_publish_runtime_snapshot(&mut app);
         app
     }
+
 
     #[cfg(feature = "stylos")]
     #[allow(dead_code)]
@@ -1069,10 +935,7 @@ impl App {
         self.request_draw(frame_requester);
     }
 
-    #[cfg(feature = "stylos")]
-    pub(crate) fn shutdown_stylos(&mut self) -> Option<StylosHandle> {
-        self.runtime.stylos.take()
-    }
+
 
     pub(crate) fn push(&mut self, entry: Entry) {
         self.entries.push(entry);
@@ -1910,6 +1773,8 @@ impl App {
         }
     }
 }
+
+
 
 fn format_human_count(n: u64) -> String {
     if n >= 1_000_000 {

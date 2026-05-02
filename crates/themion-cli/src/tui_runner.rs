@@ -1,8 +1,4 @@
-#[cfg(feature = "stylos")]
-use crate::app_runtime::SharedStylosStatusHub;
 use crate::app_runtime::{AppRuntimeObserverPublisher, AppSnapshotPublisher};
-#[cfg(feature = "stylos")]
-use crate::board_runtime::LocalBoardClaimRegistry;
 use crate::app_state::{start_tick_loop, AppRuntimeEvent, AppState};
 use crate::runtime_domains::{DomainHandle, RuntimeDomains};
 use crate::tui::{dispatch_terminal_event, draw, App, AppEvent, FrameRequester};
@@ -13,13 +9,9 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
-use std::path::PathBuf;
 use std::sync::Arc;
-use themion_core::db::DbHandle;
 use tokio::sync::{broadcast, mpsc};
-use uuid::Uuid;
 
-use crate::Session;
 
 type TerminalBackend = CrosstermBackend<std::io::Stdout>;
 type TuiTerminal = Terminal<TerminalBackend>;
@@ -125,84 +117,12 @@ fn install_panic_cleanup_hook() {
     }));
 }
 
-#[cfg(feature = "stylos")]
-fn wire_stylos_event_streams(
-    runtime_domains: &Arc<RuntimeDomains>,
-    handle: &mut crate::stylos::StylosHandle,
-    runtime_tx: &mpsc::UnboundedSender<AppRuntimeEvent>,
-) {
-    let tui_domain = runtime_domains
-        .tui()
-        .expect("tui runtime available in TUI mode");
-    if let Some(mut cmd_rx) = handle.take_cmd_rx() {
-        let runtime_tx_cmd = runtime_tx.clone();
-        tui_domain.spawn(async move {
-            while let Some(cmd) = cmd_rx.recv().await {
-                let _ = runtime_tx_cmd.send(AppRuntimeEvent::StylosCmd(cmd));
-            }
-        });
-    }
-    if let Some(mut prompt_rx) = handle.take_prompt_rx() {
-        let runtime_tx_prompt = runtime_tx.clone();
-        tui_domain.spawn(async move {
-            while let Some(prompt) = prompt_rx.recv().await {
-                let _ = runtime_tx_prompt.send(AppRuntimeEvent::IncomingPrompt(prompt));
-            }
-        });
-    }
-    if let Some(mut event_rx) = handle.take_event_rx() {
-        let runtime_tx_event = runtime_tx.clone();
-        tui_domain.spawn(async move {
-            while let Some(event) = event_rx.recv().await {
-                let _ = runtime_tx_event.send(AppRuntimeEvent::StylosEvent(event));
-            }
-        });
-    }
-}
 
 fn build_app(
-    session: Session,
-    db: Arc<DbHandle>,
-    session_id: Uuid,
-    project_dir: PathBuf,
-    runtime_domains: &Arc<RuntimeDomains>,
-    app_tx: &tokio::sync::mpsc::UnboundedSender<crate::tui::AppEvent>,
-    runtime_tx: &tokio::sync::mpsc::UnboundedSender<crate::app_state::AppRuntimeEvent>,
-    runtime_observer_publisher: AppRuntimeObserverPublisher,
+    runtime: crate::app_state::AppRuntimeState,
     initial_snapshot: crate::app_state::AppSnapshot,
-    #[cfg(feature = "stylos")] stylos_handle: Option<crate::stylos::StylosHandle>,
-    #[cfg(feature = "stylos")] watchdog_state: Arc<crate::app_runtime::WatchdogRuntimeState>,
-    #[cfg(feature = "stylos")] shared_status_hub: SharedStylosStatusHub,
 ) -> App {
-    #[cfg(feature = "stylos")]
-    let stylos_tool_bridge = stylos_handle.as_ref().and_then(crate::stylos::tool_bridge);
-    #[cfg(feature = "stylos")]
-    let board_claims = Arc::new(LocalBoardClaimRegistry::default());
-
-    App::new(
-        session,
-        db,
-        session_id,
-        project_dir,
-        runtime_domains
-            .background()
-            .expect("background runtime available in TUI mode"),
-        runtime_domains.core(),
-        app_tx.clone(),
-        runtime_tx.clone(),
-        #[cfg(feature = "stylos")]
-        stylos_handle,
-        #[cfg(feature = "stylos")]
-        stylos_tool_bridge,
-        #[cfg(feature = "stylos")]
-        watchdog_state,
-        #[cfg(feature = "stylos")]
-        board_claims,
-        #[cfg(feature = "stylos")]
-        shared_status_hub,
-        runtime_observer_publisher,
-        initial_snapshot,
-    )
+    App::new(runtime, initial_snapshot)
 }
 
 
@@ -269,21 +189,6 @@ async fn run_event_loop(
     Ok(())
 }
 
-#[cfg(feature = "stylos")]
-async fn shutdown_app(app: &mut App, ctx: RunnerContext) {
-    ctx.shutdown();
-    drop(ctx.app_tx);
-    if let Some(stylos) = app.shutdown_stylos() {
-        stylos.shutdown().await;
-    }
-}
-
-#[cfg(not(feature = "stylos"))]
-async fn shutdown_app(_app: &mut App, ctx: RunnerContext) {
-    ctx.shutdown();
-    drop(ctx.app_tx);
-}
-
 struct RunnerContext {
     app_tx: mpsc::UnboundedSender<AppEvent>,
     app_rx: mpsc::UnboundedReceiver<AppEvent>,
@@ -327,7 +232,14 @@ impl RunnerContext {
     }
 }
 
-pub async fn run(app_runtime: AppState) -> anyhow::Result<()> {
+
+#[cfg(feature = "stylos")]
+async fn shutdown_app(_app: &mut App, ctx: RunnerContext) {
+    ctx.shutdown();
+    drop(ctx.app_tx);
+}
+
+pub async fn run(mut app_runtime: AppState) -> anyhow::Result<()> {
     let mut terminal = TerminalGuard::enter()?;
     install_panic_cleanup_hook();
 
@@ -335,13 +247,7 @@ pub async fn run(app_runtime: AppState) -> anyhow::Result<()> {
     let mut ctx = RunnerContext::build(&runtime_domains);
 
     #[cfg(feature = "stylos")]
-    let shared_status_hub = SharedStylosStatusHub::new();
-    #[cfg(feature = "stylos")]
-    let mut stylos_handle = Some(crate::app_state::start_stylos(&app_runtime, Some(shared_status_hub.clone())).await?);
-    #[cfg(feature = "stylos")]
-    if let Some(handle) = stylos_handle.as_mut() {
-        wire_stylos_event_streams(&runtime_domains, handle, &ctx.runtime_tx);
-    }
+    crate::app_state::start_tui_runtime_services(&mut app_runtime, &ctx.runtime_tx).await?;
 
     let snapshot_hub = app_runtime.snapshot_hub.clone();
     let initial_snapshot = snapshot_hub.current();
@@ -352,27 +258,22 @@ pub async fn run(app_runtime: AppState) -> anyhow::Result<()> {
     #[cfg(feature = "stylos")]
     crate::app_state::start_tui_watchdog_loop(&app_runtime, ctx.runtime_tx.clone());
 
-    let mut app = build_app(
-        app_runtime.runtime.session,
-        app_runtime.runtime.db,
-        app_runtime.runtime.session_id,
-        app_runtime.runtime.project_dir,
-        &runtime_domains,
-        &ctx.app_tx,
-        &ctx.runtime_tx,
+    crate::app_state::finalize_tui_runtime_state(
+        &mut app_runtime.runtime,
+        ctx.app_tx.clone(),
+        ctx.runtime_tx.clone(),
         runtime_observer_publisher,
-        initial_snapshot,
-        #[cfg(feature = "stylos")]
-        stylos_handle,
-        #[cfg(feature = "stylos")]
-        app_runtime.runtime.watchdog_state.clone(),
-        #[cfg(feature = "stylos")]
-        shared_status_hub,
     );
+
+    let mut app = build_app(app_runtime.runtime, initial_snapshot);
 
     perform_initial_draw(terminal.terminal_mut(), &mut app, &ctx.frame_requester)?;
 
     run_event_loop(&mut app, &mut ctx, terminal.terminal_mut()).await?;
+    #[cfg(feature = "stylos")]
+    if let Some(stylos) = app.runtime.stylos.take() {
+        stylos.shutdown().await;
+    }
     shutdown_app(&mut app, ctx).await;
     Ok(())
 }

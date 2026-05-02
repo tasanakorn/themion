@@ -236,8 +236,6 @@ pub struct AppState {
     pub runtime_domains: Arc<RuntimeDomains>,
     pub snapshot_hub: AppSnapshotHub,
     #[cfg(feature = "stylos")]
-    pub watchdog_state: Arc<WatchdogRuntimeState>,
-    #[cfg(feature = "stylos")]
     pub stylos_config: crate::config::StylosConfig,
 }
 
@@ -362,13 +360,50 @@ impl AppState {
             runtime_domains,
             snapshot_hub,
             #[cfg(feature = "stylos")]
-            watchdog_state: Arc::new(WatchdogRuntimeState::default()),
-            #[cfg(feature = "stylos")]
             stylos_config,
         })
     }
 }
 
+
+
+pub(crate) fn finalize_tui_runtime_state(
+    runtime: &mut AppRuntimeState,
+    app_tx: mpsc::UnboundedSender<AppEvent>,
+    runtime_tx: mpsc::UnboundedSender<AppRuntimeEvent>,
+    runtime_observer_publisher: crate::app_runtime::AppRuntimeObserverPublisher,
+) {
+    runtime.local_agent_mgmt_tx = app_tx.clone();
+    runtime.runtime_tx = runtime_tx;
+    runtime.runtime_observer_publisher = runtime_observer_publisher;
+
+    let agent = crate::app_runtime::build_main_agent(
+        &runtime.session,
+        runtime.db.clone(),
+        runtime.session_id,
+        runtime.project_dir.clone(),
+        app_tx,
+        #[cfg(feature = "stylos")]
+        runtime.stylos_tool_bridge.clone(),
+        #[cfg(feature = "stylos")]
+        runtime.local_stylos_instance.as_deref(),
+        #[cfg(feature = "stylos")]
+        "master",
+        None,
+        runtime.api_log_enabled,
+    )
+    .expect("failed to build agent");
+
+    runtime.agents = vec![crate::tui::AgentHandle {
+        agent: Some(agent),
+        session_id: runtime.session_id,
+        agent_id: "master".to_string(),
+        label: "master".to_string(),
+        roles: vec!["master".to_string(), "interactive".to_string()],
+        busy: false,
+        turn_cancellation: None,
+    }];
+}
 pub fn start_tick_loop<T, F>(
     runtime_domains: &Arc<RuntimeDomains>,
     app_tx: mpsc::UnboundedSender<T>,
@@ -392,6 +427,7 @@ pub fn start_tick_loop<T, F>(
     });
 }
 
+
 #[cfg(feature = "stylos")]
 pub fn start_tui_watchdog_loop(
     app_state: &AppState,
@@ -401,9 +437,8 @@ pub fn start_tui_watchdog_loop(
         .runtime_domains
         .tui()
         .expect("tui runtime available in TUI mode");
-    start_watchdog_task(&tui_domain, runtime_tx, app_state.watchdog_state.clone());
+    start_watchdog_task(&tui_domain, runtime_tx, app_state.runtime.watchdog_state.clone());
 }
-
 
 
 pub(crate) fn runtime_any_agent_busy(runtime: &AppRuntimeState) -> bool {
@@ -1153,55 +1188,6 @@ pub(crate) fn resolve_and_submit_text(
 }
 
 #[cfg(feature = "stylos")]
-pub(crate) fn maybe_emit_done_mention_for_completed_note(
-    app: &mut App,
-    agent_index: usize,
-    app_tx: &mpsc::UnboundedSender<crate::tui::AppEvent>,
-) -> bool {
-    let Some(remote) = crate::app_runtime::incoming_prompt_request(
-        &app.runtime.incoming_prompts,
-        &app.runtime.agents[agent_index].agent_id,
-    )
-    .cloned()
-    else {
-        return false;
-    };
-    let apply_plan = crate::app_runtime::completed_note_follow_up_apply_plan(
-        crate::app_runtime::plan_completed_note_follow_up(&app.runtime.db, &remote),
-    );
-    if let (Some(request), Some(prompt)) = (apply_plan.continue_request, apply_plan.continue_prompt)
-    {
-        crate::app_runtime::continue_current_note_follow_up(
-            &app.runtime.agents,
-            &mut app.runtime.incoming_prompts,
-            &app.runtime.watchdog_state,
-            agent_index,
-            request,
-        );
-        resolve_and_submit_text(app, prompt, app_tx);
-        return true;
-    }
-    match apply_plan.emission {
-        Some(crate::app_runtime::CompletedNoteFollowUpEmission::RemoteEvent { text }) => {
-            app.push(crate::tui::Entry::RemoteEvent {
-                agent_id: None,
-                source: Some(crate::tui::NonAgentSource::Board),
-                text,
-            });
-        }
-        Some(crate::app_runtime::CompletedNoteFollowUpEmission::Status { text }) => {
-            app.push(crate::tui::Entry::Status {
-                agent_id: None,
-                source: Some(crate::tui::NonAgentSource::Board),
-                text,
-            });
-        }
-        None => return false,
-    }
-    false
-}
-
-#[cfg(feature = "stylos")]
 fn process_incoming_prompt_request(
     app: &mut App,
     request: crate::stylos::IncomingPromptRequest,
@@ -1333,6 +1319,55 @@ pub(crate) fn handle_stylos_cmd_event(
     resolve_and_submit_text(app, cmd.prompt, app_tx);
 }
 
+#[cfg(feature = "stylos")]
+pub(crate) fn maybe_emit_done_mention_for_completed_note(
+    app: &mut App,
+    agent_index: usize,
+    app_tx: &mpsc::UnboundedSender<crate::tui::AppEvent>,
+) -> bool {
+    let Some(remote) = crate::app_runtime::incoming_prompt_request(
+        &app.runtime.incoming_prompts,
+        &app.runtime.agents[agent_index].agent_id,
+    )
+    .cloned()
+    else {
+        return false;
+    };
+    let apply_plan = crate::app_runtime::completed_note_follow_up_apply_plan(
+        crate::app_runtime::plan_completed_note_follow_up(&app.runtime.db, &remote),
+    );
+    if let (Some(request), Some(prompt)) = (apply_plan.continue_request, apply_plan.continue_prompt)
+    {
+        crate::app_runtime::continue_current_note_follow_up(
+            &app.runtime.agents,
+            &mut app.runtime.incoming_prompts,
+            &app.runtime.watchdog_state,
+            agent_index,
+            request,
+        );
+        resolve_and_submit_text(app, prompt, app_tx);
+        return true;
+    }
+    match apply_plan.emission {
+        Some(crate::app_runtime::CompletedNoteFollowUpEmission::RemoteEvent { text }) => {
+            app.push(crate::tui::Entry::RemoteEvent {
+                agent_id: None,
+                source: Some(crate::tui::NonAgentSource::Board),
+                text,
+            });
+        }
+        Some(crate::app_runtime::CompletedNoteFollowUpEmission::Status { text }) => {
+            app.push(crate::tui::Entry::Status {
+                agent_id: None,
+                source: Some(crate::tui::NonAgentSource::Board),
+                text,
+            });
+        }
+        None => return false,
+    }
+    false
+}
+
 
 pub(crate) async fn handle_runtime_event(
     app: &mut App,
@@ -1407,6 +1442,26 @@ pub fn open_history_db(interactive: bool) -> Arc<DbHandle> {
 }
 
 #[cfg(feature = "stylos")]
+
+#[cfg(feature = "stylos")]
+pub(crate) async fn start_tui_runtime_services(
+    app_state: &mut AppState,
+    runtime_tx: &mpsc::UnboundedSender<AppRuntimeEvent>,
+) -> anyhow::Result<()> {
+    let shared_status_hub = crate::app_runtime::SharedStylosStatusHub::new();
+    let mut stylos = start_stylos(app_state, Some(shared_status_hub.clone())).await?;
+    crate::app_runtime::wire_stylos_event_streams(&app_state.runtime_domains, &mut stylos, runtime_tx);
+    app_state.runtime.shared_status_hub = shared_status_hub;
+    app_state.runtime.stylos_tool_bridge = crate::stylos::tool_bridge(&stylos);
+    app_state.runtime.local_stylos_instance = match stylos.state() {
+        crate::stylos::StylosRuntimeState::Active { instance, .. } => Some(instance.clone()),
+        _ => Some(crate::stylos::derive_local_instance_id()),
+    };
+    app_state.runtime.stylos = Some(stylos);
+    Ok(())
+}
+
+
 pub async fn start_stylos(
     app_state: &AppState,
     #[cfg(feature = "stylos")] shared_status_hub: Option<crate::app_runtime::SharedStylosStatusHub>,

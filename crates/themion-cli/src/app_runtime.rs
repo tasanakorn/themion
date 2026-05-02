@@ -29,7 +29,7 @@ use crate::app_state::{AppRuntimeEvent, AppSnapshot, AppSnapshotAgent, AppSnapsh
 #[cfg(feature = "stylos")]
 use std::collections::HashMap;
 use crate::config::save_profiles;
-use crate::runtime_domains::DomainHandle;
+use crate::runtime_domains::{DomainHandle, RuntimeDomains};
 use crate::Session;
 
 #[cfg(feature = "stylos")]
@@ -334,6 +334,42 @@ pub(crate) fn spawn_agent_event_relay(
             let _ = runtime_tx.send(AppRuntimeEvent::Agent(handle_session_id, ev));
         }
     });
+}
+
+
+#[cfg(feature = "stylos")]
+pub(crate) fn wire_stylos_event_streams(
+    runtime_domains: &Arc<RuntimeDomains>,
+    handle: &mut crate::stylos::StylosHandle,
+    runtime_tx: &mpsc::UnboundedSender<AppRuntimeEvent>,
+) {
+    let tui_domain = runtime_domains
+        .tui()
+        .expect("tui runtime available in TUI mode");
+    if let Some(mut cmd_rx) = handle.take_cmd_rx() {
+        let runtime_tx_cmd = runtime_tx.clone();
+        tui_domain.spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                let _ = runtime_tx_cmd.send(AppRuntimeEvent::StylosCmd(cmd));
+            }
+        });
+    }
+    if let Some(mut prompt_rx) = handle.take_prompt_rx() {
+        let runtime_tx_prompt = runtime_tx.clone();
+        tui_domain.spawn(async move {
+            while let Some(prompt) = prompt_rx.recv().await {
+                let _ = runtime_tx_prompt.send(AppRuntimeEvent::IncomingPrompt(prompt));
+            }
+        });
+    }
+    if let Some(mut event_rx) = handle.take_event_rx() {
+        let runtime_tx_event = runtime_tx.clone();
+        tui_domain.spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                let _ = runtime_tx_event.send(AppRuntimeEvent::StylosEvent(event));
+            }
+        });
+    }
 }
 
 pub(crate) struct AppSnapshotBuildState<'a> {
@@ -2151,7 +2187,8 @@ fn stylos_note_display_identifier(prompt: &str) -> String {
     } else {
         "note_id=unknown".to_string()
     }
-}#[cfg(feature = "stylos")]
+}
+#[cfg(feature = "stylos")]
 #[derive(Clone, Debug)]
 pub(crate) struct AgentStatusSource {
     pub agent_id: String,
