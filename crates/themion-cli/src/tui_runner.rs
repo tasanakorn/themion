@@ -1,3 +1,7 @@
+#[cfg(feature = "stylos")]
+use crate::app_runtime::{start_watchdog_task, SharedStylosStatusHub, WatchdogRuntimeState};
+#[cfg(feature = "stylos")]
+use crate::board_runtime::LocalBoardClaimRegistry;
 use crate::app_state::AppState;
 use crate::runtime_domains::{DomainHandle, RuntimeDomains};
 use crate::tui::{dispatch_terminal_event, draw, App, AppEvent, FrameRequester};
@@ -146,12 +150,45 @@ fn wire_stylos_app(
     runtime_domains: &Arc<RuntimeDomains>,
     app_tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
-    app.wire_stylos_event_streams(
-        &runtime_domains
-            .tui()
-            .expect("tui runtime available in TUI mode"),
-        app_tx,
-    );
+    let tui_domain = runtime_domains
+        .tui()
+        .expect("tui runtime available in TUI mode");
+    start_watchdog_task(&tui_domain, app_tx.clone(), app.watchdog_state().clone());
+}
+
+#[cfg(feature = "stylos")]
+fn wire_stylos_event_streams(
+    runtime_domains: &Arc<RuntimeDomains>,
+    handle: &mut crate::stylos::StylosHandle,
+    app_tx: &mpsc::UnboundedSender<AppEvent>,
+) {
+    let tui_domain = runtime_domains
+        .tui()
+        .expect("tui runtime available in TUI mode");
+    if let Some(mut cmd_rx) = handle.take_cmd_rx() {
+        let app_tx_cmd = app_tx.clone();
+        tui_domain.spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                let _ = app_tx_cmd.send(AppEvent::StylosCmd(cmd));
+            }
+        });
+    }
+    if let Some(mut prompt_rx) = handle.take_prompt_rx() {
+        let app_tx_prompt = app_tx.clone();
+        tui_domain.spawn(async move {
+            while let Some(prompt) = prompt_rx.recv().await {
+                let _ = app_tx_prompt.send(AppEvent::IncomingPrompt(prompt));
+            }
+        });
+    }
+    if let Some(mut event_rx) = handle.take_event_rx() {
+        let app_tx_event = app_tx.clone();
+        tui_domain.spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                let _ = app_tx_event.send(AppEvent::StylosEvent(event));
+            }
+        });
+    }
 }
 
 fn build_app(
@@ -162,7 +199,15 @@ fn build_app(
     runtime_domains: &Arc<RuntimeDomains>,
     app_tx: &tokio::sync::mpsc::UnboundedSender<crate::tui::AppEvent>,
     #[cfg(feature = "stylos")] stylos_handle: Option<crate::stylos::StylosHandle>,
+    #[cfg(feature = "stylos")] shared_status_hub: SharedStylosStatusHub,
 ) -> App {
+    #[cfg(feature = "stylos")]
+    let stylos_tool_bridge = stylos_handle.as_ref().and_then(crate::stylos::tool_bridge);
+    #[cfg(feature = "stylos")]
+    let watchdog_state = Arc::new(WatchdogRuntimeState::default());
+    #[cfg(feature = "stylos")]
+    let board_claims = Arc::new(LocalBoardClaimRegistry::default());
+
     App::new(
         session,
         db,
@@ -175,6 +220,14 @@ fn build_app(
         app_tx.clone(),
         #[cfg(feature = "stylos")]
         stylos_handle,
+        #[cfg(feature = "stylos")]
+        stylos_tool_bridge,
+        #[cfg(feature = "stylos")]
+        watchdog_state,
+        #[cfg(feature = "stylos")]
+        board_claims,
+        #[cfg(feature = "stylos")]
+        shared_status_hub,
     )
 }
 
@@ -271,7 +324,13 @@ pub async fn run(app_runtime: AppState) -> anyhow::Result<()> {
     let mut ctx = RunnerContext::build(&runtime_domains);
 
     #[cfg(feature = "stylos")]
-    let stylos_handle = Some(crate::app_state::start_stylos(&app_runtime).await?);
+    let shared_status_hub = SharedStylosStatusHub::new();
+    #[cfg(feature = "stylos")]
+    let mut stylos_handle = Some(crate::app_state::start_stylos(&app_runtime, Some(shared_status_hub.clone())).await?);
+    #[cfg(feature = "stylos")]
+    if let Some(handle) = stylos_handle.as_mut() {
+        wire_stylos_event_streams(&runtime_domains, handle, &ctx.app_tx);
+    }
 
     let mut app = build_app(
         app_runtime.session,
@@ -282,6 +341,8 @@ pub async fn run(app_runtime: AppState) -> anyhow::Result<()> {
         &ctx.app_tx,
         #[cfg(feature = "stylos")]
         stylos_handle,
+        #[cfg(feature = "stylos")]
+        shared_status_hub,
     );
 
     #[cfg(feature = "stylos")]

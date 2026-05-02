@@ -1,5 +1,8 @@
 # Documentation
 
+> [!WARNING]
+> The current workspace no longer matches the documented `themion-cli` TUI/runtime architecture below. During a destructive force-removal pass requested by the user, `crates/themion-cli/src/tui.rs` and `crates/themion-cli/src/app_runtime.rs` were intentionally stripped by broad marker- and intent-based deletion without preserving syntax, behavior, or buildability. Treat the detailed TUI/runtime docs as historical design intent until those files are reconstructed.
+
 - [architecture.md](architecture.md) — workspace structure, core design philosophy, component map, process/thread model, harness loop, context windowing, streaming, tools, persistent history, TUI behavior, and Stylos multi-agent status shape.
 - [engine-runtime.md](engine-runtime.md) — detailed walkthrough of prompt inputs, `AGENTS.md` injection, context building, tool-calling flow, workflow runtime behavior, SQLite session storage, and the boundary between CLI-local agent roles and core harness state.
 - [prd-self-note-guidance.md](prd-self-note-guidance.md) — focused guidance on when to create self-notes and how to avoid noisy board-note behavior.

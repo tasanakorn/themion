@@ -7,7 +7,7 @@ use std::time::Duration;
 #[cfg(feature = "stylos")]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use themion_core::agent::Agent;
+use themion_core::agent::{Agent, TurnCancellation};
 use themion_core::client_codex::ApiCallRateLimitReport;
 use themion_core::db::DbHandle;
 use themion_core::tools::{
@@ -15,6 +15,7 @@ use themion_core::tools::{
     SystemInspectionRuntime, SystemInspectionTaskRuntime, SystemInspectionTools,
 };
 use themion_core::workflow::WorkflowState;
+use themion_core::ModelInfo;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
@@ -24,9 +25,86 @@ use crate::board_runtime::{
     board_note_id_from_prompt, release_board_note_claim, resolve_pending_board_note_injection,
     BoardInjectionAction, LocalBoardClaimRegistry, WATCHDOG_IDLE_DELAY_MS_DEFAULT,
 };
-#[cfg(feature = "stylos")]
+use crate::config::save_profiles;
 use crate::runtime_domains::DomainHandle;
 use crate::Session;
+
+#[cfg(feature = "stylos")]
+use crate::stylos::StylosStatusSnapshot;
+
+#[cfg(feature = "stylos")]
+pub(crate) type StylosSnapshotFuture = std::pin::Pin<Box<dyn std::future::Future<Output = StylosStatusSnapshot> + Send>>;
+
+#[cfg(feature = "stylos")]
+pub(crate) type StylosSnapshotProvider = std::sync::Arc<dyn Fn() -> StylosSnapshotFuture + Send + Sync>;
+
+#[cfg(feature = "stylos")]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct StylosActivitySnapshot {
+    pub status_publish_count: u64,
+    pub status_publish_total_us: u64,
+    pub status_publish_max_us: u64,
+    pub query_request_count: u64,
+    pub query_request_total_us: u64,
+    pub query_request_max_us: u64,
+    pub cmd_event_count: u64,
+    pub prompt_event_count: u64,
+    pub event_message_count: u64,
+}
+
+#[cfg(feature = "stylos")]
+#[derive(Clone, Debug)]
+pub(crate) struct SharedStylosStatusHub {
+    snapshot: std::sync::Arc<tokio::sync::RwLock<StylosStatusSnapshot>>,
+}
+
+#[cfg(feature = "stylos")]
+impl SharedStylosStatusHub {
+    pub(crate) fn new() -> Self {
+        Self {
+            snapshot: std::sync::Arc::new(tokio::sync::RwLock::new(StylosStatusSnapshot {
+                startup_project_dir: String::new(),
+                agents: Vec::new(),
+            })),
+        }
+    }
+
+    pub(crate) fn provider(&self) -> StylosSnapshotProvider {
+        let snapshot = self.snapshot.clone();
+        std::sync::Arc::new(move || {
+            let snapshot = snapshot.clone();
+            Box::pin(async move { snapshot.read().await.clone() })
+        })
+    }
+
+    // TODO(runtime-ownership): replace with runtime-owned publisher once the TUI rewrite is reconnected.
+    #[allow(dead_code)]
+    pub(crate) async fn replace_snapshot(&self, next: StylosStatusSnapshot) {
+        *self.snapshot.write().await = next;
+    }
+}
+
+#[cfg(feature = "stylos")]
+impl Default for SharedStylosStatusHub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn stylos_tool_invoker(
+    bridge: Option<crate::stylos::StylosToolBridge>,
+) -> Option<themion_core::tools::StylosToolInvoker> {
+    bridge.map(|bridge| {
+        std::sync::Arc::new(move |name: String, args: serde_json::Value| {
+            let bridge = bridge.clone();
+            let fut: std::pin::Pin<
+                Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>,
+            > = Box::pin(async move { bridge.invoke(None, &name, args).await });
+            fut
+        }) as themion_core::tools::StylosToolInvoker
+    })
+}
 
 #[derive(Debug)]
 pub(crate) struct LocalAgentManagementRequest {
@@ -61,6 +139,164 @@ pub(crate) fn build_local_agent_tool_invoker(
     })
 }
 
+#[cfg(feature = "stylos")]
+#[derive(Clone, Debug)]
+pub(crate) struct LocalAgentStatusEntry {
+    pub agent_id: String,
+    pub label: String,
+    pub roles: Vec<String>,
+    pub session_id: String,
+    pub workflow: Option<WorkflowState>,
+    pub project_dir: Option<PathBuf>,
+    pub busy: bool,
+    pub has_active_incoming_prompt: bool,
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn local_agent_status_entry(
+    agent_id: impl Into<String>,
+    label: impl Into<String>,
+    roles: impl IntoIterator<Item = impl Into<String>>,
+    session_id: impl Into<String>,
+    workflow: Option<WorkflowState>,
+    project_dir: Option<PathBuf>,
+    busy: bool,
+    has_active_incoming_prompt: bool,
+) -> LocalAgentStatusEntry {
+    LocalAgentStatusEntry {
+        agent_id: agent_id.into(),
+        label: label.into(),
+        roles: roles.into_iter().map(Into::into).collect(),
+        session_id: session_id.into(),
+        workflow,
+        project_dir,
+        busy,
+        has_active_incoming_prompt,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LocalAgentRosterEntry {
+    pub agent_id: String,
+    pub roles: Vec<String>,
+}
+
+pub(crate) fn roster_entry(agent_id: impl Into<String>, roles: impl IntoIterator<Item = impl Into<String>>) -> LocalAgentRosterEntry {
+    LocalAgentRosterEntry {
+        agent_id: agent_id.into(),
+        roles: roles.into_iter().map(Into::into).collect(),
+    }
+}
+
+pub(crate) struct AgentTurnRuntimeLaunch {
+    pub submit_setup: AgentTurnSubmitSetup,
+    pub event_rx: mpsc::UnboundedReceiver<themion_core::agent::AgentEvent>,
+    pub agent: Agent,
+}
+
+pub(crate) struct AgentTurnSubmitSetup {
+    pub cancellation: TurnCancellation,
+    pub handle_session_id: Uuid,
+}
+
+pub(crate) fn prepare_agent_turn_runtime_launch(
+    agents: &mut [crate::tui::AgentHandle],
+    agent_index: usize,
+) -> AgentTurnRuntimeLaunch {
+    let submit_setup = prepare_agent_turn_submit(agents, agent_index);
+    let (event_tx, event_rx) = mpsc::unbounded_channel::<themion_core::agent::AgentEvent>();
+    let agent = prepare_agent_turn_execution(agents, agent_index, event_tx);
+    AgentTurnRuntimeLaunch {
+        submit_setup,
+        event_rx,
+        agent,
+    }
+}
+
+pub(crate) fn prepare_agent_turn_submit(
+    agents: &mut [crate::tui::AgentHandle],
+    agent_index: usize,
+) -> AgentTurnSubmitSetup {
+    let cancellation = TurnCancellation::new();
+    let handle = agents.get_mut(agent_index).expect("agent index valid");
+    handle.busy = true;
+    handle.turn_cancellation = Some(cancellation.clone());
+    AgentTurnSubmitSetup {
+        cancellation,
+        handle_session_id: handle.session_id,
+    }
+}
+
+pub(crate) fn prepare_agent_turn_execution(
+    agents: &mut [crate::tui::AgentHandle],
+    agent_index: usize,
+    event_tx: mpsc::UnboundedSender<themion_core::agent::AgentEvent>,
+) -> Agent {
+    let handle = agents.get_mut(agent_index).expect("agent index valid");
+    let mut agent = handle.agent.take().expect("agent available when not busy");
+    agent.set_event_tx(event_tx);
+    agent
+}
+
+pub(crate) fn launch_agent_turn_runtime(
+    background_domain: &DomainHandle,
+    core_domain: &DomainHandle,
+    app_tx: mpsc::UnboundedSender<AppEvent>,
+    text: String,
+    runtime_launch: AgentTurnRuntimeLaunch,
+) {
+    spawn_agent_event_relay(
+        background_domain,
+        app_tx.clone(),
+        runtime_launch.submit_setup.handle_session_id,
+        runtime_launch.event_rx,
+    );
+    spawn_agent_turn_core_loop(
+        core_domain,
+        app_tx,
+        runtime_launch.submit_setup.handle_session_id,
+        text,
+        runtime_launch.submit_setup.cancellation,
+        runtime_launch.agent,
+    );
+}
+
+pub(crate) fn spawn_agent_turn_core_loop(
+    core_domain: &DomainHandle,
+    app_tx: mpsc::UnboundedSender<AppEvent>,
+    handle_session_id: Uuid,
+    text: String,
+    cancellation: TurnCancellation,
+    mut agent: Agent,
+) {
+    core_domain.spawn(async move {
+        if let Err(e) = agent
+            .run_loop_with_cancellation(&text, Some(cancellation.clone()))
+            .await
+        {
+            let _ = app_tx.send(AppEvent::Agent(
+                handle_session_id,
+                themion_core::agent::AgentEvent::AssistantText(format!("error: {e}")),
+            ));
+        }
+        let _ = app_tx.send(AppEvent::AgentReady(Box::new(agent), handle_session_id));
+    });
+}
+
+pub(crate) fn spawn_agent_event_relay(
+    background_domain: &DomainHandle,
+    app_tx: mpsc::UnboundedSender<AppEvent>,
+    handle_session_id: Uuid,
+    event_rx: mpsc::UnboundedReceiver<themion_core::agent::AgentEvent>,
+) {
+    background_domain.spawn(async move {
+        let mut rx = event_rx;
+        while let Some(ev) = rx.recv().await {
+            let _ = app_tx.send(AppEvent::Agent(handle_session_id, ev));
+        }
+    });
+}
+
 pub(crate) fn build_main_agent(
     session: &Session,
     db: Arc<DbHandle>,
@@ -88,6 +324,564 @@ pub(crate) fn build_main_agent(
         system_inspection,
         api_log_enabled,
     )
+}
+
+
+#[derive(Clone)]
+pub(crate) enum RuntimeCommand {
+    LoginCodex,
+    SemanticMemoryIndex { full: bool },
+    SessionProfileUse { name: String },
+    SessionModelUse { model: String },
+    SessionReset,
+    ConfigProfileUse { name: String },
+    ConfigProfileCreate { name: String },
+    ConfigProfileSet { key: String, value: String },
+    SetApiLogEnabled { enabled: bool },
+    ClearContext,
+}
+
+
+pub(crate) enum RuntimeCommandOutcome {
+    Noop,
+    Lines(Vec<String>),
+    ReplaceMasterAgent {
+        new_agent: Agent,
+        new_session_id: Uuid,
+        output_lines: Vec<String>,
+    },
+    SetInteractiveApiLogEnabled { enabled: bool, output_lines: Vec<String> },
+    ClearInteractiveContext { output_lines: Vec<String> },
+}
+
+pub(crate) struct RuntimeCommandContext<'a> {
+    pub session: &'a mut Session,
+    pub project_dir: &'a PathBuf,
+    pub db: &'a Arc<DbHandle>,
+    #[cfg(feature = "stylos")]
+    pub stylos_tool_bridge: Option<crate::stylos::StylosToolBridge>,
+    #[cfg(feature = "stylos")]
+    pub local_stylos_instance: Option<&'a str>,
+    pub api_log_enabled: bool,
+    pub local_agent_mgmt_tx: mpsc::UnboundedSender<AppEvent>,
+}
+
+pub(crate) fn execute_runtime_command(
+    command: RuntimeCommand,
+    context: RuntimeCommandContext<'_>,
+) -> RuntimeCommandOutcome {
+    match command {
+        RuntimeCommand::LoginCodex | RuntimeCommand::SemanticMemoryIndex { .. } => {
+            RuntimeCommandOutcome::Noop
+        }
+        RuntimeCommand::SessionProfileUse { name } => {
+            let cleared_model_override = context.session.temporary_model_override.is_some();
+            if context.session.switch_profile_temporarily(&name) {
+                match build_replacement_main_agent(AgentReplacementParams {
+                    session: context.session,
+                    project_dir: context.project_dir,
+                    db: context.db,
+                    #[cfg(feature = "stylos")]
+                    stylos_tool_bridge: context.stylos_tool_bridge,
+                    #[cfg(feature = "stylos")]
+                    local_stylos_instance: context.local_stylos_instance,
+                    api_log_enabled: context.api_log_enabled,
+                    local_agent_mgmt_tx: context.local_agent_mgmt_tx,
+                    insert_session: true,
+                }) {
+                    Ok((new_agent, new_session_id)) => RuntimeCommandOutcome::ReplaceMasterAgent {
+                        new_agent,
+                        new_session_id,
+                        output_lines: vec![if cleared_model_override {
+                            format!(
+                                "temporarily switched to profile '{}' for this session only; cleared temporary model override and reset to profile model  provider={}  model={}",
+                                name, context.session.provider, context.session.model
+                            )
+                        } else {
+                            format!(
+                                "temporarily switched to profile '{}' for this session only  provider={}  model={}",
+                                name, context.session.provider, context.session.model
+                            )
+                        }],
+                    },
+                    Err(e) => RuntimeCommandOutcome::Lines(vec![format!(
+                        "error building agent: {}",
+                        e
+                    )]),
+                }
+            } else {
+                let mut names: Vec<String> = context.session.profiles.keys().cloned().collect();
+                names.sort();
+                RuntimeCommandOutcome::Lines(vec![format!(
+                    "unknown profile '{}'.  available: {}",
+                    name,
+                    names.join(", ")
+                )])
+            }
+        }
+        RuntimeCommand::SessionModelUse { model } => {
+            context.session.set_temporary_model_override(&model);
+            match build_replacement_main_agent(AgentReplacementParams {
+                session: context.session,
+                project_dir: context.project_dir,
+                db: context.db,
+                #[cfg(feature = "stylos")]
+                stylos_tool_bridge: context.stylos_tool_bridge,
+                #[cfg(feature = "stylos")]
+                local_stylos_instance: context.local_stylos_instance,
+                api_log_enabled: context.api_log_enabled,
+                local_agent_mgmt_tx: context.local_agent_mgmt_tx,
+                insert_session: true,
+            }) {
+                Ok((new_agent, new_session_id)) => RuntimeCommandOutcome::ReplaceMasterAgent {
+                    new_agent,
+                    new_session_id,
+                    output_lines: vec![format!(
+                        "temporarily using model '{}' for this session only",
+                        context.session.model
+                    )],
+                },
+                Err(e) => RuntimeCommandOutcome::Lines(vec![format!(
+                    "error building agent: {}",
+                    e
+                )]),
+            }
+        }
+        RuntimeCommand::SessionReset => {
+            if context.session.clear_temporary_overrides() {
+                match build_replacement_main_agent(AgentReplacementParams {
+                    session: context.session,
+                    project_dir: context.project_dir,
+                    db: context.db,
+                    #[cfg(feature = "stylos")]
+                    stylos_tool_bridge: context.stylos_tool_bridge,
+                    #[cfg(feature = "stylos")]
+                    local_stylos_instance: context.local_stylos_instance,
+                    api_log_enabled: context.api_log_enabled,
+                    local_agent_mgmt_tx: context.local_agent_mgmt_tx,
+                    insert_session: true,
+                }) {
+                    Ok((new_agent, new_session_id)) => RuntimeCommandOutcome::ReplaceMasterAgent {
+                        new_agent,
+                        new_session_id,
+                        output_lines: vec![format!(
+                            "cleared temporary session overrides; back to configured profile '{}'  provider={}  model={}",
+                            context.session.active_profile,
+                            context.session.provider,
+                            context.session.model
+                        )],
+                    },
+                    Err(e) => RuntimeCommandOutcome::Lines(vec![format!(
+                        "error building agent: {}",
+                        e
+                    )]),
+                }
+            } else {
+                RuntimeCommandOutcome::Lines(vec![
+                    "no temporary session override is active".to_string(),
+                ])
+            }
+        }
+        RuntimeCommand::ConfigProfileCreate { name } => {
+            let profile = crate::config::ProfileConfig {
+                provider: Some(context.session.provider.clone()),
+                base_url: Some(context.session.base_url.clone()),
+                model: Some(context.session.model.clone()),
+                api_key: context.session.api_key.clone(),
+            };
+            context.session.profiles.insert(name.clone(), profile);
+            context.session.active_profile = name.clone();
+            let mut lines = Vec::new();
+            if let Err(e) = save_profiles(&context.session.active_profile, &context.session.profiles)
+            {
+                lines.push(format!("warning: {}", e));
+            }
+            lines.push(format!("profile '{}' created and saved", name));
+            RuntimeCommandOutcome::Lines(lines)
+        }
+        RuntimeCommand::ConfigProfileSet { key, value } => {
+            match key.as_str() {
+                "provider" => context.session.provider = value.clone(),
+                "model" => context.session.model = value.clone(),
+                "endpoint" => context.session.base_url = value.clone(),
+                "api_key" => context.session.api_key = Some(value.clone()),
+                _ => {
+                    return RuntimeCommandOutcome::Lines(vec![format!(
+                        "unknown key '{}'.  valid: provider, model, endpoint, api_key",
+                        key
+                    )]);
+                }
+            }
+            context.session.profiles.insert(
+                context.session.active_profile.clone(),
+                crate::config::ProfileConfig {
+                    provider: Some(context.session.provider.clone()),
+                    base_url: Some(context.session.base_url.clone()),
+                    model: Some(context.session.model.clone()),
+                    api_key: context.session.api_key.clone(),
+                },
+            );
+            let mut lines = Vec::new();
+            if let Err(e) = save_profiles(&context.session.active_profile, &context.session.profiles)
+            {
+                lines.push(format!("warning: {}", e));
+            }
+            lines.push(format!(
+                "{}={} saved",
+                key,
+                if key == "api_key" { "(set)" } else { value.as_str() }
+            ));
+            RuntimeCommandOutcome::Lines(lines)
+        }
+        RuntimeCommand::SetApiLogEnabled { enabled } => {
+            RuntimeCommandOutcome::SetInteractiveApiLogEnabled {
+                enabled,
+                output_lines: vec![if enabled {
+                    "API call logging enabled for this session".to_string()
+                } else {
+                    "API call logging disabled for this session".to_string()
+                }],
+            }
+        }
+        RuntimeCommand::ClearContext => RuntimeCommandOutcome::ClearInteractiveContext {
+            output_lines: vec![
+                "ok, future messages in this session will not include chat history before this point"
+                    .to_string(),
+            ],
+        },
+        RuntimeCommand::ConfigProfileUse { name } => {
+            if context.session.switch_profile(&name) {
+                let mut lines = Vec::new();
+                if let Err(e) = save_profiles(&context.session.active_profile, &context.session.profiles) {
+                    lines.push(format!("warning: {}", e));
+                }
+                match build_replacement_main_agent(AgentReplacementParams {
+                    session: context.session,
+                    project_dir: context.project_dir,
+                    db: context.db,
+                    #[cfg(feature = "stylos")]
+                    stylos_tool_bridge: context.stylos_tool_bridge,
+                    #[cfg(feature = "stylos")]
+                    local_stylos_instance: context.local_stylos_instance,
+                    api_log_enabled: context.api_log_enabled,
+                    local_agent_mgmt_tx: context.local_agent_mgmt_tx,
+                    insert_session: true,
+                }) {
+                    Ok((new_agent, new_session_id)) => {
+                        lines.push(format!(
+                            "switched to profile '{}'  provider={}  model={}",
+                            name, context.session.provider, context.session.model
+                        ));
+                        RuntimeCommandOutcome::ReplaceMasterAgent {
+                            new_agent,
+                            new_session_id,
+                            output_lines: lines,
+                        }
+                    }
+                    Err(e) => {
+                        lines.push(format!("error building agent: {}", e));
+                        RuntimeCommandOutcome::Lines(lines)
+                    }
+                }
+            } else {
+                let mut names: Vec<String> = context.session.profiles.keys().cloned().collect();
+                names.sort();
+                RuntimeCommandOutcome::Lines(vec![format!(
+                    "unknown profile '{}'.  available: {}",
+                    name,
+                    names.join(", ")
+                )])
+            }
+        }
+    }
+}
+
+
+pub(crate) fn apply_runtime_command_outcome_to_agents(
+    agents: &mut [crate::tui::AgentHandle],
+    api_log_enabled: &mut bool,
+    last_ctx_tokens: &mut u64,
+    outcome: &RuntimeCommandOutcome,
+) {
+    match outcome {
+        RuntimeCommandOutcome::SetInteractiveApiLogEnabled { enabled, .. } => {
+            *api_log_enabled = *enabled;
+            if let Some(handle) = agents
+                .iter_mut()
+                .find(|h| h.roles.iter().any(|role| role == "interactive"))
+            {
+                if let Some(agent) = handle.agent.as_mut() {
+                    agent.set_api_log_enabled(*enabled);
+                }
+            }
+        }
+        RuntimeCommandOutcome::ClearInteractiveContext { .. } => {
+            if let Some(handle) = agents
+                .iter_mut()
+                .find(|h| h.roles.iter().any(|role| role == "interactive"))
+            {
+                if let Some(agent) = handle.agent.as_mut() {
+                    agent.clear_context();
+                }
+            }
+            *last_ctx_tokens = 0;
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn take_runtime_command_output_lines(outcome: &mut RuntimeCommandOutcome) -> Vec<String> {
+    match outcome {
+        RuntimeCommandOutcome::Noop => Vec::new(),
+        RuntimeCommandOutcome::Lines(lines) => std::mem::take(lines),
+        RuntimeCommandOutcome::ReplaceMasterAgent { output_lines, .. } => std::mem::take(output_lines),
+        RuntimeCommandOutcome::SetInteractiveApiLogEnabled { output_lines, .. } => std::mem::take(output_lines),
+        RuntimeCommandOutcome::ClearInteractiveContext { output_lines } => std::mem::take(output_lines),
+    }
+}
+
+pub(crate) fn current_activity_label(activity: Option<&crate::tui::AgentActivity>) -> Option<String> {
+    activity.map(|activity| match activity {
+        crate::tui::AgentActivity::PreparingRequest => "preparing_request".to_string(),
+        crate::tui::AgentActivity::WaitingForModel => "waiting_for_model".to_string(),
+        crate::tui::AgentActivity::StreamingResponse => "streaming_response".to_string(),
+        crate::tui::AgentActivity::RunningTool(_) => "running_tool".to_string(),
+        crate::tui::AgentActivity::WaitingAfterTool => "waiting_after_tool".to_string(),
+        crate::tui::AgentActivity::LoginStarting => "login_starting".to_string(),
+        crate::tui::AgentActivity::WaitingForLoginBrowser => "waiting_for_login_browser".to_string(),
+        crate::tui::AgentActivity::RunningShellCommand => "running_shell_command".to_string(),
+        crate::tui::AgentActivity::Finishing => "finishing".to_string(),
+    })
+}
+
+pub(crate) fn current_activity_detail(
+    activity: Option<&crate::tui::AgentActivity>,
+    stream_chunks: u64,
+    stream_chars: u64,
+) -> Option<String> {
+    activity.map(|activity| activity.label(stream_chunks, stream_chars))
+}
+
+pub(crate) fn build_task_runtime_snapshot(
+    activity: Option<&crate::tui::AgentActivity>,
+    stream_chunks: u64,
+    stream_chars: u64,
+    agent_busy: bool,
+    activity_status: String,
+    activity_status_changed_at_ms: Option<u64>,
+    process_started_at_ms: u64,
+    uptime_ms: u64,
+    recent_window_ms: Option<u64>,
+) -> SystemInspectionTaskRuntime {
+    let mut runtime_notes = vec![
+        "task metrics are Themion activity counters and approximate handler timing, not exact Tokio task CPU percentages".to_string(),
+    ];
+    if recent_window_ms.is_none() {
+        runtime_notes.push(
+            "recent task runtime window unavailable until more than one snapshot is recorded"
+                .to_string(),
+        );
+    }
+    SystemInspectionTaskRuntime {
+        status: if recent_window_ms.is_some() { "ok" } else { "partial" }.to_string(),
+        current_activity: current_activity_label(activity),
+        current_activity_detail: current_activity_detail(activity, stream_chunks, stream_chars),
+        busy: Some(agent_busy),
+        activity_status: Some(activity_status),
+        activity_status_changed_at_ms,
+        process_started_at_ms: Some(process_started_at_ms),
+        uptime_ms: Some(uptime_ms),
+        recent_window_ms,
+        runtime_notes,
+    }
+}
+
+
+pub(crate) struct SystemInspectionRuntimeRefreshState<'a> {
+    pub session: &'a Session,
+    pub project_dir: &'a std::path::Path,
+    pub workflow_state: &'a WorkflowState,
+    pub rate_limits: Option<&'a ApiCallRateLimitReport>,
+    pub activity: Option<&'a crate::tui::AgentActivity>,
+    pub stream_chunks: u64,
+    pub stream_chars: u64,
+    pub agent_busy: bool,
+    pub activity_status: String,
+    pub activity_status_changed_at_ms: Option<u64>,
+    pub process_started_at_ms: u64,
+    pub uptime_ms: u64,
+    pub recent_window_ms: Option<u64>,
+    pub debug_runtime_lines: Vec<String>,
+}
+
+pub(crate) fn refresh_interactive_agent_system_inspection_from_runtime(
+    agents: &mut [crate::tui::AgentHandle],
+    state: SystemInspectionRuntimeRefreshState<'_>,
+) {
+    let interactive_session_id = agents.first().map(|h| h.session_id);
+    let input = build_system_inspection_refresh_input(SystemInspectionRefreshState {
+        session: state.session,
+        fallback_session_id: state.session.id,
+        interactive_session_id,
+        project_dir: state.project_dir,
+        workflow_state: state.workflow_state,
+        rate_limits: state.rate_limits,
+        activity: state.activity,
+        stream_chunks: state.stream_chunks,
+        stream_chars: state.stream_chars,
+        agent_busy: state.agent_busy,
+        activity_status: state.activity_status,
+        activity_status_changed_at_ms: state.activity_status_changed_at_ms,
+        process_started_at_ms: state.process_started_at_ms,
+        uptime_ms: state.uptime_ms,
+        recent_window_ms: state.recent_window_ms,
+        debug_runtime_lines: state.debug_runtime_lines,
+    });
+    refresh_interactive_agent_system_inspection(agents, input);
+}
+
+pub(crate) struct SystemInspectionRefreshState<'a> {
+    pub session: &'a Session,
+    pub fallback_session_id: Uuid,
+    pub interactive_session_id: Option<Uuid>,
+    pub project_dir: &'a std::path::Path,
+    pub workflow_state: &'a WorkflowState,
+    pub rate_limits: Option<&'a ApiCallRateLimitReport>,
+    pub activity: Option<&'a crate::tui::AgentActivity>,
+    pub stream_chunks: u64,
+    pub stream_chars: u64,
+    pub agent_busy: bool,
+    pub activity_status: String,
+    pub activity_status_changed_at_ms: Option<u64>,
+    pub process_started_at_ms: u64,
+    pub uptime_ms: u64,
+    pub recent_window_ms: Option<u64>,
+    pub debug_runtime_lines: Vec<String>,
+}
+
+pub(crate) fn build_system_inspection_refresh_input(
+    state: SystemInspectionRefreshState<'_>,
+) -> SystemInspectionRefreshInput {
+    SystemInspectionRefreshInput {
+        session: state.session.clone(),
+        fallback_session_id: state.fallback_session_id,
+        interactive_session_id: state.interactive_session_id,
+        project_dir: state.project_dir.to_path_buf(),
+        workflow_state: state.workflow_state.clone(),
+        rate_limits: state.rate_limits.cloned(),
+        task_runtime: build_task_runtime_snapshot(
+            state.activity,
+            state.stream_chunks,
+            state.stream_chars,
+            state.agent_busy,
+            state.activity_status,
+            state.activity_status_changed_at_ms,
+            state.process_started_at_ms,
+            state.uptime_ms,
+            state.recent_window_ms,
+        ),
+        debug_runtime_lines: state.debug_runtime_lines,
+    }
+}
+
+pub(crate) struct SystemInspectionRefreshInput {
+    pub session: Session,
+    pub fallback_session_id: Uuid,
+    pub interactive_session_id: Option<Uuid>,
+    pub project_dir: PathBuf,
+    pub workflow_state: WorkflowState,
+    pub rate_limits: Option<ApiCallRateLimitReport>,
+    pub task_runtime: SystemInspectionTaskRuntime,
+    pub debug_runtime_lines: Vec<String>,
+}
+
+
+pub(crate) fn build_master_agent_handle(
+    new_agent: Agent,
+    new_session_id: Uuid,
+) -> crate::tui::AgentHandle {
+    crate::tui::AgentHandle {
+        agent: Some(new_agent),
+        session_id: new_session_id,
+        agent_id: "master".to_string(),
+        label: "master".to_string(),
+        roles: vec!["master".to_string(), "interactive".to_string()],
+        busy: false,
+        turn_cancellation: None,
+        #[cfg(feature = "stylos")]
+        active_incoming_prompt: None,
+    }
+}
+
+pub(crate) fn replace_master_agent_handle(
+    agents: &mut Vec<crate::tui::AgentHandle>,
+    replacement: crate::tui::AgentHandle,
+) {
+    let mut replacement = Some(replacement);
+    let mut retained = agents
+        .drain(..)
+        .filter(|handle| !handle.roles.iter().any(|role| role == "master"))
+        .collect::<Vec<_>>();
+    let mut next_agents = Vec::with_capacity(retained.len() + 1);
+    next_agents.push(replacement.take().expect("replacement present"));
+    next_agents.append(&mut retained);
+    *agents = next_agents;
+}
+
+pub(crate) fn apply_master_agent_replacement(
+    agents: &mut Vec<crate::tui::AgentHandle>,
+    status_model_info: &mut Option<ModelInfo>,
+    workflow_state: &mut WorkflowState,
+    new_agent: Agent,
+    new_session_id: Uuid,
+) {
+    *status_model_info = new_agent.model_info().cloned();
+    *workflow_state = new_agent.workflow_state().clone();
+    replace_master_agent_handle(agents, build_master_agent_handle(new_agent, new_session_id));
+}
+
+pub(crate) fn apply_agent_ready_update(
+    agents: &mut [crate::tui::AgentHandle],
+    status_model_info: &mut Option<ModelInfo>,
+    workflow_state: &mut WorkflowState,
+    sid: Uuid,
+    agent: Agent,
+) {
+    *status_model_info = agent.model_info().cloned();
+    *workflow_state = agent.workflow_state().clone();
+    if let Some(handle) = agents.iter_mut().find(|h| h.session_id == sid) {
+        handle.agent = Some(agent);
+        handle.busy = false;
+        handle.turn_cancellation = None;
+    }
+}
+
+pub(crate) fn apply_system_inspection_to_interactive_agent(
+    agents: &mut [crate::tui::AgentHandle],
+    inspection: SystemInspectionResult,
+) {
+    if let Some(handle) = agents.iter_mut().find(|h| h.roles.iter().any(|r| r == "interactive")) {
+        if let Some(agent) = handle.agent.as_mut() {
+            agent.set_system_inspection(Some(inspection));
+        }
+    }
+}
+
+pub(crate) fn refresh_interactive_agent_system_inspection(
+    agents: &mut [crate::tui::AgentHandle],
+    input: SystemInspectionRefreshInput,
+) {
+    let inspection = build_system_inspection_snapshot(
+        &input.session,
+        input.fallback_session_id,
+        input.interactive_session_id,
+        &input.project_dir,
+        &input.workflow_state,
+        input.rate_limits.as_ref(),
+        input.task_runtime,
+        input.debug_runtime_lines,
+    );
+    apply_system_inspection_to_interactive_agent(agents, inspection);
 }
 
 pub(crate) fn build_system_inspection_snapshot(
@@ -237,11 +1031,85 @@ fn unix_epoch_now_ms() -> u64 {
         .as_millis() as u64
 }
 
+
+pub(crate) fn agent_has_role(handle: &crate::tui::AgentHandle, role: &str) -> bool {
+    #[cfg(feature = "stylos")]
+    let role = if role == "main" { "master" } else { role };
+    handle.roles.iter().any(|candidate| {
+        #[cfg(feature = "stylos")]
+        {
+            let candidate = if candidate == "main" { "master" } else { candidate.as_str() };
+            candidate == role
+        }
+        #[cfg(not(feature = "stylos"))]
+        {
+            candidate == role
+        }
+    })
+}
+
+pub(crate) fn is_interactive_agent_handle(handle: &crate::tui::AgentHandle) -> bool {
+    agent_has_role(handle, "interactive")
+}
+
+pub(crate) fn build_local_agent_roster(
+    agents: &[crate::tui::AgentHandle],
+) -> Vec<LocalAgentRosterEntry> {
+    agents
+        .iter()
+        .map(|handle| roster_entry(handle.agent_id.clone(), handle.roles.clone()))
+        .collect()
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn build_local_agent_status_entries(
+    agents: &[crate::tui::AgentHandle],
+) -> Vec<LocalAgentStatusEntry> {
+    agents
+        .iter()
+        .map(|handle| {
+            local_agent_status_entry(
+                handle.agent_id.clone(),
+                handle.label.clone(),
+                handle.roles.clone(),
+                handle.session_id.to_string(),
+                handle.agent.as_ref().map(|agent| agent.workflow_state().clone()),
+                handle.agent.as_ref().map(|agent| agent.project_dir.clone()),
+                handle.busy,
+                handle.active_incoming_prompt.is_some(),
+            )
+        })
+        .collect()
+}
+
+pub(crate) struct NewLocalAgentHandleParts {
+    pub agent: Agent,
+    pub session_id: Uuid,
+    pub agent_id: String,
+    pub label: String,
+    pub roles: Vec<String>,
+}
+
+pub(crate) fn build_local_agent_handle(parts: NewLocalAgentHandleParts) -> crate::tui::AgentHandle {
+    crate::tui::AgentHandle {
+        agent: Some(parts.agent),
+        session_id: parts.session_id,
+        agent_id: parts.agent_id,
+        label: parts.label,
+        roles: parts.roles,
+        busy: false,
+        turn_cancellation: None,
+        #[cfg(feature = "stylos")]
+        active_incoming_prompt: None,
+    }
+}
+
 pub(crate) struct LocalAgentRuntimeContext<'a> {
     pub session: &'a Session,
     pub project_dir: &'a PathBuf,
     pub db: &'a Arc<DbHandle>,
     pub agents: &'a mut Vec<crate::tui::AgentHandle>,
+    pub roster: &'a [LocalAgentRosterEntry],
     pub agent_busy: bool,
     #[cfg(feature = "stylos")]
     pub stylos_tool_bridge: Option<crate::stylos::StylosToolBridge>,
@@ -274,7 +1142,7 @@ fn normalize_role_list(value: Option<&serde_json::Value>) -> Vec<String> {
     roles
 }
 
-fn allocate_default_local_agent_id(agents: &[crate::tui::AgentHandle]) -> String {
+pub(crate) fn allocate_default_local_agent_id(agents: &[LocalAgentRosterEntry]) -> String {
     let mut n = 1usize;
     loop {
         let candidate = format!("smith-{n}");
@@ -285,8 +1153,23 @@ fn allocate_default_local_agent_id(agents: &[crate::tui::AgentHandle]) -> String
     }
 }
 
-fn is_interactive_handle(handle: &crate::tui::AgentHandle) -> bool {
-    handle.roles.iter().any(|r| r == "interactive")
+#[cfg(test)]
+pub(crate) fn validate_agent_roles(agents: &[LocalAgentRosterEntry]) -> anyhow::Result<()> {
+    let master_count = agents
+        .iter()
+        .filter(|handle| handle.roles.iter().any(|role| normalize_primary_role(role) == "master"))
+        .count();
+    if master_count != 1 {
+        anyhow::bail!("invalid agent roles: expected exactly one master agent");
+    }
+    let interactive_count = agents
+        .iter()
+        .filter(|handle| handle.roles.iter().any(|role| role == "interactive"))
+        .count();
+    if interactive_count > 1 {
+        anyhow::bail!("invalid agent roles: expected at most one interactive agent");
+    }
+    Ok(())
 }
 
 pub(crate) fn handle_local_agent_management_request(
@@ -314,7 +1197,7 @@ fn create_local_agent(
         .filter(|v| !v.is_empty());
     let agent_id = requested_id
         .map(str::to_string)
-        .unwrap_or_else(|| allocate_default_local_agent_id(ctx.agents));
+        .unwrap_or_else(|| allocate_default_local_agent_id(ctx.roster));
     if agent_id == "master" {
         anyhow::bail!("agent_id 'master' is reserved for the predefined leader");
     }
@@ -332,7 +1215,9 @@ fn create_local_agent(
     if roles.iter().any(|r| normalize_primary_role(r) == "master") {
         anyhow::bail!("cannot create another master agent");
     }
-    if roles.iter().any(|r| r == "interactive") && ctx.agents.iter().any(is_interactive_handle) {
+    if roles.iter().any(|r| r == "interactive")
+        && ctx.roster.iter().any(|entry| entry.roles.iter().any(|r| r == "interactive"))
+    {
         anyhow::bail!("invalid agent roles: expected at most one interactive agent");
     }
     let session_id = Uuid::new_v4();
@@ -352,17 +1237,13 @@ fn create_local_agent(
         None,
         ctx.api_log_enabled,
     )?;
-    ctx.agents.push(crate::tui::AgentHandle {
-        agent: Some(agent),
+    ctx.agents.push(build_local_agent_handle(NewLocalAgentHandleParts {
+        agent,
         session_id,
         agent_id: agent_id.clone(),
         label: label.clone(),
         roles: roles.clone(),
-        busy: false,
-        turn_cancellation: None,
-        #[cfg(feature = "stylos")]
-        active_incoming_prompt: None,
-    });
+    }));
     Ok(serde_json::json!({
         "ok": true,
         "entity": "local_agent",
@@ -373,6 +1254,28 @@ fn create_local_agent(
         "session_id": session_id.to_string(),
     })
     .to_string())
+}
+
+pub(crate) struct RemovedLocalAgentSummary {
+    pub agent_id: String,
+    pub label: String,
+    pub session_id: Uuid,
+}
+
+pub(crate) fn remove_local_agent_handle(
+    agents: &mut Vec<crate::tui::AgentHandle>,
+    agent_id: &str,
+) -> anyhow::Result<RemovedLocalAgentSummary> {
+    let index = agents
+        .iter()
+        .position(|h| h.agent_id == agent_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown agent_id: {agent_id}"))?;
+    let removed = agents.remove(index);
+    Ok(RemovedLocalAgentSummary {
+        agent_id: removed.agent_id,
+        label: removed.label,
+        session_id: removed.session_id,
+    })
 }
 
 fn delete_local_agent(
@@ -391,12 +1294,7 @@ fn delete_local_agent(
     if ctx.agent_busy {
         anyhow::bail!("cannot delete local agents while the local runtime is busy");
     }
-    let index = ctx
-        .agents
-        .iter()
-        .position(|h| h.agent_id == agent_id)
-        .ok_or_else(|| anyhow::anyhow!("unknown agent_id: {agent_id}"))?;
-    let removed = ctx.agents.remove(index);
+    let removed = remove_local_agent_handle(ctx.agents, agent_id)?;
     Ok(serde_json::json!({
         "ok": true,
         "entity": "local_agent",
@@ -485,7 +1383,7 @@ pub(crate) struct WatchdogDispatchSelection {
 
 #[cfg(feature = "stylos")]
 pub(crate) fn select_watchdog_dispatch(
-    agents: &[crate::tui::AgentHandle],
+    agents: &[LocalAgentStatusEntry],
     db: &Arc<DbHandle>,
     board_claims: &Arc<LocalBoardClaimRegistry>,
     local_instance: Option<&str>,
@@ -515,7 +1413,7 @@ pub(crate) fn select_watchdog_dispatch(
     candidate_ids.into_iter().find_map(|agent_id| {
         let index = agents.iter().position(|h| h.agent_id == agent_id)?;
         let handle = agents.get(index)?;
-        if handle.busy || handle.active_incoming_prompt.is_some() {
+        if handle.busy || handle.has_active_incoming_prompt {
             return None;
         }
         let action = resolve_pending_board_note_injection(
@@ -530,6 +1428,78 @@ pub(crate) fn select_watchdog_dispatch(
             action,
         })
     })
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) struct WatchdogDispatchEffect {
+    pub note_id: String,
+    pub log_agent_id: Option<String>,
+    pub log_text: String,
+    pub prompt: String,
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn watchdog_dispatch_effect(
+    apply_plan: &WatchdogDispatchApplyPlan,
+) -> WatchdogDispatchEffect {
+    WatchdogDispatchEffect {
+        note_id: apply_plan.action.note_id.clone(),
+        log_agent_id: apply_plan.action.request.agent_id.clone(),
+        log_text: apply_plan.action.log_line.clone(),
+        prompt: apply_plan.action.request.prompt.clone(),
+    }
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) struct WatchdogDispatchApplyPlan {
+    pub pending_watchdog_note: bool,
+    pub agent_index: usize,
+    pub action: BoardInjectionAction,
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn watchdog_dispatch_apply_plan(
+    plan: WatchdogDispatchPlan,
+) -> Result<WatchdogDispatchApplyPlan, bool> {
+    match plan {
+        WatchdogDispatchPlan {
+            pending_watchdog_note,
+            selection: Some(selection),
+        } => Ok(WatchdogDispatchApplyPlan {
+            pending_watchdog_note,
+            agent_index: selection.agent_index,
+            action: selection.action,
+        }),
+        WatchdogDispatchPlan {
+            pending_watchdog_note,
+            selection: None,
+        } => Err(pending_watchdog_note),
+    }
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) struct WatchdogDispatchPlan {
+    pub pending_watchdog_note: bool,
+    pub selection: Option<WatchdogDispatchSelection>,
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn plan_watchdog_dispatch(
+    agents: &[LocalAgentStatusEntry],
+    db: &Arc<DbHandle>,
+    board_claims: &Arc<LocalBoardClaimRegistry>,
+    local_instance: Option<&str>,
+) -> WatchdogDispatchPlan {
+    match select_watchdog_dispatch(agents, db, board_claims, local_instance) {
+        Some(selection) => WatchdogDispatchPlan {
+            pending_watchdog_note: true,
+            selection: Some(selection),
+        },
+        None => WatchdogDispatchPlan {
+            pending_watchdog_note: false,
+            selection: None,
+        },
+    }
 }
 
 #[cfg(feature = "stylos")]
@@ -556,7 +1526,7 @@ pub(crate) enum IncomingPromptDisposition {
 
 #[cfg(feature = "stylos")]
 pub(crate) fn resolve_incoming_prompt_disposition(
-    agents: &[crate::tui::AgentHandle],
+    agents: &[LocalAgentStatusEntry],
     board_claims: &Arc<LocalBoardClaimRegistry>,
     request: crate::stylos::IncomingPromptRequest,
 ) -> IncomingPromptDisposition {
@@ -581,7 +1551,7 @@ pub(crate) fn resolve_incoming_prompt_disposition(
         };
     };
 
-    if agents[agent_index].busy || agents[agent_index].active_incoming_prompt.is_some() {
+    if agents[agent_index].busy || agents[agent_index].has_active_incoming_prompt {
         if let Some(note_id) = board_note_id_from_prompt(&request.prompt) {
             release_board_note_claim(board_claims, note_id);
         }
@@ -633,6 +1603,330 @@ pub(crate) fn resolve_incoming_prompt_disposition(
 }
 
 #[cfg(feature = "stylos")]
+pub(crate) struct SubmitTargetFailureEffect {
+    pub log_text: String,
+    pub failed_task_id: Option<String>,
+    pub failure_reason: &'static str,
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn submit_target_failure_effect(
+    resolution: &SubmitTargetResolution,
+) -> Option<SubmitTargetFailureEffect> {
+    match resolution {
+        SubmitTargetResolution::MissingIncomingPromptTarget {
+            failed_task_id,
+            log_text,
+            ..
+        } => Some(SubmitTargetFailureEffect {
+            log_text: log_text.clone(),
+            failed_task_id: failed_task_id.clone(),
+            failure_reason: "target_agent_missing",
+        }),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) enum SubmitTargetResolution {
+    Interactive { agent_index: usize },
+    IncomingPromptTarget { agent_index: usize },
+    MissingIncomingPromptTarget {
+        active_agent_index: usize,
+        failed_task_id: Option<String>,
+        log_text: String,
+    },
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn resolve_submit_target(
+    agents: &[LocalAgentStatusEntry],
+    active_request: Option<&crate::stylos::IncomingPromptRequest>,
+) -> SubmitTargetResolution {
+    let interactive_index = agents
+        .iter()
+        .position(|h| h.roles.iter().any(|r| r == "interactive"))
+        .expect("interactive agent");
+    let Some(active_agent_index) = agents
+        .iter()
+        .position(|h| h.has_active_incoming_prompt)
+    else {
+        return SubmitTargetResolution::Interactive {
+            agent_index: interactive_index,
+        };
+    };
+    let Some(request) = active_request else {
+        return SubmitTargetResolution::Interactive {
+            agent_index: interactive_index,
+        };
+    };
+    let Some(target_agent_id) = request.agent_id.as_deref() else {
+        return SubmitTargetResolution::Interactive {
+            agent_index: interactive_index,
+        };
+    };
+    match agents.iter().position(|h| h.agent_id == target_agent_id) {
+        Some(agent_index) => SubmitTargetResolution::IncomingPromptTarget { agent_index },
+        None => {
+            let sender = request.from.as_deref().unwrap_or("unknown sender");
+            let sender_agent = request.from_agent_id.as_deref().unwrap_or("unknown");
+            let target_instance = request.to.as_deref().unwrap_or("unknown target");
+            let target_agent = request.to_agent_id.as_deref().unwrap_or(target_agent_id);
+            let log_text = if request.prompt.starts_with("type=stylos_note ") {
+                let note_identifier = stylos_note_display_identifier(&request.prompt);
+                format!(
+                    "Board note intake {} from={} from_agent_id={} to={} to_agent_id={} rejected: target agent missing locally",
+                    note_identifier, sender, sender_agent, target_instance, target_agent
+                )
+            } else {
+                format!(
+                    "Stylos hear from={} from_agent_id={} to={} to_agent_id={} rejected: target agent missing locally",
+                    sender, sender_agent, target_instance, target_agent
+                )
+            };
+            SubmitTargetResolution::MissingIncomingPromptTarget {
+                active_agent_index,
+                failed_task_id: request.task_id.clone(),
+                log_text,
+            }
+        }
+    }
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) struct IncomingPromptApplyPlan {
+    pub accepted_agent_index: usize,
+    pub accepted_prompt: String,
+    pub accepted_request: crate::stylos::IncomingPromptRequest,
+    pub pending_watchdog_note: bool,
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn set_active_incoming_prompt(
+    agents: &mut [crate::tui::AgentHandle],
+    watchdog_state: &Arc<WatchdogRuntimeState>,
+    agent_index: usize,
+    request: Option<crate::stylos::IncomingPromptRequest>,
+    pending_watchdog_note: bool,
+) {
+    agents[agent_index].active_incoming_prompt = request;
+    watchdog_state.set_active_incoming_prompt(
+        agents
+            .iter()
+            .any(|handle| handle.active_incoming_prompt.is_some()),
+    );
+    watchdog_state.set_pending_watchdog_note(pending_watchdog_note);
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn clear_active_incoming_prompt(
+    agents: &mut [crate::tui::AgentHandle],
+    watchdog_state: &Arc<WatchdogRuntimeState>,
+    agent_index: usize,
+) {
+    set_active_incoming_prompt(agents, watchdog_state, agent_index, None, false);
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn continue_current_note_follow_up(
+    agents: &mut [crate::tui::AgentHandle],
+    watchdog_state: &Arc<WatchdogRuntimeState>,
+    agent_index: usize,
+    request: crate::stylos::IncomingPromptRequest,
+) {
+    let pending_watchdog_note = watchdog_state.pending_watchdog_note();
+    set_active_incoming_prompt(
+        agents,
+        watchdog_state,
+        agent_index,
+        Some(request),
+        pending_watchdog_note,
+    );
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn apply_active_incoming_prompt(
+    agents: &mut [crate::tui::AgentHandle],
+    watchdog_state: &Arc<WatchdogRuntimeState>,
+    agent_index: usize,
+    request: crate::stylos::IncomingPromptRequest,
+    pending_watchdog_note: bool,
+) {
+    set_active_incoming_prompt(
+        agents,
+        watchdog_state,
+        agent_index,
+        Some(request),
+        pending_watchdog_note,
+    );
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn incoming_prompt_apply_plan(
+    outcome: IncomingPromptOutcome,
+) -> Result<IncomingPromptApplyPlan, IncomingPromptOutcome> {
+    match outcome {
+        IncomingPromptOutcome {
+            accepted_agent_index: Some(accepted_agent_index),
+            accepted_prompt: Some(accepted_prompt),
+            accepted_request: Some(accepted_request),
+            pending_watchdog_note,
+            ..
+        } => Ok(IncomingPromptApplyPlan {
+            accepted_agent_index,
+            accepted_prompt,
+            accepted_request,
+            pending_watchdog_note,
+        }),
+        other => Err(other),
+    }
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) struct IncomingPromptOutcome {
+    pub log_agent_id: Option<String>,
+    pub log_text: String,
+    pub task_failure: Option<String>,
+    pub accepted_agent_index: Option<usize>,
+    pub accepted_prompt: Option<String>,
+    pub accepted_request: Option<crate::stylos::IncomingPromptRequest>,
+    pub pending_watchdog_note: bool,
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn plan_incoming_prompt(
+    agents: &[LocalAgentStatusEntry],
+    board_claims: &Arc<LocalBoardClaimRegistry>,
+    request: crate::stylos::IncomingPromptRequest,
+) -> IncomingPromptOutcome {
+    match resolve_incoming_prompt_disposition(agents, board_claims, request) {
+        IncomingPromptDisposition::MissingTarget {
+            log_agent_id,
+            log_text,
+            failed_task_id,
+        } => IncomingPromptOutcome {
+            log_agent_id,
+            log_text,
+            task_failure: failed_task_id.map(|task_id| format!("{task_id}:target_agent_missing")),
+            accepted_agent_index: None,
+            accepted_prompt: None,
+            accepted_request: None,
+            pending_watchdog_note: false,
+        },
+        IncomingPromptDisposition::BusyTarget {
+            log_agent_id,
+            log_text,
+            failed_task_id,
+        } => IncomingPromptOutcome {
+            log_agent_id,
+            log_text,
+            task_failure: failed_task_id.map(|task_id| format!("{task_id}:agent_busy")),
+            accepted_agent_index: None,
+            accepted_prompt: None,
+            accepted_request: None,
+            pending_watchdog_note: false,
+        },
+        IncomingPromptDisposition::Accepted {
+            agent_index,
+            log_agent_id,
+            log_text,
+            prompt,
+            request,
+            pending_watchdog_note,
+        } => IncomingPromptOutcome {
+            log_agent_id,
+            log_text,
+            task_failure: None,
+            accepted_agent_index: Some(agent_index),
+            accepted_prompt: Some(prompt),
+            accepted_request: Some(request),
+            pending_watchdog_note,
+        },
+    }
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) enum CompletedNoteFollowUpEmission {
+    RemoteEvent { text: String },
+    Status { text: String },
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) struct CompletedNoteFollowUpApplyPlan {
+    pub continue_request: Option<crate::stylos::IncomingPromptRequest>,
+    pub continue_prompt: Option<String>,
+    pub emission: Option<CompletedNoteFollowUpEmission>,
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn completed_note_follow_up_apply_plan(
+    plan: CompletedNoteFollowUpPlan,
+) -> CompletedNoteFollowUpApplyPlan {
+    match plan {
+        CompletedNoteFollowUpPlan::None => CompletedNoteFollowUpApplyPlan {
+            continue_request: None,
+            continue_prompt: None,
+            emission: None,
+        },
+        CompletedNoteFollowUpPlan::ContinueCurrentNote { request, prompt } => {
+            CompletedNoteFollowUpApplyPlan {
+                continue_request: Some(request),
+                continue_prompt: Some(prompt),
+                emission: None,
+            }
+        }
+        CompletedNoteFollowUpPlan::EmitDoneMentionLog { log_line } => {
+            CompletedNoteFollowUpApplyPlan {
+                continue_request: None,
+                continue_prompt: None,
+                emission: Some(CompletedNoteFollowUpEmission::RemoteEvent { text: log_line }),
+            }
+        }
+        CompletedNoteFollowUpPlan::EmitDoneMentionStatus { status_line } => {
+            CompletedNoteFollowUpApplyPlan {
+                continue_request: None,
+                continue_prompt: None,
+                emission: Some(CompletedNoteFollowUpEmission::Status { text: status_line }),
+            }
+        }
+    }
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) enum CompletedNoteFollowUpPlan {
+    None,
+    ContinueCurrentNote {
+        request: crate::stylos::IncomingPromptRequest,
+        prompt: String,
+    },
+    EmitDoneMentionLog {
+        log_line: String,
+    },
+    EmitDoneMentionStatus {
+        status_line: String,
+    },
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn plan_completed_note_follow_up(
+    db: &Arc<DbHandle>,
+    remote: &crate::stylos::IncomingPromptRequest,
+) -> CompletedNoteFollowUpPlan {
+    match crate::board_runtime::resolve_completed_note_follow_up(db, remote) {
+        crate::board_runtime::BoardTurnFollowUp::None => CompletedNoteFollowUpPlan::None,
+        crate::board_runtime::BoardTurnFollowUp::ContinueCurrentNote { request, prompt } => {
+            CompletedNoteFollowUpPlan::ContinueCurrentNote { request, prompt }
+        }
+        crate::board_runtime::BoardTurnFollowUp::EmitDoneMention { log_line } => {
+            CompletedNoteFollowUpPlan::EmitDoneMentionLog { log_line }
+        }
+        crate::board_runtime::BoardTurnFollowUp::EmitDoneMentionError { status_line } => {
+            CompletedNoteFollowUpPlan::EmitDoneMentionStatus { status_line }
+        }
+    }
+}
+
+#[cfg(feature = "stylos")]
 fn stylos_note_header_value<'a>(prompt: &'a str, key: &str) -> Option<&'a str> {
     let prefix = format!("{key}=");
     prompt
@@ -650,5 +1944,313 @@ fn stylos_note_display_identifier(prompt: &str) -> String {
         format!("note_id={note_id}")
     } else {
         "note_id=unknown".to_string()
+    }
+}#[cfg(feature = "stylos")]
+#[derive(Clone, Debug)]
+pub(crate) struct AgentStatusSource {
+    pub agent_id: String,
+    pub label: String,
+    pub roles: Vec<String>,
+    pub session_id: String,
+    pub workflow: WorkflowState,
+    pub activity_status: String,
+    pub activity_status_changed_at_ms: u64,
+    pub project_dir: PathBuf,
+    pub provider: String,
+    pub model: String,
+    pub active_profile: String,
+    pub rate_limits: Option<ApiCallRateLimitReport>,
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn build_stylos_status_snapshot(
+    startup_project_dir: &std::path::Path,
+    agent_sources: Vec<AgentStatusSource>,
+) -> anyhow::Result<crate::stylos::StylosStatusSnapshot> {
+    let main_count = agent_sources
+        .iter()
+        .filter(|agent| agent.roles.iter().any(|r| normalize_primary_role(r) == "master"))
+        .count();
+    if main_count != 1 {
+        anyhow::bail!(
+            "invalid agent roles: expected exactly one master agent, found {}",
+            main_count
+        );
+    }
+    let interactive_count = agent_sources
+        .iter()
+        .filter(|agent| agent.roles.iter().any(|r| r == "interactive"))
+        .count();
+    if interactive_count > 1 {
+        anyhow::bail!(
+            "invalid agent roles: expected at most one interactive agent, found {}",
+            interactive_count
+        );
+    }
+
+    let agents = agent_sources
+        .into_iter()
+        .map(|agent| {
+            let git_status = crate::stylos::GitStatusCache::new(agent.project_dir.clone()).snapshot();
+            crate::stylos::StylosAgentStatusSnapshot {
+                agent_id: agent.agent_id,
+                label: agent.label,
+                roles: agent.roles,
+                session_id: agent.session_id,
+                workflow: agent.workflow,
+                activity_status: agent.activity_status,
+                activity_status_changed_at_ms: agent.activity_status_changed_at_ms,
+                project_dir: agent.project_dir.display().to_string(),
+                project_dir_is_git_repo: git_status.is_repo,
+                git_remotes: git_status.remotes,
+                provider: agent.provider,
+                model: agent.model,
+                active_profile: agent.active_profile,
+                rate_limits: agent.rate_limits,
+            }
+        })
+        .collect();
+
+    Ok(crate::stylos::StylosStatusSnapshot {
+        startup_project_dir: startup_project_dir.display().to_string(),
+        agents,
+    })
+}
+
+#[cfg(feature = "stylos")]
+#[derive(Clone, Debug)]
+pub(crate) struct AgentSnapshotInput {
+    pub agent_id: String,
+    pub label: String,
+    pub roles: Vec<String>,
+    pub session_id: String,
+    pub workflow: Option<WorkflowState>,
+    pub project_dir: Option<PathBuf>,
+}
+
+#[cfg(feature = "stylos")]
+#[derive(Clone, Debug)]
+pub(crate) struct StylosStatusRefreshInput {
+    pub startup_project_dir: PathBuf,
+    pub fallback_project_dir: PathBuf,
+    pub provider: String,
+    pub model: String,
+    pub active_profile: String,
+    pub rate_limits: Option<ApiCallRateLimitReport>,
+    pub idle_since: Option<std::time::Instant>,
+    pub idle_status_changed_at: Option<u64>,
+    pub primary_activity_label: Option<String>,
+    pub primary_activity_changed_at_ms: Option<u64>,
+    pub primary_workflow: WorkflowState,
+    pub agents: Vec<AgentSnapshotInput>,
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn build_stylos_status_snapshot_from_runtime(
+    input: StylosStatusRefreshInput,
+) -> crate::stylos::StylosStatusSnapshot {
+    let agent_sources: Vec<AgentStatusSource> = input
+        .agents
+        .into_iter()
+        .enumerate()
+        .map(|(idx, agent)| {
+            let (activity_status, activity_status_changed_at_ms) = if idx == 0 {
+                if let Some(activity_label) = input.primary_activity_label.as_ref() {
+                    (
+                        activity_label.clone(),
+                        input
+                            .primary_activity_changed_at_ms
+                            .unwrap_or_else(unix_epoch_now_ms),
+                    )
+                } else {
+                    const NAP_AFTER: Duration = Duration::from_secs(5 * 60);
+                    match input.idle_since {
+                        Some(idle_since) if idle_since.elapsed() > NAP_AFTER => (
+                            "nap".to_string(),
+                            input
+                                .idle_status_changed_at
+                                .unwrap_or_else(unix_epoch_now_ms)
+                                + NAP_AFTER.as_millis() as u64,
+                        ),
+                        _ => (
+                            "idle".to_string(),
+                            input
+                                .idle_status_changed_at
+                                .unwrap_or_else(unix_epoch_now_ms),
+                        ),
+                    }
+                }
+            } else {
+                ("idle".to_string(), unix_epoch_now_ms())
+            };
+
+            AgentStatusSource {
+                agent_id: agent.agent_id,
+                label: agent.label,
+                roles: agent.roles,
+                session_id: agent.session_id,
+                workflow: agent.workflow.unwrap_or_else(|| {
+                    if idx == 0 {
+                        input.primary_workflow.clone()
+                    } else {
+                        WorkflowState::default()
+                    }
+                }),
+                activity_status,
+                activity_status_changed_at_ms,
+                project_dir: agent
+                    .project_dir
+                    .unwrap_or_else(|| input.fallback_project_dir.clone()),
+                provider: input.provider.clone(),
+                model: input.model.clone(),
+                active_profile: input.active_profile.clone(),
+                rate_limits: if idx == 0 {
+                    input.rate_limits.clone()
+                } else {
+                    None
+                },
+            }
+        })
+        .collect();
+
+    build_stylos_status_snapshot(&input.startup_project_dir, agent_sources).unwrap_or_else(|_| {
+        crate::stylos::StylosStatusSnapshot {
+            startup_project_dir: input.startup_project_dir.display().to_string(),
+            agents: Vec::new(),
+        }
+    })
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) async fn publish_stylos_status_snapshot(
+    hub: &SharedStylosStatusHub,
+    snapshot: crate::stylos::StylosStatusSnapshot,
+) {
+    hub.replace_snapshot(snapshot).await;
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) struct StylosAppStatusRefreshState<'a> {
+    pub startup_project_dir: &'a std::path::Path,
+    pub fallback_project_dir: &'a std::path::Path,
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub active_profile: &'a str,
+    pub rate_limits: Option<&'a ApiCallRateLimitReport>,
+    pub idle_since: Option<std::time::Instant>,
+    pub idle_status_changed_at: Option<u64>,
+    pub primary_activity_label: Option<String>,
+    pub primary_activity_changed_at_ms: Option<u64>,
+    pub primary_workflow: &'a WorkflowState,
+    pub agents: &'a [crate::tui::AgentHandle],
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn refresh_stylos_status_snapshot(
+    hub: &SharedStylosStatusHub,
+    state: StylosAppStatusRefreshState<'_>,
+) {
+    let agent_status_entries = build_local_agent_status_entries(state.agents);
+    build_and_publish_stylos_status_snapshot(
+        hub,
+        StylosAppStatusSnapshotInput {
+            startup_project_dir: state.startup_project_dir.to_path_buf(),
+            fallback_project_dir: state.fallback_project_dir.to_path_buf(),
+            provider: state.provider.to_string(),
+            model: state.model.to_string(),
+            active_profile: state.active_profile.to_string(),
+            rate_limits: state.rate_limits.cloned(),
+            idle_since: state.idle_since,
+            idle_status_changed_at: state.idle_status_changed_at,
+            primary_activity_label: state.primary_activity_label,
+            primary_activity_changed_at_ms: state.primary_activity_changed_at_ms,
+            primary_workflow: state.primary_workflow.clone(),
+            agents: &agent_status_entries,
+        },
+    );
+}
+
+#[cfg(feature = "stylos")]
+#[derive(Clone)]
+pub(crate) struct StylosAppStatusSnapshotInput<'a> {
+    pub startup_project_dir: PathBuf,
+    pub fallback_project_dir: PathBuf,
+    pub provider: String,
+    pub model: String,
+    pub active_profile: String,
+    pub rate_limits: Option<ApiCallRateLimitReport>,
+    pub idle_since: Option<std::time::Instant>,
+    pub idle_status_changed_at: Option<u64>,
+    pub primary_activity_label: Option<String>,
+    pub primary_activity_changed_at_ms: Option<u64>,
+    pub primary_workflow: WorkflowState,
+    pub agents: &'a [LocalAgentStatusEntry],
+}
+
+#[cfg(feature = "stylos")]
+pub(crate) fn build_and_publish_stylos_status_snapshot(
+    hub: &SharedStylosStatusHub,
+    input: StylosAppStatusSnapshotInput<'_>,
+) {
+    let snapshot = build_stylos_status_snapshot_from_runtime(StylosStatusRefreshInput {
+        startup_project_dir: input.startup_project_dir,
+        fallback_project_dir: input.fallback_project_dir,
+        provider: input.provider,
+        model: input.model,
+        active_profile: input.active_profile,
+        rate_limits: input.rate_limits,
+        idle_since: input.idle_since,
+        idle_status_changed_at: input.idle_status_changed_at,
+        primary_activity_label: input.primary_activity_label,
+        primary_activity_changed_at_ms: input.primary_activity_changed_at_ms,
+        primary_workflow: input.primary_workflow,
+        agents: input
+            .agents
+            .iter()
+            .map(|h| AgentSnapshotInput {
+                agent_id: h.agent_id.clone(),
+                label: h.label.clone(),
+                roles: h.roles.clone(),
+                session_id: h.session_id.clone(),
+                workflow: h.workflow.clone(),
+                project_dir: h.project_dir.clone(),
+            })
+            .collect(),
+    });
+    let hub = hub.clone();
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async move {
+            publish_stylos_status_snapshot(&hub, snapshot).await;
+        });
+    });
+}
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::stylos_note_display_identifier;
+
+    #[test]
+    fn stylos_note_display_identifier_prefers_slug() {
+        let prompt = "type=stylos_note note_id=123e4567-e89b-12d3-a456-426614174000 note_slug=fix-tests-123e4567 column=todo
+
+body";
+        assert_eq!(
+            stylos_note_display_identifier(prompt),
+            "note_slug=fix-tests-123e4567"
+        );
+    }
+
+    #[test]
+    fn stylos_note_display_identifier_falls_back_to_note_id() {
+        let prompt =
+            "type=stylos_note note_id=123e4567-e89b-12d3-a456-426614174000 column=todo
+
+body";
+        assert_eq!(
+            stylos_note_display_identifier(prompt),
+            "note_id=123e4567-e89b-12d3-a456-426614174000"
+        );
     }
 }

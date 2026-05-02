@@ -81,7 +81,7 @@ fn stylos_state_data(state: &crate::stylos::StylosRuntimeState) -> StylosStateDa
 
 pub async fn run(app_runtime: AppState) -> anyhow::Result<()> {
     #[cfg(feature = "stylos")]
-    let stylos = crate::app_state::start_stylos(&app_runtime).await?;
+    let stylos = crate::app_state::start_stylos(&app_runtime, None).await?;
 
     let project_dir = app_runtime.project_dir.display().to_string();
     emit_event(

@@ -231,7 +231,10 @@ pub fn open_history_db(interactive: bool) -> Arc<DbHandle> {
 }
 
 #[cfg(feature = "stylos")]
-pub async fn start_stylos(app_state: &AppState) -> anyhow::Result<crate::stylos::StylosHandle> {
+pub async fn start_stylos(
+    app_state: &AppState,
+    #[cfg(feature = "stylos")] shared_status_hub: Option<crate::app_runtime::SharedStylosStatusHub>,
+) -> anyhow::Result<crate::stylos::StylosHandle> {
     match app_state
         .runtime_domains
         .network()
@@ -241,8 +244,10 @@ pub async fn start_stylos(app_state: &AppState) -> anyhow::Result<crate::stylos:
             let project_dir = app_state.project_dir.clone();
             let db = app_state.db.clone();
             let network_domain = app_state.runtime_domains.network();
+            #[cfg(feature = "stylos")]
+            let shared_status_hub = shared_status_hub.clone();
             async move {
-                crate::stylos::start(&stylos_cfg, &session, &project_dir, db, network_domain).await
+                crate::stylos::start(&stylos_cfg, &session, &project_dir, db, network_domain, shared_status_hub).await
             }
         })
         .await
@@ -349,7 +354,7 @@ pub fn build_agent(
 
     #[cfg(feature = "stylos")]
     {
-        agent.set_stylos_tool_invoker(crate::tui::stylos_tool_invoker(stylos_tool_bridge));
+        agent.set_stylos_tool_invoker(crate::app_runtime::stylos_tool_invoker(stylos_tool_bridge));
         agent.set_local_instance_id(local_instance_id.map(str::to_string));
         agent.set_local_agent_id(Some(local_agent_id.to_string()));
     }

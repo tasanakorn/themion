@@ -1,5 +1,8 @@
 # Architecture
 
+> [!WARNING]
+> The current checked-out workspace no longer matches the detailed `themion-cli` TUI/runtime architecture described below. During a destructive force-removal pass requested by the user, `crates/themion-cli/src/tui.rs` and `crates/themion-cli/src/app_runtime.rs` were intentionally stripped by broad marker- and intent-based deletion without preserving syntax, behavior, or buildability. Treat the TUI/runtime portions of this document as historical design intent until those files are reconstructed.
+
 Themion is a Rust AI agent with a Ratatui TUI, streaming token output, persistent SQLite history, and a tool-calling loop compatible with multiple OpenAI-style backends.
 
 For a focused walkthrough of the harness/runtime itself, including system prompt handling, `AGENTS.md` injection, context building, tool execution, and session storage, see [engine-runtime.md](engine-runtime.md).
@@ -34,6 +37,7 @@ This separation is intentional: reusable harness/runtime and provider behavior b
 - **One process can describe multiple agents** — the CLI runtime stores agent descriptors in a vector, and Stylos status publishes process-level metadata plus an `agents` list rather than flattening one effective agent into top-level fields.
 - **Local team membership is CLI-owned** — the current single-instance team roster is managed in `themion-cli`, where the process-local runtime owns `agent_id`, `label`, `roles`, and runtime construction/removal for local agents, while `themion-core` exposes the tool surface and each core `Agent` keeps its own harness state.
 - **TUI is an I/O boundary, not a runtime-policy owner** — terminal rendering, input translation, transcript formatting, and UI-local view state belong in `tui.rs`, while incoming-prompt admission, sender-side Stylos transport-event derivation, local agent-management request handling, watchdog/board coordination, and similar CLI-local orchestration belong in non-TUI helpers such as `app_runtime.rs`, `board_runtime.rs`, `stylos.rs`, `app_state.rs`, and `tui_runner.rs`.
+- **Hub/app-state must own shared runtime truth** — per repository guidance, TUI and headless surfaces should observe or project runtime-owned snapshots rather than owning the canonical agent roster, workflow truth, or Stylos-published status. Stylos status/query handling should consume hub/app-state-owned cheap-clone snapshots instead of reconstructing status from TUI-owned state.
 
 ## Component Map
 
@@ -283,25 +287,4 @@ The recall hint is a synthetic `role="system"` message that reminds the model th
 
 The full `messages` Vec is never trimmed — the in-memory copy is always complete. Windowing only affects what is sent over the wire.
 
-Themion now also exposes a user-facing `/context` command in the TUI for inspecting this prompt-visible view. The actual prompt-analysis logic stays in `themion-core`, alongside the live prompt assembly path, and the TUI only handles slash-command intake plus human-readable rendering of the returned report. `/context` now uses the same tokenizer-backed estimate path that prompt-budget replay uses when the active model resolves through `tiktoken-rs`, falls back through a short explicit trusted mapping when needed, and otherwise degrades to the rough fallback estimator. The command reports the same prompt layer ordering, estimate mode, tokenizer path when available, and history replay decision that the next model round would use, including which turns are replayed in full form, which are reduced to pure-message replay, and where omission begins. For readability, the visible `history turns:` listing is capped at `T0` through `T-10` even when older omitted turns exist in the underlying structured analysis.
-
-## Streaming
-
-### Chat Completions backends (`client.rs`)
-
-`chat_completion_stream` sends `"stream": true` and reads the response body chunk-by-chunk via `Response::chunk()`. SSE lines are split on the `0x0A` byte (safe for UTF-8 multi-byte sequences) and decoded per line. Each `data:` line is parsed as a `StreamChunkData`; `delta.content` fragments are forwarded to the `on_chunk` callback immediately. Tool call argument fragments are accumulated by `index` and assembled after `[DONE]`.
-
-`"stream_options": {"include_usage": true}` is sent so the last chunk carries token counts.
-
-### Session-level API call logging
-
-Themion now includes a TUI-local session-scoped API call logging toggle for provider debugging.
-
-Current behavior:
-
-- `/debug api-log enable` enables per-round provider/API logging for the current session only
-- `/debug api-log disable` disables it again for the current session only
-- when enabled, each provider round writes one JSON artifact under the system temp root, typically `/tmp/themion/<session_id>/<turn>/round_<n>.json` on Unix-like systems
-- artifacts include session, project, turn, round, provider/backend/model attribution, the translated request payload, the accumulated structured assistant response shape, and timing/status/error metadata
-- logging-write failures degrade gracefully and surface a bounded local warning instead of crashing the session
-- the toggle follows the current TUI session and is threaded into rebuilt interactive agents such as profile switches or post-login agent recreation
+Themion now also exposes a user-facing `/context` command in the TUI for inspecting this prompt-visible view. The actual prompt-analysis logic stays in `themion-core`, alongside the live prompt assembly path, and the TUI only handles slash-command intake plus human-readable rendering of the returned report. `/context` now uses the same tokenizer-backed estimate path that prompt-budget replay uses when the active model resolves through `tiktoken-rs`, falls back through a

@@ -3,12 +3,10 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::process::Stdio;
+use std::time::{Duration, Instant};
 use themion_core::db::{CreateNoteArgs, NoteColumn, NoteKind};
 
 use serde::{Deserialize, Serialize};
@@ -20,6 +18,7 @@ use themion_core::workflow::WorkflowState;
 use tokio::sync::{mpsc, Notify, RwLock};
 use tokio::task::JoinHandle;
 
+use crate::app_runtime::{SharedStylosStatusHub, StylosSnapshotProvider};
 use crate::runtime_domains::DomainHandle;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -30,6 +29,8 @@ use zenoh::query::{ConsolidationMode, QueryTarget};
 
 use crate::config::StylosConfig;
 use crate::Session;
+
+const GIT_STATUS_TTL: Duration = Duration::from_secs(30);
 
 const TASK_RETENTION: Duration = Duration::from_secs(30 * 60);
 const MAX_WAIT_TIMEOUT_MS: u64 = 60_000;
@@ -169,7 +170,6 @@ pub struct IncomingPromptRequest {
     pub to_agent_id: Option<String>,
 }
 
-type StylosSnapshotFuture = Pin<Box<dyn Future<Output = StylosStatusSnapshot> + Send>>;
 
 #[derive(Default)]
 struct StylosActivityCounters {
@@ -200,8 +200,8 @@ impl StylosActivityCounters {
         update_atomic_max(&self.query_request_max_us, us);
     }
 
-    fn snapshot(&self) -> crate::tui::StylosActivitySnapshot {
-        crate::tui::StylosActivitySnapshot {
+    fn snapshot(&self) -> crate::app_runtime::StylosActivitySnapshot {
+        crate::app_runtime::StylosActivitySnapshot {
             status_publish_count: self.status_publish_count.load(Ordering::Relaxed),
             status_publish_total_us: self.status_publish_total_us.load(Ordering::Relaxed),
             status_publish_max_us: self.status_publish_max_us.load(Ordering::Relaxed),
@@ -225,7 +225,6 @@ fn update_atomic_max(slot: &AtomicU64, value: u64) {
     }
 }
 
-type StylosSnapshotProvider = Arc<dyn Fn() -> StylosSnapshotFuture + Send + Sync>;
 
 #[derive(Clone)]
 pub struct StylosQueryContext {
@@ -639,7 +638,7 @@ impl StylosHandle {
         self.query_context.clone()
     }
 
-    pub fn activity_snapshot(&self) -> Option<crate::tui::StylosActivitySnapshot> {
+    pub fn activity_snapshot(&self) -> Option<crate::app_runtime::StylosActivitySnapshot> {
         match self.state {
             StylosRuntimeState::Active { .. } => Some(self.activity_counters.snapshot()),
             _ => None,
@@ -690,6 +689,40 @@ struct ThemionStatusPayload {
 struct ThemionCmdPayload {
     r#type: String,
     prompt: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct GitStatusCache {
+    project_dir: PathBuf,
+    state: Arc<std::sync::Mutex<CachedGitStatus>>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedGitStatus {
+    last_refresh: Instant,
+    value: GitProjectStatus,
+}
+
+impl GitStatusCache {
+    pub fn new(project_dir: PathBuf) -> Self {
+        let value = inspect_git_project(&project_dir);
+        Self {
+            project_dir,
+            state: Arc::new(std::sync::Mutex::new(CachedGitStatus {
+                last_refresh: Instant::now(),
+                value,
+            })),
+        }
+    }
+
+    pub fn snapshot(&self) -> GitProjectStatus {
+        let mut state = self.state.lock().expect("git status cache lock");
+        if state.last_refresh.elapsed() >= GIT_STATUS_TTL {
+            state.value = inspect_git_project(&self.project_dir);
+            state.last_refresh = Instant::now();
+        }
+        state.value.clone()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -961,12 +994,13 @@ pub async fn start(
     project_dir: &PathBuf,
     notes_db: Arc<themion_core::db::DbHandle>,
     network_domain: DomainHandle,
+    shared_status_hub: Option<SharedStylosStatusHub>,
 ) -> StylosHandle {
     if !settings.enabled() {
         return StylosHandle::off();
     }
 
-    match start_inner(settings, session, project_dir, notes_db, network_domain).await {
+    match start_inner(settings, session, project_dir, notes_db, network_domain, shared_status_hub).await {
         Ok(handle) => handle,
         Err(err) => {
             let mut handle = StylosHandle::off();
@@ -979,16 +1013,16 @@ pub async fn start(
 async fn start_inner(
     settings: &StylosConfig,
     session: &Session,
-    project_dir: &PathBuf,
+    _project_dir: &PathBuf,
     notes_db: Arc<themion_core::db::DbHandle>,
     network_domain: DomainHandle,
+    shared_status_hub: Option<SharedStylosStatusHub>,
 ) -> Result<StylosHandle, String> {
     let key_instance = derive_local_instance_id();
     let identity_instance = key_instance
         .split_once(':')
         .map(|(hostname, _)| hostname.to_string())
         .unwrap_or_else(|| "themion".to_string());
-    let git_status = inspect_git_project(project_dir);
     let realm = settings.realm();
     let mode = settings.mode();
 
@@ -1023,11 +1057,13 @@ async fn start_inner(
     );
 
     let ct = CancellationToken::new();
-    let snapshot_provider = Arc::new(RwLock::new(None::<StylosSnapshotProvider>));
     let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let task_registry = TaskRegistry::new();
     let activity_counters = Arc::new(StylosActivityCounters::default());
+    let snapshot_provider = shared_status_hub
+        .unwrap_or_else(SharedStylosStatusHub::new)
+        .provider();
     let query_context = StylosQueryContext {
         prompt_tx,
         event_tx,
@@ -1039,14 +1075,7 @@ async fn start_inner(
     let status_ct = ct.clone();
     let status_session = session_handle.clone();
     let status_key = format!("stylos/{}/themion/{}/status", realm, key_instance);
-    let status_snapshot_provider = snapshot_provider.clone();
-    let initial_project_dir = project_dir.display().to_string();
-    let initial_project_dir_is_git_repo = git_status.is_repo;
-    let initial_git_remotes = git_status.remotes.clone();
-    let status_profile = session.active_profile.clone();
-    let status_provider = session.provider.clone();
-    let status_model = session.model.clone();
-    let status_session_id = session.id.to_string();
+    let snapshot_provider_for_status_task = snapshot_provider.clone();
     let status_mode = mode.clone();
     let status_realm = realm.clone();
     let status_instance = key_instance.clone();
@@ -1059,29 +1088,7 @@ async fn start_inner(
                 _ = status_ct.cancelled() => break,
                 _ = interval.tick() => {
                     let publish_started = Instant::now();
-                    let provider = status_snapshot_provider.read().await.clone();
-                    let snapshot = match provider {
-                        Some(provider) => provider().await,
-                        None => StylosStatusSnapshot {
-                            startup_project_dir: initial_project_dir.clone(),
-                            agents: vec![StylosAgentStatusSnapshot {
-                                agent_id: "master".to_string(),
-                                label: "master".to_string(),
-                                roles: vec!["master".to_string(), "interactive".to_string()],
-                                session_id: status_session_id.clone(),
-                                workflow: WorkflowState::default(),
-                                activity_status: "idle".to_string(),
-                                activity_status_changed_at_ms: unix_epoch_now_ms(),
-                                project_dir: initial_project_dir.clone(),
-                                project_dir_is_git_repo: initial_project_dir_is_git_repo,
-                                git_remotes: initial_git_remotes.clone(),
-                                provider: status_provider.clone(),
-                                model: status_model.clone(),
-                                active_profile: status_profile.clone(),
-                                rate_limits: None,
-                            }],
-                        },
-                    };
+                    let snapshot = snapshot_provider_for_status_task().await;
                     let payload = ThemionStatusPayload {
                         version: env!("CARGO_PKG_VERSION").to_string(),
                         instance: status_instance.clone(),
@@ -1141,7 +1148,7 @@ async fn start_inner(
         profile: session.active_profile.clone(),
         model: session.model.clone(),
     };
-    let query_snapshot_provider = snapshot_provider.clone();
+    let query_status_provider = snapshot_provider.clone();
     let query_context_for_task = query_context.clone();
     let query_instance = key_instance.clone();
     let query_session_id = session.id.to_string();
@@ -1203,7 +1210,7 @@ async fn start_inner(
                 res = alive_queryable.recv_async() => match res {
                     Ok(query) => {
                         let query_started = Instant::now();
-                        if let Some(reply) = build_discovery_reply(&query_snapshot_provider, &query_instance, &query_session_id, DiscoveryMode::Alive).await {
+                        if let Some(reply) = build_discovery_reply(&query_status_provider, &query_instance, &query_session_id, DiscoveryMode::Alive).await {
                             let _ = reply_cbor(query, q_alive_key.clone(), &reply).await;
                         }
                         query_activity_counters.record_query_request(query_started.elapsed());
@@ -1213,7 +1220,7 @@ async fn start_inner(
                 res = free_queryable.recv_async() => match res {
                     Ok(query) => {
                         let query_started = Instant::now();
-                        if let Some(reply) = build_discovery_reply(&query_snapshot_provider, &query_instance, &query_session_id, DiscoveryMode::Free).await {
+                        if let Some(reply) = build_discovery_reply(&query_status_provider, &query_instance, &query_session_id, DiscoveryMode::Free).await {
                             let _ = reply_cbor(query, q_free_key.clone(), &reply).await;
                         }
                         query_activity_counters.record_query_request(query_started.elapsed());
@@ -1224,7 +1231,7 @@ async fn start_inner(
                     Ok(query) => {
                         let query_started = Instant::now();
                         let req = parse_cbor_payload::<GitQueryRequest>(&query);
-                        if let Some(reply) = build_git_reply(&query_snapshot_provider, &query_instance, &query_session_id, req).await {
+                        if let Some(reply) = build_git_reply(&query_status_provider, &query_instance, &query_session_id, req).await {
                             let _ = reply_cbor(query, q_git_key.clone(), &reply).await;
                         }
                         query_activity_counters.record_query_request(query_started.elapsed());
@@ -1235,7 +1242,7 @@ async fn start_inner(
                     Ok(query) => {
                         let query_started = Instant::now();
                         let req = parse_cbor_payload::<StatusFilterRequest>(&query);
-                        let reply = build_status_reply(&query_snapshot_provider, &query_instance, &query_session_id, req).await;
+                        let reply = build_status_reply(&query_status_provider, &query_instance, &query_session_id, req).await;
                         let _ = reply_cbor(query, q_status_key.clone(), &reply).await;
                         query_activity_counters.record_query_request(query_started.elapsed());
                     }
@@ -1244,7 +1251,7 @@ async fn start_inner(
                 res = talk_queryable.recv_async() => match res {
                     Ok(query) => {
                         let query_started = Instant::now();
-                        let reply = handle_talk_query(&query_snapshot_provider, &query_context_for_task, parse_cbor_payload::<TalkRequest>(&query)).await;
+                        let reply = handle_talk_query(&query_status_provider, &query_context_for_task, parse_cbor_payload::<TalkRequest>(&query)).await;
                         let _ = reply_cbor(query, q_talk_key.clone(), &reply).await;
                         query_activity_counters.record_query_request(query_started.elapsed());
                     }
@@ -1253,7 +1260,7 @@ async fn start_inner(
                 res = note_queryable.recv_async() => match res {
                     Ok(query) => {
                         let query_started = Instant::now();
-                        let reply = handle_note_delivery_query(&query_snapshot_provider, &query_context_for_task, parse_cbor_payload::<NoteRequest>(&query)).await;
+                        let reply = handle_note_delivery_query(&query_status_provider, &query_context_for_task, parse_cbor_payload::<NoteRequest>(&query)).await;
                         let _ = reply_cbor(query, q_note_key.clone(), &reply).await;
                         query_activity_counters.record_query_request(query_started.elapsed());
                     }
@@ -1262,7 +1269,7 @@ async fn start_inner(
                 res = task_request_queryable.recv_async() => match res {
                     Ok(query) => {
                         let query_started = Instant::now();
-                        let reply = handle_task_request_query(&query_snapshot_provider, &query_context_for_task, parse_cbor_payload::<TaskRequestPayload>(&query)).await;
+                        let reply = handle_task_request_query(&query_status_provider, &query_context_for_task, parse_cbor_payload::<TaskRequestPayload>(&query)).await;
                         let _ = reply_cbor(query, q_task_request_key.clone(), &reply).await;
                         query_activity_counters.record_query_request(query_started.elapsed());
                     }
@@ -1349,7 +1356,7 @@ enum DiscoveryMode {
 }
 
 async fn build_discovery_reply(
-    snapshot_provider: &Arc<RwLock<Option<StylosSnapshotProvider>>>,
+    snapshot_provider: &StylosSnapshotProvider,
     instance: &str,
     session_id: &str,
     mode: DiscoveryMode,
@@ -1367,7 +1374,7 @@ async fn build_discovery_reply(
 }
 
 async fn build_git_reply(
-    snapshot_provider: &Arc<RwLock<Option<StylosSnapshotProvider>>>,
+    snapshot_provider: &StylosSnapshotProvider,
     instance: &str,
     session_id: &str,
     req: Option<GitQueryRequest>,
@@ -1387,7 +1394,7 @@ async fn build_git_reply(
 }
 
 async fn build_status_reply(
-    snapshot_provider: &Arc<RwLock<Option<StylosSnapshotProvider>>>,
+    snapshot_provider: &StylosSnapshotProvider,
     instance: &str,
     session_id: &str,
     req: Option<StatusFilterRequest>,
@@ -1429,7 +1436,7 @@ async fn build_status_reply(
 }
 
 async fn handle_talk_query(
-    snapshot_provider: &Arc<RwLock<Option<StylosSnapshotProvider>>>,
+    snapshot_provider: &StylosSnapshotProvider,
     query_context: &StylosQueryContext,
     req: Option<TalkRequest>,
 ) -> TalkReply {
@@ -1529,7 +1536,7 @@ async fn handle_talk_query(
 }
 
 async fn handle_note_delivery_query(
-    snapshot_provider: &Arc<RwLock<Option<StylosSnapshotProvider>>>,
+    snapshot_provider: &StylosSnapshotProvider,
     query_context: &StylosQueryContext,
     req: Option<NoteRequest>,
 ) -> NoteReply {
@@ -1637,7 +1644,7 @@ async fn handle_note_delivery_query(
 }
 
 async fn handle_task_request_query(
-    snapshot_provider: &Arc<RwLock<Option<StylosSnapshotProvider>>>,
+    snapshot_provider: &StylosSnapshotProvider,
     query_context: &StylosQueryContext,
     req: Option<TaskRequestPayload>,
 ) -> TaskRequestReply {
@@ -1826,10 +1833,9 @@ async fn handle_task_result_query(
 }
 
 async fn current_snapshot(
-    snapshot_provider: &Arc<RwLock<Option<StylosSnapshotProvider>>>,
+    snapshot_provider: &StylosSnapshotProvider,
 ) -> Option<StylosStatusSnapshot> {
-    let provider = snapshot_provider.read().await.clone()?;
-    Some(provider().await)
+    Some(snapshot_provider().await)
 }
 
 fn build_queryable_agents(
@@ -1923,27 +1929,6 @@ fn normalize_known_host_path(host: &str, path: &str) -> Option<String> {
     Some(format!("{}/{}", host, path))
 }
 
-fn parse_cbor_payload<T: for<'de> Deserialize<'de>>(query: &zenoh::query::Query) -> Option<T> {
-    let payload = query.payload()?;
-    let bytes = payload.to_bytes();
-    if bytes.is_empty() {
-        return None;
-    }
-    serde_cbor::from_slice(bytes.as_ref()).ok()
-}
-
-async fn reply_cbor<T: Serialize>(
-    query: zenoh::query::Query,
-    key: String,
-    payload: &T,
-) -> Result<(), zenoh::Error> {
-    let bytes = serde_cbor::to_vec(payload).unwrap_or_default();
-    query
-        .reply(key, bytes)
-        .encoding(Encoding::APPLICATION_CBOR)
-        .await
-}
-
 fn inspect_git_project(project_dir: &Path) -> GitProjectStatus {
     let inside = std::process::Command::new("git")
         .arg("rev-parse")
@@ -1995,6 +1980,27 @@ fn collect_git_remote_urls(project_dir: &Path) -> Vec<String> {
     urls.into_iter().collect()
 }
 
+fn parse_cbor_payload<T: for<'de> Deserialize<'de>>(query: &zenoh::query::Query) -> Option<T> {
+    let payload = query.payload()?;
+    let bytes = payload.to_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    serde_cbor::from_slice(bytes.as_ref()).ok()
+}
+
+async fn reply_cbor<T: Serialize>(
+    query: zenoh::query::Query,
+    key: String,
+    payload: &T,
+) -> Result<(), zenoh::Error> {
+    let bytes = serde_cbor::to_vec(payload).unwrap_or_default();
+    query
+        .reply(key, bytes)
+        .encoding(Encoding::APPLICATION_CBOR)
+        .await
+}
+
 pub fn derive_local_instance_id() -> String {
     let hostname = derive_hostname().unwrap_or_else(|| "themion".to_string());
     let process_id = std::process::id();
@@ -2029,13 +2035,6 @@ fn is_valid_segment(s: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
-
-fn unix_epoch_now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 fn render_instance_identifier(instance: Option<&str>) -> String {
