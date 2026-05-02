@@ -102,8 +102,8 @@ const OPENROUTER_DEFAULT_MODEL: &str = "minimax/minimax-m2.7";
 const LLAMACPP_DEFAULT_BASE_URL: &str = "http://localhost:8080/v1";
 const LLAMACPP_DEFAULT_MODEL: &str = "local";
 
-const CODEX_DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
-const CODEX_DEFAULT_MODEL: &str = "gpt-5.4";
+pub const CODEX_DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+pub const CODEX_DEFAULT_MODEL: &str = "gpt-5.4";
 
 const CONFIG_TEMPLATE: &str = r#"# themion config — https://github.com/you/themion
 # primary_llm_profile selects which [profile.*] is active at startup.
@@ -191,6 +191,15 @@ pub fn resolve_profile(profile: &ProfileConfig) -> (String, String, Option<Strin
     };
 
     (provider, base_url, api_key, model)
+}
+
+pub fn codex_profile_defaults() -> ProfileConfig {
+    ProfileConfig {
+        provider: Some("openai-codex".to_string()),
+        base_url: None,
+        model: Some(CODEX_DEFAULT_MODEL.to_string()),
+        api_key: None,
+    }
 }
 
 impl Config {

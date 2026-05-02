@@ -98,3 +98,4 @@ Active and recent product requirements documents live in `docs/prd/`. Older impl
 | PRD-083 | [Concurrent Local Agent Harness Execution and Independent Watchdog Scheduling](prd/prd-083-concurrent-local-agent-harness-and-independent-watchdog.md) | Implemented | v0.54.0 | `themion-core`, `themion-cli`, docs |
 | PRD-084 | [Move Non-Input/Output Responsibilities out of the TUI](prd/prd-084-move-non-input-output-out-of-tui.md) | Implemented | v0.55.0 | `themion-cli`, docs |
 | PRD-085 | [Show Clear Source Labels on Transcript Messages Without an Agent Owner](prd/prd-085-improve-transcript-labels-for-runtime-and-board-events-in-the-tui.md) | Implemented | v0.55.0 | `themion-cli`, docs |
+| PRD-086 | [Support Multiple Codex Profiles with Profile-Scoped Login State](prd/prd-086-multiple-codex-profiles.md) | Implemented | v0.56.0 | `themion-cli`, `themion-core`, docs |

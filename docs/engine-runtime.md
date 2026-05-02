@@ -50,6 +50,22 @@ Prompt replay now uses a narrowed budget-aware policy instead of relying only on
 
 That same core prompt-analysis path now also powers the TUI-local `/context` command. `themion-core` constructs a structured prompt-context report describing prompt sections, tokenizer-backed or fallback token estimates, estimate mode, tokenizer path when available, turn replay modes, and omission boundaries, and `themion-cli` formats that report for transcript display. The visible `history turns:` listing is intentionally bounded to `T0` through `T-10` for readability even when the underlying structured report tracks older omitted turns. This keeps the user-facing inspection path aligned with the real next-round prompt assembly logic rather than relying on a separate TUI-only estimator.
 
+## Codex profile-scoped login state
+
+Codex login state is now resolved per saved profile rather than through one shared global `auth.json` blob for all `openai-codex` usage.
+
+Current behavior:
+
+- `/login codex <profile>` explicitly authenticates the named profile
+- `/login codex` targets the current active profile when it already uses `openai-codex`; otherwise it falls back to the literal `codex` profile
+- successful Codex login persists auth under the targeted profile and switches the live session to that profile for immediate use
+- token refresh writeback for `CodexClient` persists back to that same active profile-scoped auth store
+- when the active profile uses `openai-codex`, provider readiness now depends on whether that specific profile has auth available
+- if no auth is available for the active Codex profile, runtime startup/build paths report a profile-specific recovery hint such as `run /login codex <profile>`
+- legacy `~/.config/themion/auth.json` is treated only as a narrow migration source for obvious single-profile upgrades; once a profile-scoped auth file exists, that profile-scoped auth is authoritative
+
+This keeps Codex aligned with Themion's existing profile-centric session/config model while preserving the same device-code login flow.
+
 ## Agent identity boundary
 
 `themion-core::Agent` owns per-agent harness state such as session ID, project directory, workflow state, messages, and model/backend integration. `themion-cli` owns process-local descriptors such as `agent_id`, `label`, and `roles` that describe how a given core agent is used within one Themion process.

@@ -23,7 +23,7 @@ use crate::app_runtime::{
 #[cfg(feature = "stylos")]
 use crate::board_runtime::{finalize_board_note_injection, LocalBoardClaimRegistry};
 use crate::chat_composer::{ChatComposer, InputAction};
-use crate::config::{save_profiles, ProfileConfig};
+use crate::config::save_profiles;
 use crate::runtime_domains::DomainHandle;
 #[cfg(feature = "stylos")]
 use crate::stylos::{
@@ -83,7 +83,10 @@ pub(crate) enum AppEvent {
         user_code: String,
         verification_uri: String,
     },
-    LoginComplete(anyhow::Result<themion_core::CodexAuth>),
+    LoginComplete {
+        profile_name: String,
+        auth_result: anyhow::Result<themion_core::CodexAuth>,
+    },
     ShellComplete {
         output: String,
         exit_code: Option<i32>,
@@ -1736,7 +1739,7 @@ impl App {
         app_tx: &mpsc::UnboundedSender<AppEvent>,
     ) {
         match command {
-            RuntimeCommand::LoginCodex => {
+            RuntimeCommand::LoginCodex { profile_name } => {
                 if self.agent_busy {
                     self.push(Entry::Assistant {
                         agent_id: None,
@@ -1748,15 +1751,34 @@ impl App {
                 }
                 self.agent_busy = true;
                 self.set_agent_activity(AgentActivity::LoginStarting);
+                let target_profile = profile_name.clone().unwrap_or_else(|| {
+                    if self
+                        .session
+                        .profiles
+                        .get(&self.session.active_profile)
+                        .is_some_and(|profile| profile.provider.as_deref() == Some("openai-codex"))
+                    {
+                        self.session.active_profile.clone()
+                    } else {
+                        "codex".to_string()
+                    }
+                });
+                let login_message = if profile_name.is_some() {
+                    format!("logging in to OpenAI Codex for profile '{}'…", target_profile)
+                } else if target_profile == self.session.active_profile {
+                    format!("logging in to OpenAI Codex for current profile '{}'…", target_profile)
+                } else {
+                    format!("logging in to OpenAI Codex for profile '{}'…", target_profile)
+                };
                 self.push(Entry::Assistant {
                     agent_id: None,
-                    text: "logging in to OpenAI Codex…".to_string(),
+                    text: login_message,
                 });
                 let tx = app_tx.clone();
                 self.background_domain().spawn(async move {
                     match crate::login_codex::start_device_flow().await {
                         Err(e) => {
-                            tx.send(AppEvent::LoginComplete(Err(e))).ok();
+                            tx.send(AppEvent::LoginComplete { profile_name: target_profile.clone(), auth_result: Err(e) }).ok();
                         }
                         Ok((info, poll)) => {
                             tx.send(AppEvent::LoginPrompt {
@@ -1765,7 +1787,7 @@ impl App {
                             })
                             .ok();
                             let result = poll.await;
-                            tx.send(AppEvent::LoginComplete(result)).ok();
+                            tx.send(AppEvent::LoginComplete { profile_name: target_profile.clone(), auth_result: result }).ok();
                         }
                     }
                 });
@@ -1903,9 +1925,20 @@ impl App {
         let mut out = Vec::new();
         self.activity_counters.command_count += 1;
 
-        if input == "/login codex" {
+        if let Some(rest) = input.strip_prefix("/login codex") {
+            let profile_name = rest.trim();
+            let target_profile = if profile_name.is_empty() {
+                None
+            } else if profile_name.split_whitespace().count() == 1 {
+                Some(profile_name.to_string())
+            } else {
+                out.push("usage: /login codex [profile]".to_string());
+                return out;
+            };
             app_tx
-                .send(AppEvent::RuntimeCommand(RuntimeCommand::LoginCodex))
+                .send(AppEvent::RuntimeCommand(RuntimeCommand::LoginCodex {
+                    profile_name: target_profile,
+                }))
                 .ok();
             return out;
         }
@@ -2587,8 +2620,8 @@ impl App {
             } => {
                 self.handle_login_prompt_event(user_code, verification_uri, frame_requester);
             }
-            AppEvent::LoginComplete(auth_result) => {
-                self.handle_login_complete_event(auth_result, frame_requester)
+            AppEvent::LoginComplete { profile_name, auth_result } => {
+                self.handle_login_complete_event(profile_name, auth_result, frame_requester)
                     .await;
             }
             AppEvent::ShellComplete { output, exit_code } => {
@@ -2602,28 +2635,24 @@ impl App {
 
     pub(crate) async fn handle_login_complete_event(
         &mut self,
+        profile_name: String,
         auth_result: anyhow::Result<themion_core::CodexAuth>,
         frame_requester: &FrameRequester,
     ) {
         match auth_result {
             Ok(auth) => {
                 self.clear_agent_activity();
-                if let Err(e) = crate::auth_store::save(&auth) {
+                if let Err(e) = crate::auth_store::save_for_profile(&profile_name, &auth) {
                     self.push(Entry::Assistant {
                         agent_id: None,
                         text: format!("warning: failed to save auth: {}", e),
                     });
                 }
-                self.session.profiles.insert(
-                    "codex".to_string(),
-                    ProfileConfig {
-                        provider: Some("openai-codex".to_string()),
-                        model: Some("gpt-5.4".to_string()),
-                        base_url: None,
-                        api_key: None,
-                    },
-                );
-                self.session.switch_profile("codex");
+                self.session
+                    .profiles
+                    .insert(profile_name.clone(), crate::config::codex_profile_defaults());
+                self.session.configured_profile = profile_name.clone();
+                self.session.switch_profile(&profile_name);
                 if let Err(e) = save_profiles(&self.session.active_profile, &self.session.profiles)
                 {
                     self.push(Entry::Assistant {
@@ -2649,8 +2678,10 @@ impl App {
                         self.push(Entry::Assistant {
                             agent_id: None,
                             text: format!(
-                                "logged in as {} — switched to codex profile (gpt-5.4)",
-                                auth.account_id
+                                "logged in as {} — switched to Codex profile '{}' ({})",
+                                auth.account_id,
+                                profile_name,
+                                self.session.model
                             ),
                         });
                         self.push(Entry::Blank);

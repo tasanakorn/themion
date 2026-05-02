@@ -91,7 +91,7 @@ impl AppState {
             provider: Some(self.session.provider.clone()),
             model: Some(self.session.model.clone()),
             auth_configured: Some(match self.session.provider.as_str() {
-                "openai-codex" => crate::auth_store::load().ok().flatten().is_some(),
+                "openai-codex" => resolve_codex_auth(&self.session).ok().flatten().is_some(),
                 _ => self
                     .session
                     .api_key
@@ -296,6 +296,49 @@ pub fn create_done_mention_locally(
     .map_err(anyhow::Error::from)
 }
 
+pub fn resolve_codex_auth(session: &Session) -> anyhow::Result<Option<themion_core::CodexAuth>> {
+    if let Some(auth) = crate::auth_store::load_for_profile(&session.active_profile)? {
+        return Ok(Some(auth));
+    }
+
+    let mut obvious_targets = Vec::new();
+    if session
+        .profiles
+        .get(&session.configured_profile)
+        .is_some_and(|profile| profile.provider.as_deref() == Some("openai-codex"))
+    {
+        obvious_targets.push(session.configured_profile.clone());
+    }
+    if session
+        .profiles
+        .get("codex")
+        .is_some_and(|profile| profile.provider.as_deref() == Some("openai-codex"))
+        && !obvious_targets.iter().any(|name| name == "codex")
+    {
+        obvious_targets.push("codex".to_string());
+    }
+    let codex_profile_names: Vec<String> = session
+        .profiles
+        .iter()
+        .filter_map(|(name, profile)| {
+            (profile.provider.as_deref() == Some("openai-codex")).then(|| name.clone())
+        })
+        .collect();
+    if codex_profile_names.len() == 1
+        && !obvious_targets
+            .iter()
+            .any(|name| name == &codex_profile_names[0])
+    {
+        obvious_targets.push(codex_profile_names[0].clone());
+    }
+
+    if obvious_targets.len() == 1 && obvious_targets[0] == session.active_profile {
+        return crate::auth_store::migrate_legacy_to_profile(&session.active_profile);
+    }
+
+    Ok(None)
+}
+
 pub fn build_agent(
     session: &Session,
     session_id: Uuid,
@@ -310,12 +353,20 @@ pub fn build_agent(
 ) -> anyhow::Result<Agent> {
     let client: Box<dyn ChatBackend + Send + Sync> = match session.provider.as_str() {
         "openai-codex" => {
-            let auth = crate::auth_store::load()?
-                .ok_or_else(|| anyhow::anyhow!("no codex auth; run /login codex first"))?;
+            let profile_name = session.active_profile.clone();
+            let auth = resolve_codex_auth(session)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no Codex auth for profile '{}'; run /login codex {}",
+                    session.active_profile,
+                    session.active_profile
+                )
+            })?;
             Box::new(CodexClient::new(
                 session.base_url.clone(),
                 auth,
-                Box::new(|a: &themion_core::CodexAuth| crate::auth_store::save(a)),
+                Box::new(move |a: &themion_core::CodexAuth| {
+                    crate::auth_store::save_for_profile(&profile_name, a)
+                }),
             ))
         }
         _ => {

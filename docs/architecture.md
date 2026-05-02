@@ -79,6 +79,7 @@ CodexClient  (client_codex.rs)
   ├─ POST /responses with stream=true
   ├─ parses named-event Responses API SSE frames
   ├─ refreshes OAuth tokens when needed
+  ├─ loads auth through the active `openai-codex` profile rather than one shared global login blob
   └─ assembles ResponseMessage + Usage from Responses events
 
 tools.rs
@@ -285,6 +286,4 @@ Prompt replay is now budget-aware rather than purely fixed by `Agent.window_turn
 
 The recall hint is a synthetic `role="system"` message that reminds the model that omitted `session_id` stays in the current session and `session_id="*"` explicitly widens recall or search to all sessions in the current project.
 
-The full `messages` Vec is never trimmed — the in-memory copy is always complete. Windowing only affects what is sent over the wire.
-
-Themion now also exposes a user-facing `/context` command in the TUI for inspecting this prompt-visible view. The actual prompt-analysis logic stays in `themion-core`, alongside the live prompt assembly path, and the TUI only handles slash-command intake plus human-readable rendering of the returned report. `/context` now uses the same tokenizer-backed estimate path that prompt-budget replay uses when the active model resolves through `tiktoken-rs`, falls back through a
+The full `messages` Vec is never trimmed — the in-memory copy is always complete. Windowing on
