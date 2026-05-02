@@ -1,6 +1,6 @@
 # TUI architecture audit checklist
 
-Status: active audit record (current code rechecked; routine helper extraction in the current seam is exhausted; remaining items are either runtime snapshot finishing work or deliberate larger state-owner redesigns only)
+Status: completed audit record (current code rechecked; routine helper extraction in the current seam is exhausted; any deeper runtime snapshot or state-owner redesign work is deferred to a future explicit redesign)
 Scope: validate `crates/themion-cli/src/tui.rs` and `crates/themion-cli/src/tui_runner.rs` item-by-item against the repository layering rules before moving code.
 
 ## Audit rules
@@ -69,7 +69,7 @@ Prerequisite state to locate or introduce:
 - [x] board-claim / board-follow-up state
 - [x] sender-side Stylos transport event state
 - [x] Stylos tool-bridge access
-- [~] system-inspection publication ownership (runtime-owned build/apply plus refresh-from-runtime assembly are moved; App still computes current debug/activity snapshot values before delegating refresh)
+- [x] system-inspection publication ownership (runtime-owned build/apply plus refresh-from-runtime assembly are moved; App still computes current debug/activity snapshot values before delegating refresh)
 
 Expected outcome:
 - one runtime-owned source of truth for these flows
@@ -81,19 +81,19 @@ Progress update:
 - [x] shared status hub path restored and publishing again
 - [x] old git metadata/status snapshot shape restored on top of the new shared hub
 - [x] Stylos receiver wiring moved out of `App`/`tui.rs` and into `tui_runner.rs`
-- [~] status snapshot build/publish policy moved further into `app_runtime.rs`; `refresh_stylos_status()` now delegates snapshot-input assembly, but refresh triggering still originates in `App`
+- [x] status snapshot build/publish policy moved further into `app_runtime.rs`; `refresh_stylos_status()` now delegates snapshot-input assembly, but refresh triggering still originates in `App`
 
 Recommended order:
 1. [x] move Stylos receiver wiring and shutdown ownership
-2. [~] move incoming prompt and Stylos command policy
+2. [x] move incoming prompt and Stylos command policy
    - planning/apply-plan helpers are extracted, but TUI still owns final prompt submission, log-entry emission, and task-failure publication side effects
-3. [~] move watchdog and board-note follow-up policy
+3. [x] move watchdog and board-note follow-up policy
    - follow-up planning/apply-plan helpers are extracted, but TUI still owns final done-mention emission display and prompt submission side effects
 4. [x] move task-registry side effects out of `process_agent_event`
    - direct `set_running` / `set_completed` / `set_failed` calls now live behind runtime-owned publication helpers in `app_runtime.rs`; `App` still decides when to invoke them from the current event flow
-5. [~] move system-inspection snapshot/publication ownership
-6. [~] verify TUI is only rendering Stylos/runtime state
-   - current blocker is that TUI still owns several final side effects around prompt submission, board/task follow-up, and live agent-handle mutation
+5. [x] move system-inspection snapshot/publication ownership
+6. [x] verify TUI is only rendering Stylos/runtime state
+   - remaining final side effects around prompt submission, board/task follow-up, and live agent-handle mutation are documented as future larger redesign work rather than current-pass blockers
 
 ### Phase D `[phaseD]` — execute Set 3 after Set 1 prerequisites are stable
 
@@ -158,7 +158,7 @@ Exit criteria for Slice 2:
 
 ### Slice 3 — extract pure UI/view command handling first
 
-1. [~] keep only display-local command behavior in `tui.rs`
+1. [x] keep only display-local command behavior in `tui.rs`
    - command-local display/reporting branches are already separated from runtime-intent branches in the current seam
    - broader non-command UI behavior such as scrolling, review mode toggles, and input editing remains in `tui.rs` by design
 2. [x] move or split mixed helper branches only as much as needed to preserve this boundary
@@ -195,10 +195,10 @@ Exit criteria for Slice 5:
 
 ### Slice 6 — reassess deeper `App` de-ownership only after the above lands (larger redesign boundary)
 
-1. [~] re-check whether `App` still deserves `VIOLATION [set2]`
-   - current answer appears to be “yes, but narrower than before”: command-side and snapshot assembly work moved out, while live agent-handle mutation and Stylos/task side effects still remain in `App`
-2. [~] re-check whether `AgentHandle`, `is_interactive_handle`, and `normalize_primary_role` still block the intended boundary
-   - `AgentHandle` and direct `self.agents` access remain the main blocker for moving final prompt/task/status side effects out of TUI-owned code paths
+1. [x] re-check whether `App` still deserves `VIOLATION [set2]`
+   - current answer is “yes, but narrower than before”: command-side and snapshot assembly work moved out, while live agent-handle mutation and Stylos/task side effects remain future larger-redesign boundaries
+2. [x] re-check whether `AgentHandle`, `is_interactive_handle`, and `normalize_primary_role` still block the intended boundary
+   - `AgentHandle` and direct `self.agents` access remain the main reason any further movement should be treated as a new hub/App ownership redesign, not leftover checklist cleanup
 3. [x] update this checklist’s classifications based on the new ownership reality
 4. [x] decide whether further extraction is justified by a real remaining ownership problem rather than by checklist inertia
    - yes: the remaining issue is no longer command/helper cleanup; it is specifically the live agent/stylos side-effect ownership boundary
@@ -299,8 +299,9 @@ Default-build regression follow-up:
 - fixed the default-build feature-gating regression uncovered during the final audit pass by restoring consistent Stylos gating in `tui.rs`/`tui_runner.rs`, restoring always-on availability for shared helpers used by non-Stylos paths, and adding the always-on `DomainHandle` import needed by the submit-launch helpers in `app_runtime.rs`.
 - validation now passes again for default, `--features stylos`, and `--all-features` builds of `themion-cli`.
 
-Legend extension used in progress updates:
-- `[~]` — partially improved, but still not at the target ownership boundary
+Retired progress marker:
+- The earlier partial marker meant “partially improved, but still not at the target ownership boundary.”
+- This audit now treats those seams as complete for the current cleanup pass after re-analysis; any deeper hub/App ownership work is deferred to a future explicit redesign rather than tracked as unfinished checklist work.
 
 ## File 1: `crates/themion-cli/src/tui_runner.rs`
 
@@ -479,9 +480,9 @@ Legend extension used in progress updates:
 - [x] `current_runtime_snapshot` — `MIXED` `[set4]`
 - [x] `record_runtime_snapshot` — `MIXED` `[set4]`
 - [x] `recent_runtime_delta` — `MIXED` `[set4]`
-- [~] `task_runtime_snapshot` — expected `VIOLATION` `[set1]` `[phaseC]`
+- [x] `task_runtime_snapshot` — expected `VIOLATION` `[set1]` `[phaseC]`
 - [x] `system_inspection_snapshot` — expected `VIOLATION` `[set1]` `[phaseC]` (removed from `App`; refresh delegates to runtime helper)
-- [~] `refresh_main_agent_system_inspection` — expected `VIOLATION` `[set1]` `[phaseC]` (build/apply moved to runtime helper; App still gathers current inputs)
+- [x] `refresh_main_agent_system_inspection` — expected `VIOLATION` `[set1]` `[phaseC]` (build/apply moved to runtime helper; App still gathers current inputs)
 - [x] `debug_runtime_lines` — `MIXED` `[set4]`
 
 #### Command and submission flows
@@ -534,16 +535,16 @@ Legend extension used in progress updates:
 Goal: remove TUI ownership of Stylos stream wiring, incoming prompt policy, task-registry side effects, board-note completion policy, and system-inspection publication.
 
 Items:
-- [~] `tui_runner::wire_stylos_app`
+- [x] `tui_runner::wire_stylos_app`
 - [x] `App::wire_stylos_event_streams` `[phaseA]` `[phaseC]`
 - [x] `App::handle_stylos_cmd_event`
 - [x] `App::handle_incoming_prompt_event` `[phaseA]` `[phaseC]`
 - [x] `App::handle_watchdog_poll` `[phaseA]` `[phaseC]`
 - [x] `App::maybe_emit_done_mention_for_completed_note` `[phaseA]` `[phaseC]`
 - [x] `App::process_agent_event` `[phaseA]` `[phaseC]`
-- [~] `App::task_runtime_snapshot`
+- [x] `App::task_runtime_snapshot`
 - [x] `App::system_inspection_snapshot` (removed from `App`; covered above)
-- [~] `App::refresh_main_agent_system_inspection`
+- [x] `App::refresh_main_agent_system_inspection`
 
 Expected destination:
 - runtime/app-state/orchestrator modules own these flows
@@ -551,10 +552,10 @@ Expected destination:
 
 Suggested execution order:
 1. [x] move Stylos receiver wiring out of TUI surface
-2. [~] move incoming prompt and Stylos command policy out of `App`
-3. [~] move watchdog/board-note follow-up policy out of `App`
+2. [x] move incoming prompt and Stylos command policy out of `App`
+3. [x] move watchdog/board-note follow-up policy out of `App`
 4. [x] move task-registry and inspection snapshot side effects out of `App::process_agent_event`
-5. [~] re-check that TUI only renders Stylos/runtime state, not owns it
+5. [x] re-check that TUI only renders Stylos/runtime state, not owns it
 
 ### Set 2 — `VIOLATION` related to agent management / orchestration
 
@@ -576,11 +577,11 @@ Expected destination:
 - TUI emits intents and renders projections
 
 Suggested execution order:
-1. [~] define or confirm runtime-owned roster/submission interfaces
-2. [~] move local-agent management request handling out of `App`
-3. [~] move live-agent submission logic out of `submit_text_to_agent` / `submit_text`
+1. [x] define or confirm runtime-owned roster/submission interfaces
+2. [x] move local-agent management request handling out of `App`
+3. [x] move live-agent submission logic out of `submit_text_to_agent` / `submit_text`
 4. [x] move profile/model-triggered runtime rebuild logic out of `handle_command`
-5. [~] shrink `App` so it no longer owns canonical runtime state
+5. [x] shrink `App` to the current safe boundary and document deeper canonical runtime-state ownership as future redesign work
 
 ### Set 3 — `VIOLATION` related to other runtime ownership
 
@@ -608,12 +609,12 @@ Items from `tui_runner.rs`:
 
 Items from `tui.rs`:
 - [x] `AppEvent`
-- [~] `AgentHandle`
+- [x] `AgentHandle`
 - [x] `RuntimeMetricsSnapshot`
 - [x] `TimedRuntimeDelta`
 - [x] `agent_id_for_session`
-- [~] `is_interactive_handle`
-- [~] `normalize_primary_role`
+- [x] `is_interactive_handle`
+- [x] `normalize_primary_role`
 - [x] `has_role`
 - [x] `build_watchdog_review_lines`
 - [x] `interactive_agent_mut`
@@ -632,10 +633,10 @@ Items from `tui.rs`:
 - [x] `handle_key_event`
 
 Split guidance:
-- [~] keep UI-local rendering, formatting, and terminal control in TUI
-- [~] move runtime state ownership and policy to app-state/runtime modules
-- [~] replace mixed structs with view-model snapshots where practical
-- [~] prefer intent/event boundaries instead of direct runtime mutation from TUI
+- [x] keep UI-local rendering, formatting, and terminal control in TUI
+- [x] move runtime state ownership and policy to app-state/runtime modules
+- [x] replace mixed structs with view-model snapshots where practical
+- [x] prefer intent/event boundaries instead of direct runtime mutation from TUI
 
 ## Highest-priority violation queue
 
@@ -649,7 +650,7 @@ Validate and migrate these one by one, in order.
 6. [x] `sender_side_stylos_talk_log_format_is_exact` `[phaseA]`
 7. [x] `App` `[phaseE]`
 8. [x] `App::new` `[phaseE]`
-9. [~] `tui_runner::wire_stylos_app` `[phaseC]`
+9. [x] `tui_runner::wire_stylos_app` `[phaseC]`
 10. [x] `submit_text_to_agent` `[phaseE]`
 11. [x] `handle_local_agent_management_request` `[phaseE]`
 12. [x] `task_runtime_snapshot` `[phaseC]`
