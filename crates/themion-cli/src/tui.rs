@@ -1,42 +1,26 @@
 use crate::app_runtime::{
-    apply_agent_ready_update, apply_master_agent_replacement,
-    apply_runtime_command_outcome_to_app_runtime, build_local_agent_roster,
-    build_local_agent_tool_invoker, build_main_agent,
-    build_replacement_main_agent,
-    execute_runtime_command,
+    apply_master_agent_replacement,
+    build_local_agent_roster,
+    build_local_agent_tool_invoker, build_main_agent, build_replacement_main_agent,
     handle_local_agent_management_request as runtime_handle_local_agent_management_request,
     is_interactive_agent_handle, launch_agent_turn_runtime, prepare_agent_turn_runtime_launch,
-    AgentReplacementParams, LocalAgentManagementRequest, LocalAgentRuntimeContext, RuntimeCommand,
-    RuntimeCommandContext,
-    SystemInspectionRuntimeRefreshState, refresh_interactive_agent_system_inspection_from_runtime,
+    AgentReplacementParams, AppRuntimeObserverPublisher, LocalAgentManagementRequest,
+    LocalAgentRuntimeContext, RuntimeCommand,
 };
 #[cfg(feature = "stylos")]
-use crate::app_runtime::{
-    agent_has_role, build_local_agent_status_entries,
-    apply_active_incoming_prompt, refresh_stylos_status_snapshot,
-    clear_active_incoming_prompt, completed_note_follow_up_apply_plan,
-    continue_current_note_follow_up, incoming_prompt_apply_plan, publish_stylos_task_completed,
-    publish_stylos_task_failed, publish_stylos_task_running, resolve_submit_target,
-    submit_target_failure_effect, watchdog_dispatch_apply_plan, watchdog_dispatch_effect,
-    SharedStylosStatusHub, StylosAppStatusRefreshState,
-};
+use crate::app_runtime::{agent_has_role, SharedStylosStatusHub};
 #[cfg(feature = "stylos")]
-use crate::board_runtime::{finalize_board_note_injection, LocalBoardClaimRegistry};
+use crate::board_runtime::LocalBoardClaimRegistry;
+use crate::app_state::{activity_status_value, clear_agent_activity as app_state_clear_agent_activity, on_tick as app_state_on_tick, publish_runtime_snapshot as app_state_publish_runtime_snapshot, AppRuntimeEvent, set_agent_activity as app_state_set_agent_activity, AgentActivity, AppSnapshot};
 use crate::chat_composer::{ChatComposer, InputAction};
 use crate::config::save_profiles;
 use crate::runtime_domains::DomainHandle;
 #[cfg(feature = "stylos")]
-use crate::stylos::{
-    sender_side_transport_event_from_tool_detail, IncomingPromptRequest, StylosHandle,
-    StylosRuntimeState, StylosToolBridge,
-};
+use crate::stylos::{IncomingPromptRequest, StylosHandle, StylosRuntimeState, StylosToolBridge};
 
 #[cfg(feature = "stylos")]
-use crate::app_runtime::{
-    plan_completed_note_follow_up, plan_incoming_prompt, plan_watchdog_dispatch,
-    WatchdogRuntimeState,
-};
-use crate::{format_stats, Session};
+use crate::app_runtime::WatchdogRuntimeState;
+use crate::Session;
 use crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
 use ratatui::{
     backend::CrosstermBackend,
@@ -50,7 +34,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use themion_core::agent::{Agent, AgentEvent, TurnCancellation, TurnStats};
+use themion_core::agent::{Agent, TurnCancellation, TurnStats};
 use themion_core::client_codex::ApiCallRateLimitReport;
 use themion_core::db::DbHandle;
 use themion_core::workflow::WorkflowState;
@@ -67,18 +51,9 @@ pub(crate) enum AppEvent {
     Key(event::KeyEvent),
     Mouse(event::MouseEvent),
     Paste(String),
-    Agent(Uuid, AgentEvent),
-    AgentReady(Box<Agent>, Uuid),
     Tick,
+    SnapshotUpdated(AppSnapshot),
     RuntimeCommand(RuntimeCommand),
-    #[cfg(feature = "stylos")]
-    StylosCmd(crate::stylos::StylosCmdRequest),
-    #[cfg(feature = "stylos")]
-    IncomingPrompt(IncomingPromptRequest),
-    #[cfg(feature = "stylos")]
-    WatchdogPoll,
-    #[cfg(feature = "stylos")]
-    StylosEvent(String),
     LoginPrompt {
         user_code: String,
         verification_uri: String,
@@ -87,16 +62,12 @@ pub(crate) enum AppEvent {
         profile_name: String,
         auth_result: anyhow::Result<themion_core::CodexAuth>,
     },
-    ShellComplete {
-        output: String,
-        exit_code: Option<i32>,
-    },
     LocalAgentManagement(LocalAgentManagementRequest),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(not(feature = "stylos"), allow(dead_code))]
-enum NonAgentSource {
+pub(crate) enum NonAgentSource {
     Board,
     Stylos,
     Runtime,
@@ -124,7 +95,7 @@ impl NonAgentSource {
 }
 
 #[derive(Clone)]
-enum Entry {
+pub(crate) enum Entry {
     User(String),
     Assistant {
         agent_id: Option<String>,
@@ -392,14 +363,14 @@ fn self_session_id_fallback() -> String {
     "session-bound".to_string()
 }
 
-fn agent_id_for_session(agents: &[AgentHandle], sid: Uuid) -> Option<String> {
+pub(crate) fn agent_id_for_session(agents: &[AgentHandle], sid: Uuid) -> Option<String> {
     agents
         .iter()
         .find(|handle| handle.session_id == sid)
         .map(|handle| handle.agent_id.clone())
 }
 
-fn split_tool_call_detail(name: &str, args_json: &str) -> (String, Option<String>) {
+pub(crate) fn split_tool_call_detail(name: &str, args_json: &str) -> (String, Option<String>) {
     let args: serde_json::Value = serde_json::from_str(args_json).unwrap_or_default();
     let t = |key: &str| center_trim(args[key].as_str().unwrap_or("?"), TOOL_DETAIL_MAX_CHARS);
     let board_note_display = || {
@@ -558,7 +529,7 @@ pub struct AgentHandle {
 }
 
 #[derive(Clone, Copy, Default)]
-struct UiDirty {
+pub(crate) struct UiDirty {
     conversation: bool,
     input: bool,
     status: bool,
@@ -567,7 +538,7 @@ struct UiDirty {
 }
 
 impl UiDirty {
-    fn any(&self) -> bool {
+    pub(crate) fn any(&self) -> bool {
         self.full || self.conversation || self.input || self.status || self.overlay
     }
 
@@ -649,52 +620,40 @@ impl FrameScheduler {
     }
 }
 
-#[derive(Clone)]
-pub(crate) enum AgentActivity {
-    PreparingRequest,
-    WaitingForModel,
-    StreamingResponse,
-    RunningTool(String),
-    WaitingAfterTool,
-    LoginStarting,
-    WaitingForLoginBrowser,
-    RunningShellCommand,
-    Finishing,
-}
 
 #[derive(Clone, Copy)]
 struct ActivityCountersSnapshot {
     draw_count: u64,
     draw_request_count: u64,
     draw_skip_clean_count: u64,
-    tick_count: u64,
+    pub(crate) tick_count: u64,
     input_key_count: u64,
     input_mouse_count: u64,
     input_paste_count: u64,
-    agent_event_count: u64,
-    incoming_prompt_count: u64,
-    shell_complete_count: u64,
+    pub(crate) agent_event_count: u64,
+    pub(crate) incoming_prompt_count: u64,
+    pub(crate) shell_complete_count: u64,
     agent_turn_started_count: u64,
-    agent_turn_completed_count: u64,
+    pub(crate) agent_turn_completed_count: u64,
     draw_total_us: u64,
     draw_max_us: u64,
     command_count: u64,
 }
 
 #[derive(Default)]
-struct ActivityCounters {
+pub(crate) struct ActivityCounters {
     draw_count: u64,
     draw_request_count: u64,
     draw_skip_clean_count: u64,
-    tick_count: u64,
+    pub(crate) tick_count: u64,
     input_key_count: u64,
     input_mouse_count: u64,
     input_paste_count: u64,
-    agent_event_count: u64,
-    incoming_prompt_count: u64,
-    shell_complete_count: u64,
+    pub(crate) agent_event_count: u64,
+    pub(crate) incoming_prompt_count: u64,
+    pub(crate) shell_complete_count: u64,
     agent_turn_started_count: u64,
-    agent_turn_completed_count: u64,
+    pub(crate) agent_turn_completed_count: u64,
     draw_total_us: u64,
     draw_max_us: u64,
     command_count: u64,
@@ -763,111 +722,79 @@ impl ActivityCountersSnapshot {
 }
 
 #[derive(Clone, Copy)]
-struct RuntimeMetricsSnapshot {
+pub(crate) struct RuntimeMetricsSnapshot {
     at_ms: u64,
     uptime_ms: u64,
     counters: ActivityCountersSnapshot,
 }
 
 #[derive(Clone, Copy)]
-struct TimedRuntimeDelta {
+pub(crate) struct TimedRuntimeDelta {
     latest_at_ms: u64,
     latest_uptime_ms: u64,
-    wall_elapsed_ms: u64,
+    pub(crate) wall_elapsed_ms: u64,
     counter_delta: ActivityCountersSnapshot,
     lifetime_counters: ActivityCountersSnapshot,
-}
-
-impl AgentActivity {
-    pub(crate) fn label(&self, stream_chunks: u64, stream_chars: u64) -> String {
-        match self {
-            AgentActivity::PreparingRequest => "preparing request…".to_string(),
-            AgentActivity::WaitingForModel => "waiting for model…".to_string(),
-            AgentActivity::StreamingResponse => format!(
-                "receiving response… chunks:{} chars:{}",
-                stream_chunks, stream_chars
-            ),
-            AgentActivity::RunningTool(detail) => format!("running tool… {}", detail),
-            AgentActivity::WaitingAfterTool => "tool finished, waiting for model…".to_string(),
-            AgentActivity::LoginStarting => "starting login…".to_string(),
-            AgentActivity::WaitingForLoginBrowser => "waiting for login confirmation…".to_string(),
-            AgentActivity::RunningShellCommand => "running shell command…".to_string(),
-            AgentActivity::Finishing => "finalizing…".to_string(),
-        }
-    }
-
-    fn status_bar(&self, stream_chunks: u64, stream_chars: u64) -> String {
-        match self {
-            AgentActivity::PreparingRequest => "preparing".to_string(),
-            AgentActivity::WaitingForModel => "waiting-model".to_string(),
-            AgentActivity::StreamingResponse => {
-                format!("streaming c:{} ch:{}", stream_chunks, stream_chars)
-            }
-            AgentActivity::RunningTool(_) => "running-tool".to_string(),
-            AgentActivity::WaitingAfterTool => "waiting-after-tool".to_string(),
-            AgentActivity::LoginStarting => "login-start".to_string(),
-            AgentActivity::WaitingForLoginBrowser => "login-wait".to_string(),
-            AgentActivity::RunningShellCommand => "shell".to_string(),
-            AgentActivity::Finishing => "finalizing".to_string(),
-        }
-    }
 }
 
 pub struct App {
     #[cfg(feature = "stylos")]
     pub(crate) stylos: Option<StylosHandle>,
     #[cfg(feature = "stylos")]
-    local_stylos_instance: Option<String>,
-    session: Session,
-    entries: Vec<Entry>,
-    pending: Option<String>,
+    pub(crate) local_stylos_instance: Option<String>,
+    pub(crate) session: Session,
+    pub(crate) entries: Vec<Entry>,
+    pub(crate) pending: Option<String>,
     composer: ChatComposer,
     pub(crate) running: bool,
-    ctrl_c_exit_armed_until: Option<Instant>,
-    agent_busy: bool,
+    pub(crate) ctrl_c_exit_armed_until: Option<Instant>,
+    pub(crate) agent_busy: bool,
     scroll_offset: usize,
     navigation_mode: NavigationMode,
     review_mode: ReviewMode,
     review_scroll_offset: usize,
-    streaming_idx: Option<usize>,
-    anim_frame: u8,
-    dirty: UiDirty,
-    agents: Vec<AgentHandle>,
-    db: Arc<DbHandle>,
-    project_dir: PathBuf,
+    pub(crate) streaming_idx: Option<usize>,
+    pub(crate) anim_frame: u8,
+    pub(crate) dirty: UiDirty,
+    pub(crate) agents: Vec<AgentHandle>,
+    pub(crate) db: Arc<DbHandle>,
+    pub(crate) project_dir: PathBuf,
     #[allow(dead_code)]
-    startup_project_dir: PathBuf,
-    session_tokens: TurnStats,
-    last_ctx_tokens: u64,
-    agent_activity: Option<AgentActivity>,
-    idle_since: Option<Instant>,
-    idle_status_changed_at: Option<u64>,
-    agent_activity_changed_at: Option<u64>,
-    stream_chunks: u64,
-    stream_chars: u64,
-    status_rate_limits: Option<ApiCallRateLimitReport>,
-    status_model_info: Option<ModelInfo>,
-    api_log_enabled: bool,
-    process_started_at: Instant,
-    process_started_at_ms: u64,
-    background_domain: DomainHandle,
+    pub(crate) startup_project_dir: PathBuf,
+    pub(crate) session_tokens: TurnStats,
+    pub(crate) last_ctx_tokens: u64,
+    pub(crate) agent_activity: Option<AgentActivity>,
+    pub(crate) idle_since: Option<Instant>,
+    pub(crate) idle_status_changed_at: Option<u64>,
+    pub(crate) agent_activity_changed_at: Option<u64>,
+    pub(crate) stream_chunks: u64,
+    pub(crate) stream_chars: u64,
+    pub(crate) status_rate_limits: Option<ApiCallRateLimitReport>,
+    pub(crate) status_model_info: Option<ModelInfo>,
+    pub(crate) api_log_enabled: bool,
+    pub(crate) process_started_at: Instant,
+    pub(crate) process_started_at_ms: u64,
+    pub(crate) background_domain: DomainHandle,
     core_domain: DomainHandle,
-    recent_runtime_snapshots: VecDeque<RuntimeMetricsSnapshot>,
-    activity_counters: ActivityCounters,
-    workflow_state: WorkflowState,
+    pub(crate) recent_runtime_snapshots: VecDeque<RuntimeMetricsSnapshot>,
+    pub(crate) activity_counters: ActivityCounters,
+    pub(crate) workflow_state: WorkflowState,
     #[cfg(feature = "stylos")]
-    stylos_tool_bridge: Option<StylosToolBridge>,
+    pub(crate) stylos_tool_bridge: Option<StylosToolBridge>,
     #[cfg(feature = "stylos")]
-    watchdog_state: Arc<WatchdogRuntimeState>,
+    pub(crate) watchdog_state: Arc<WatchdogRuntimeState>,
     #[cfg(feature = "stylos")]
-    board_claims: Arc<LocalBoardClaimRegistry>,
+    pub(crate) board_claims: Arc<LocalBoardClaimRegistry>,
     #[cfg(feature = "stylos")]
-    shared_status_hub: SharedStylosStatusHub,
+    pub(crate) shared_status_hub: SharedStylosStatusHub,
     #[cfg(feature = "stylos")]
-    last_sender_side_transport_event: Option<crate::stylos::SenderSideTransportEvent>,
+    pub(crate) last_sender_side_transport_event: Option<crate::stylos::SenderSideTransportEvent>,
     #[cfg(feature = "stylos")]
-    last_assistant_text: Option<String>,
-    local_agent_mgmt_tx: mpsc::UnboundedSender<AppEvent>,
+    pub(crate) last_assistant_text: Option<String>,
+    pub(crate) local_agent_mgmt_tx: mpsc::UnboundedSender<AppEvent>,
+    pub(crate) runtime_tx: mpsc::UnboundedSender<AppRuntimeEvent>,
+    pub(crate) runtime_observer_publisher: AppRuntimeObserverPublisher,
+    app_snapshot: AppSnapshot,
 }
 
 impl App {
@@ -879,11 +806,14 @@ impl App {
         background_domain: DomainHandle,
         core_domain: DomainHandle,
         app_tx: mpsc::UnboundedSender<AppEvent>,
+        runtime_tx: mpsc::UnboundedSender<AppRuntimeEvent>,
         #[cfg(feature = "stylos")] stylos: Option<StylosHandle>,
         #[cfg(feature = "stylos")] stylos_tool_bridge: Option<StylosToolBridge>,
         #[cfg(feature = "stylos")] watchdog_state: Arc<WatchdogRuntimeState>,
         #[cfg(feature = "stylos")] board_claims: Arc<LocalBoardClaimRegistry>,
         #[cfg(feature = "stylos")] shared_status_hub: SharedStylosStatusHub,
+        runtime_observer_publisher: AppRuntimeObserverPublisher,
+        initial_snapshot: AppSnapshot,
     ) -> Self {
         #[cfg(feature = "stylos")]
         let local_stylos_instance = stylos.as_ref().and_then(|handle| match handle.state() {
@@ -897,7 +827,7 @@ impl App {
             project_dir.clone(),
             app_tx.clone(),
             #[cfg(feature = "stylos")]
-            None,
+            stylos_tool_bridge.clone(),
             #[cfg(feature = "stylos")]
             local_stylos_instance.as_deref(),
             #[cfg(feature = "stylos")]
@@ -983,6 +913,8 @@ impl App {
             initial_entries.push(Entry::Blank);
         }
 
+        let app_snapshot = initial_snapshot;
+
         let mut app = Self {
             #[cfg(feature = "stylos")]
             stylos,
@@ -1049,9 +981,12 @@ impl App {
             #[cfg(feature = "stylos")]
             last_assistant_text: None,
             local_agent_mgmt_tx: app_tx.clone(),
+            runtime_tx: runtime_tx.clone(),
+            runtime_observer_publisher,
+            app_snapshot,
         };
         app.record_runtime_snapshot();
-        app.refresh_main_agent_system_inspection();
+        app_state_publish_runtime_snapshot(&mut app);
         app
     }
 
@@ -1075,24 +1010,18 @@ impl App {
             new_agent,
             new_session_id,
         );
-        #[cfg(feature = "stylos")]
-        self.refresh_stylos_status();
+        app_state_publish_runtime_snapshot(self);
     }
 
-    fn background_domain(&self) -> DomainHandle {
+    pub(crate) fn background_domain(&self) -> DomainHandle {
         self.background_domain.clone()
     }
 
-    #[cfg(feature = "stylos")]
-    pub(crate) fn watchdog_state(&self) -> &Arc<WatchdogRuntimeState> {
-        &self.watchdog_state
-    }
-
-    fn any_agent_busy(&self) -> bool {
+    pub(crate) fn any_agent_busy(&self) -> bool {
         self.agents.iter().any(|h| h.busy)
     }
 
-    fn handle_local_agent_management_request(
+    pub(crate) fn handle_local_agent_management_request(
         &mut self,
         request: LocalAgentManagementRequest,
         frame_requester: &FrameRequester,
@@ -1119,9 +1048,7 @@ impl App {
             &request.action,
             request.args,
         );
-        self.refresh_main_agent_system_inspection();
-        #[cfg(feature = "stylos")]
-        self.refresh_stylos_status();
+        app_state_publish_runtime_snapshot(self);
         self.mark_dirty_all();
         self.request_draw(frame_requester);
         let _ = request.reply_tx.send(result);
@@ -1165,7 +1092,7 @@ impl App {
         self.review_mode = ReviewMode::Closed;
     }
 
-    fn pending_str(&self) -> String {
+    pub(crate) fn pending_str(&self) -> String {
         const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
         let ch = SPINNER[self.anim_frame as usize % SPINNER.len()];
         let activity = self
@@ -1177,50 +1104,15 @@ impl App {
     }
 
     fn set_agent_activity(&mut self, activity: AgentActivity) {
-        let activity_changed = self
-            .agent_activity
-            .as_ref()
-            .map(|current| std::mem::discriminant(current) != std::mem::discriminant(&activity))
-            .unwrap_or(true);
-        self.agent_activity = Some(activity);
-        if activity_changed {
-            self.agent_activity_changed_at = Some(unix_epoch_now_ms());
-        }
-        self.idle_since = None;
-        self.idle_status_changed_at = None;
-        #[cfg(feature = "stylos")]
-        {
-            self.watchdog_state.clear_idle_started();
-            self.watchdog_state.set_pending_watchdog_note(false);
-        }
-        self.pending = Some(self.pending_str());
-        self.mark_dirty_status();
-        #[cfg(feature = "stylos")]
-        self.refresh_stylos_status();
+        app_state_set_agent_activity(self, activity);
     }
 
     fn clear_agent_activity(&mut self) {
-        self.agent_activity = None;
-        self.agent_activity_changed_at = None;
-        self.idle_since = Some(Instant::now());
-        self.idle_status_changed_at = Some(unix_epoch_now_ms());
-        #[cfg(feature = "stylos")]
-        {
-            self.watchdog_state.set_idle_started_now();
-            self.watchdog_state.set_active_incoming_prompt(
-                self.agents
-                    .iter()
-                    .any(|handle| handle.active_incoming_prompt.is_some()),
-            );
-        }
-        self.pending = None;
-        self.mark_dirty_status();
-        #[cfg(feature = "stylos")]
-        self.refresh_stylos_status();
+        app_state_clear_agent_activity(self);
     }
 
 
-    fn reset_stream_counters(&mut self) {
+    pub(crate) fn reset_stream_counters(&mut self) {
         self.stream_chunks = 0;
         self.stream_chars = 0;
     }
@@ -1258,7 +1150,7 @@ impl App {
         matches!(self.ctrl_c_exit_armed_until, Some(deadline) if deadline > now)
     }
 
-    fn expire_ctrl_c_exit_if_needed(&mut self, now: Instant) -> bool {
+    pub(crate) fn expire_ctrl_c_exit_if_needed(&mut self, now: Instant) -> bool {
         if matches!(self.ctrl_c_exit_armed_until, Some(deadline) if deadline <= now) {
             self.ctrl_c_exit_armed_until = None;
             return true;
@@ -1267,18 +1159,7 @@ impl App {
     }
 
     fn on_tick(&mut self) {
-        self.activity_counters.tick_count += 1;
-        self.expire_ctrl_c_exit_if_needed(Instant::now());
-        self.record_runtime_snapshot();
-        self.refresh_main_agent_system_inspection();
-        let previous = self.pending.clone();
-        self.anim_frame = self.anim_frame.wrapping_add(1);
-        if self.agent_busy && self.pending.is_some() {
-            self.pending = Some(self.pending_str());
-        }
-        if self.pending != previous {
-            self.mark_dirty_status();
-        }
+        app_state_on_tick(self);
     }
 
     fn mark_dirty_conversation(&mut self) {
@@ -1289,7 +1170,7 @@ impl App {
         self.dirty.input = true;
     }
 
-    fn mark_dirty_status(&mut self) {
+    pub(crate) fn mark_dirty_status(&mut self) {
         self.dirty.status = true;
     }
 
@@ -1297,7 +1178,7 @@ impl App {
         self.dirty.overlay = true;
     }
 
-    fn mark_dirty_all(&mut self) {
+    pub(crate) fn mark_dirty_all(&mut self) {
         self.dirty.mark_all();
     }
 
@@ -1324,265 +1205,20 @@ impl App {
         self.stylos.take()
     }
 
-    fn push(&mut self, entry: Entry) {
+    pub(crate) fn push(&mut self, entry: Entry) {
         self.entries.push(entry);
         self.mark_dirty_conversation();
     }
 
-    fn activity_status_value(&self) -> String {
-        const NAP_AFTER: Duration = Duration::from_secs(5 * 60);
-
-        if let Some(activity) = self.agent_activity.as_ref() {
-            return activity.status_bar(self.stream_chunks, self.stream_chars);
-        }
-
-        match self.idle_since {
-            Some(idle_since) if idle_since.elapsed() > NAP_AFTER => "nap".to_string(),
-            _ => {
-                "idle".to_string()
-            }
-        }
+    pub(crate) fn activity_status_value(&self) -> String {
+        activity_status_value(
+            self.agent_activity.as_ref(),
+            self.idle_since,
+            self.stream_chunks,
+            self.stream_chars,
+        )
     }
 
-    #[cfg(feature = "stylos")]
-    pub(crate) fn refresh_stylos_status(&self) {
-        if self.stylos.is_none() {
-            return;
-        }
-        refresh_stylos_status_snapshot(
-            &self.shared_status_hub,
-            StylosAppStatusRefreshState {
-                startup_project_dir: &self.startup_project_dir,
-                fallback_project_dir: &self.project_dir,
-                provider: &self.session.provider,
-                model: &self.session.model,
-                active_profile: &self.session.active_profile,
-                rate_limits: self.status_rate_limits.as_ref(),
-                idle_since: self.idle_since,
-                idle_status_changed_at: self.idle_status_changed_at,
-                primary_activity_label: self
-                    .agent_activity
-                    .as_ref()
-                    .map(|activity| activity.status_bar(self.stream_chunks, self.stream_chars)),
-                primary_activity_changed_at_ms: self.agent_activity_changed_at,
-                primary_workflow: &self.workflow_state,
-                agents: &self.agents,
-            },
-        );
-    }
-
-    fn process_agent_event(
-        &mut self,
-        #[allow(unused_variables)] sid: Uuid,
-        ev: AgentEvent,
-        #[cfg(feature = "stylos")] app_tx: &mpsc::UnboundedSender<AppEvent>,
-    ) {
-        match ev {
-            AgentEvent::LlmStart => {
-                #[cfg(feature = "stylos")]
-                {
-                    let agent_index = self.agents.iter().position(|h| h.session_id == sid);
-                    if let (Some(agent_index), Some(handle)) = (agent_index, self.stylos.as_ref()) {
-                        if let Some(remote) =
-                            self.agents[agent_index].active_incoming_prompt.as_ref()
-                        {
-                            if let Some(task_id) = remote.task_id.clone() {
-                                publish_stylos_task_running(
-                                    &self.background_domain,
-                                    handle.query_context(),
-                                    task_id,
-                                );
-                            }
-                        }
-                    }
-                }
-                self.reset_stream_counters();
-                #[cfg(feature = "stylos")]
-                {
-                    self.last_assistant_text = None;
-                }
-                self.set_agent_activity(AgentActivity::WaitingForModel);
-                self.streaming_idx = None;
-            }
-            AgentEvent::AssistantChunk(chunk) => {
-                #[cfg(feature = "stylos")]
-                {
-                    let next = match self.last_assistant_text.take() {
-                        Some(mut existing) => {
-                            existing.push_str(&chunk);
-                            existing
-                        }
-                        None => chunk.clone(),
-                    };
-                    self.last_assistant_text = Some(next);
-                }
-                self.stream_chunks += 1;
-                self.stream_chars += chunk.chars().count() as u64;
-                self.set_agent_activity(AgentActivity::StreamingResponse);
-                let agent_id = agent_id_for_session(&self.agents, sid);
-                match self.streaming_idx {
-                    Some(i) => {
-                        if let Some(Entry::Assistant { text, .. }) = self.entries.get_mut(i) {
-                            text.push_str(&chunk);
-                        }
-                    }
-                    None => {
-                        self.push(Entry::Assistant {
-                            agent_id,
-                            text: chunk,
-                        });
-                        self.streaming_idx = Some(self.entries.len() - 1);
-                    }
-                }
-            }
-            AgentEvent::AssistantText(text) => {
-                #[cfg(feature = "stylos")]
-                {
-                    self.last_assistant_text = Some(text.clone());
-                }
-                self.streaming_idx = None;
-                self.clear_agent_activity();
-                self.push(Entry::Assistant {
-                    agent_id: agent_id_for_session(&self.agents, sid),
-                    text,
-                });
-            }
-            AgentEvent::ToolStart {
-                name,
-                arguments_json,
-                display_arguments_json,
-            } => {
-                self.streaming_idx = None;
-                let display_args_json =
-                    display_arguments_json.as_deref().unwrap_or(&arguments_json);
-                let (detail, reason) = split_tool_call_detail(&name, display_args_json);
-                let activity_detail = match &reason {
-                    Some(reason) => format!("{detail} — {reason}"),
-                    None => detail.clone(),
-                };
-                self.set_agent_activity(AgentActivity::RunningTool(activity_detail));
-                #[cfg(feature = "stylos")]
-                {
-                    self.last_sender_side_transport_event = self
-                        .local_stylos_instance
-                        .as_deref()
-                        .and_then(|local_instance| {
-                            sender_side_transport_event_from_tool_detail(
-                                &detail,
-                                local_instance,
-                                self.stylos_tool_bridge.is_some(),
-                            )
-                        });
-                }
-                self.push(Entry::ToolCall {
-                    agent_id: agent_id_for_session(&self.agents, sid),
-                    detail,
-                    reason,
-                });
-            }
-            AgentEvent::ToolEnd => {
-                self.push(Entry::ToolDone);
-                #[cfg(feature = "stylos")]
-                if let Some(event) = self.last_sender_side_transport_event.take() {
-                    self.push(Entry::RemoteEvent {
-                        agent_id: event.agent_id,
-                        source: Some(NonAgentSource::Stylos),
-                        text: event.text,
-                    });
-                }
-                self.set_agent_activity(AgentActivity::WaitingAfterTool);
-            }
-            AgentEvent::Status(text) => {
-                self.push(Entry::Status {
-                    agent_id: agent_id_for_session(&self.agents, sid),
-                    source: None,
-                    text,
-                });
-            }
-            AgentEvent::WorkflowStateChanged(state) => {
-                self.workflow_state = state;
-                self.mark_dirty_status();
-                #[cfg(feature = "stylos")]
-                self.refresh_stylos_status();
-            }
-            AgentEvent::Stats(text) => {
-                if let Some(json) = text.strip_prefix("[rate-limit] ") {
-                    if let Ok(report) = serde_json::from_str::<ApiCallRateLimitReport>(json) {
-                        self.status_rate_limits = Some(report);
-                        self.mark_dirty_status();
-                        #[cfg(feature = "stylos")]
-                        self.refresh_stylos_status();
-                    }
-                    return;
-                }
-                self.push(Entry::Stats(text));
-            }
-            AgentEvent::TurnDone(stats) => {
-                #[cfg(feature = "stylos")]
-                {
-                    let agent_index = self.agents.iter().position(|h| h.session_id == sid);
-                    if let Some(agent_index) = agent_index {
-                        self.maybe_emit_done_mention_for_completed_note(agent_index, app_tx);
-                    }
-                    if let (Some(agent_index), Some(handle)) = (agent_index, self.stylos.as_ref()) {
-                        if let Some(remote) = self.agents[agent_index].active_incoming_prompt.take()
-                        {
-                            if let Some(task_id) = remote.task_id {
-                                let result_text = self.last_assistant_text.clone();
-                                publish_stylos_task_completed(
-                                    &self.background_domain,
-                                    handle.query_context(),
-                                    task_id,
-                                    result_text,
-                                );
-                            }
-                        }
-                    }
-                }
-                #[cfg(feature = "stylos")]
-                self.watchdog_state.set_active_incoming_prompt(false);
-                #[cfg(feature = "stylos")]
-                self.watchdog_state.set_pending_watchdog_note(false);
-                self.streaming_idx = None;
-                self.set_agent_activity(AgentActivity::Finishing);
-                self.clear_agent_activity();
-                let interrupted = self.workflow_state.status
-                    == themion_core::workflow::WorkflowStatus::Interrupted;
-                let stats_text = format_stats(&stats);
-                let stats_text = stats_text
-                    .strip_prefix("[stats: ")
-                    .and_then(|s| s.strip_suffix("]"))
-                    .unwrap_or(&stats_text)
-                    .to_string();
-                self.push(Entry::TurnDone {
-                    agent_id: agent_id_for_session(&self.agents, sid),
-                    summary: if interrupted {
-                        "󰇺 Turn interrupted".to_string()
-                    } else {
-                        "󰇺 Turn end".to_string()
-                    },
-                    stats: stats_text,
-                });
-                self.push(Entry::Blank);
-                self.activity_counters.agent_turn_completed_count += 1;
-                self.agent_busy = false;
-                if let Some(last_api_call_tokens_in) = stats.last_api_call_tokens_in {
-                    self.last_ctx_tokens = last_api_call_tokens_in;
-                }
-                self.session_tokens.tokens_in += stats.tokens_in;
-                self.session_tokens.tokens_out += stats.tokens_out;
-                self.session_tokens.tokens_cached += stats.tokens_cached;
-                self.session_tokens.llm_rounds += stats.llm_rounds;
-                self.session_tokens.tool_calls += stats.tool_calls;
-                self.session_tokens.elapsed_ms += stats.elapsed_ms;
-                self.reset_stream_counters();
-                #[cfg(feature = "stylos")]
-                {
-                    self.last_assistant_text = None;
-                }
-            }
-        }
-    }
 
     fn current_runtime_snapshot(&self) -> RuntimeMetricsSnapshot {
         RuntimeMetricsSnapshot {
@@ -1592,7 +1228,7 @@ impl App {
         }
     }
 
-    fn record_runtime_snapshot(&mut self) {
+    pub(crate) fn record_runtime_snapshot(&mut self) {
         let snapshot = self.current_runtime_snapshot();
         self.recent_runtime_snapshots.push_back(snapshot);
         while self.recent_runtime_snapshots.len() > 16 {
@@ -1600,7 +1236,7 @@ impl App {
         }
     }
 
-    fn recent_runtime_delta(&self) -> Option<TimedRuntimeDelta> {
+    pub(crate) fn recent_runtime_delta(&self) -> Option<TimedRuntimeDelta> {
         let latest = *self.recent_runtime_snapshots.back()?;
         let earliest = *self.recent_runtime_snapshots.front()?;
         if latest.at_ms <= earliest.at_ms {
@@ -1615,35 +1251,19 @@ impl App {
         })
     }
 
-    fn refresh_main_agent_system_inspection(&mut self) {
-        let debug_runtime_lines = self.debug_runtime_lines();
-        let activity_status = self.activity_status_value();
-        let recent_window_ms = self.recent_runtime_delta().map(|recent| recent.wall_elapsed_ms);
-        let uptime_ms = self.process_started_at.elapsed().as_millis() as u64;
-        refresh_interactive_agent_system_inspection_from_runtime(
-            &mut self.agents,
-            SystemInspectionRuntimeRefreshState {
-                session: &self.session,
-                project_dir: &self.project_dir,
-                workflow_state: &self.workflow_state,
-                rate_limits: self.status_rate_limits.as_ref(),
-                activity: self.agent_activity.as_ref(),
-                stream_chunks: self.stream_chunks,
-                stream_chars: self.stream_chars,
-                agent_busy: self.agent_busy,
-                activity_status,
-                activity_status_changed_at_ms: self
-                    .agent_activity_changed_at
-                    .or(self.idle_status_changed_at),
-                process_started_at_ms: self.process_started_at_ms,
-                uptime_ms,
-                recent_window_ms,
-                debug_runtime_lines,
-            },
-        );
+    #[cfg(feature = "stylos")]
+    pub(crate) fn stylos_status_value(&self) -> String {
+        match self.stylos.as_ref().map(|h| h.state()) {
+            Some(StylosRuntimeState::Off) => "off".to_string(),
+            Some(StylosRuntimeState::Active { mode, realm, instance }) => {
+                format!("active mode={} realm={} instance={}", mode, realm, instance)
+            }
+            Some(StylosRuntimeState::Error(err)) => format!("error {}", err),
+            None => "off".to_string(),
+        }
     }
 
-    fn debug_runtime_lines(&self) -> Vec<String> {
+    pub(crate) fn debug_runtime_lines(&self) -> Vec<String> {
         let mut out = Vec::new();
         let now_ms = unix_epoch_now_ms();
         let uptime_ms = self.process_started_at.elapsed().as_millis() as u64;
@@ -1733,189 +1353,6 @@ impl App {
     }
 
 
-    fn handle_runtime_command(
-        &mut self,
-        command: RuntimeCommand,
-        app_tx: &mpsc::UnboundedSender<AppEvent>,
-    ) {
-        match command {
-            RuntimeCommand::LoginCodex { profile_name } => {
-                if self.agent_busy {
-                    self.push(Entry::Assistant {
-                        agent_id: None,
-                        text: "busy, please wait".to_string(),
-                    });
-                    self.push(Entry::Blank);
-                    self.mark_dirty_all();
-                    return;
-                }
-                self.agent_busy = true;
-                self.set_agent_activity(AgentActivity::LoginStarting);
-                let target_profile = profile_name.clone().unwrap_or_else(|| {
-                    if self
-                        .session
-                        .profiles
-                        .get(&self.session.active_profile)
-                        .is_some_and(|profile| profile.provider.as_deref() == Some("openai-codex"))
-                    {
-                        self.session.active_profile.clone()
-                    } else {
-                        "codex".to_string()
-                    }
-                });
-                let login_message = if profile_name.is_some() {
-                    format!("logging in to OpenAI Codex for profile '{}'…", target_profile)
-                } else if target_profile == self.session.active_profile {
-                    format!("logging in to OpenAI Codex for current profile '{}'…", target_profile)
-                } else {
-                    format!("logging in to OpenAI Codex for profile '{}'…", target_profile)
-                };
-                self.push(Entry::Assistant {
-                    agent_id: None,
-                    text: login_message,
-                });
-                let tx = app_tx.clone();
-                self.background_domain().spawn(async move {
-                    match crate::login_codex::start_device_flow().await {
-                        Err(e) => {
-                            tx.send(AppEvent::LoginComplete { profile_name: target_profile.clone(), auth_result: Err(e) }).ok();
-                        }
-                        Ok((info, poll)) => {
-                            tx.send(AppEvent::LoginPrompt {
-                                user_code: info.user_code,
-                                verification_uri: info.verification_uri,
-                            })
-                            .ok();
-                            let result = poll.await;
-                            tx.send(AppEvent::LoginComplete { profile_name: target_profile.clone(), auth_result: result }).ok();
-                        }
-                    }
-                });
-                self.mark_dirty_all();
-            }
-            RuntimeCommand::SemanticMemoryIndex { full } => {
-                #[cfg(not(feature = "semantic-memory"))]
-                {
-                    let mode = if full { "full reindex" } else { "index" };
-                    self.push(Entry::Assistant {
-                        agent_id: None,
-                        text: format!(
-                            "semantic-memory {} is unavailable in this build; enable the semantic-memory feature",
-                            mode
-                        ),
-                    });
-                    self.push(Entry::Blank);
-                    self.mark_dirty_all();
-                }
-                #[cfg(feature = "semantic-memory")]
-                {
-                    if self.agent_busy {
-                        self.push(Entry::Assistant {
-                            agent_id: None,
-                            text: "busy, please wait".to_string(),
-                        });
-                        self.push(Entry::Blank);
-                        self.mark_dirty_all();
-                        return;
-                    }
-                    self.agent_busy = true;
-                    self.set_agent_activity(AgentActivity::RunningTool(if full {
-                        "semantic-memory full reindex".to_string()
-                    } else {
-                        "semantic-memory index pending".to_string()
-                    }));
-                    self.push(Entry::Assistant {
-                        agent_id: None,
-                        text: if full {
-                            "rebuilding all stale or missing Project Memory semantic embeddings…"
-                                .to_string()
-                        } else {
-                            "indexing missing or pending Project Memory semantic embeddings…"
-                                .to_string()
-                        },
-                    });
-                    let tx = app_tx.clone();
-                    let db = self.db.clone();
-                    self.background_domain().spawn(async move {
-                        let result = tokio::task::spawn_blocking(move || {
-                            db.memory_store().index_pending_embeddings(full)
-                        })
-                        .await;
-                        let text = match result {
-                            Ok(Ok(report)) => serde_json::to_string_pretty(&report)
-                                .unwrap_or_else(|err| {
-                                    format!("indexing report serialization failed: {}", err)
-                                }),
-                            Ok(Err(err)) => {
-                                if full {
-                                    format!("semantic-memory full reindex failed: {}", err)
-                                } else {
-                                    format!("semantic-memory indexing failed: {}", err)
-                                }
-                            }
-                            Err(err) => {
-                                if full {
-                                    format!("semantic-memory full reindex task failed: {}", err)
-                                } else {
-                                    format!("semantic-memory indexing task failed: {}", err)
-                                }
-                            }
-                        };
-                        let _ = tx.send(AppEvent::ShellComplete {
-                            output: text,
-                            exit_code: Some(0),
-                        });
-                    });
-                    self.mark_dirty_all();
-                }
-            }
-            RuntimeCommand::SessionProfileUse { .. }
-            | RuntimeCommand::SessionModelUse { .. }
-            | RuntimeCommand::SessionReset
-            | RuntimeCommand::ConfigProfileUse { .. }
-            | RuntimeCommand::ConfigProfileCreate { .. }
-            | RuntimeCommand::ConfigProfileSet { .. }
-            | RuntimeCommand::SetApiLogEnabled { .. }
-            | RuntimeCommand::ClearContext => {
-                let outcome = execute_runtime_command(
-                    command,
-                    RuntimeCommandContext {
-                        session: &mut self.session,
-                        project_dir: &self.project_dir,
-                        db: &self.db,
-                        #[cfg(feature = "stylos")]
-                        stylos_tool_bridge: self.stylos_tool_bridge.clone(),
-                        #[cfg(feature = "stylos")]
-                        local_stylos_instance: self.local_stylos_instance.as_deref(),
-                        api_log_enabled: self.api_log_enabled,
-                        local_agent_mgmt_tx: self.local_agent_mgmt_tx.clone(),
-                    },
-                );
-                let application = apply_runtime_command_outcome_to_app_runtime(
-                    &mut self.agents,
-                    &mut self.status_model_info,
-                    &mut self.workflow_state,
-                    &mut self.api_log_enabled,
-                    &mut self.last_ctx_tokens,
-                    outcome,
-                );
-                #[cfg(feature = "stylos")]
-                if application.had_effect {
-                    self.refresh_stylos_status();
-                }
-                for line in application.output_lines {
-                    self.push(Entry::Assistant {
-                        agent_id: None,
-                        text: line,
-                    });
-                }
-                if application.had_effect {
-                    self.push(Entry::Blank);
-                    self.mark_dirty_all();
-                }
-            }
-        }
-    }
 
     fn handle_command(
         &mut self,
@@ -2247,7 +1684,7 @@ impl App {
         }
     }
 
-    fn submit_shell_command(&mut self, command: &str, app_tx: &mpsc::UnboundedSender<AppEvent>) {
+    fn submit_shell_command(&mut self, command: &str) {
         let command = command.trim_start().to_string();
         self.push(Entry::User(format!("!{}", command)));
 
@@ -2263,7 +1700,7 @@ impl App {
         self.agent_busy = true;
         self.set_agent_activity(AgentActivity::RunningShellCommand);
 
-        let tx = app_tx.clone();
+        let tx = self.runtime_tx.clone();
         let project_dir = self.project_dir.clone();
         self.background_domain().spawn(async move {
             let result = Command::new("sh")
@@ -2289,15 +1726,15 @@ impl App {
                 Err(e) => (format!("failed to run shell command: {}", e), None),
             };
 
-            let _ = tx.send(AppEvent::ShellComplete { output, exit_code });
+            let _ = tx.send(AppRuntimeEvent::ShellComplete { output, exit_code });
         });
     }
 
-    fn submit_text_to_agent(
+    pub(crate) fn submit_text_to_agent(
         &mut self,
         agent_index: usize,
         text: String,
-        app_tx: &mpsc::UnboundedSender<AppEvent>,
+        _app_tx: &mpsc::UnboundedSender<AppEvent>,
     ) {
         self.activity_counters.agent_turn_started_count += 1;
         self.agent_busy = true;
@@ -2309,12 +1746,12 @@ impl App {
         launch_agent_turn_runtime(
             &self.background_domain(),
             &self.core_domain,
-            app_tx.clone(),
+            self.runtime_tx.clone(),
             text,
             runtime_launch,
         );
     }
-    fn submit_text(&mut self, text: String, app_tx: &mpsc::UnboundedSender<AppEvent>) {
+    pub(crate) fn submit_text(&mut self, text: String, app_tx: &mpsc::UnboundedSender<AppEvent>) {
         let text = text.trim().to_string();
         if text.is_empty() {
             return;
@@ -2328,7 +1765,7 @@ impl App {
         }
 
         if let Some(command) = text.strip_prefix('!') {
-            self.submit_shell_command(command, app_tx);
+            self.submit_shell_command(command);
             return;
         }
 
@@ -2347,50 +1784,10 @@ impl App {
         }
 
         #[cfg(feature = "stylos")]
-        let active_request = self
-            .agents
-            .iter()
-            .find_map(|h| h.active_incoming_prompt.as_ref());
-        #[cfg(feature = "stylos")]
-        let resolution = resolve_submit_target(
-            &build_local_agent_status_entries(&self.agents),
-            active_request,
-        );
-        #[cfg(feature = "stylos")]
-        let agent_index = match resolution {
-            crate::app_runtime::SubmitTargetResolution::Interactive { agent_index }
-            | crate::app_runtime::SubmitTargetResolution::IncomingPromptTarget { agent_index } => {
-                agent_index
-            }
-            crate::app_runtime::SubmitTargetResolution::MissingIncomingPromptTarget {
-                active_agent_index,
-                ..
-            } => {
-                let effect = submit_target_failure_effect(&resolution)
-                    .expect("missing target resolution has failure effect");
-                self.push(Entry::RemoteEvent {
-                    agent_id: None,
-                    source: Some(NonAgentSource::Board),
-                    text: effect.log_text,
-                });
-                if let (Some(handle), Some(task_id)) =
-                    (self.stylos.as_ref(), effect.failed_task_id)
-                {
-                    publish_stylos_task_failed(
-                        &self.background_domain,
-                        handle.query_context(),
-                        task_id,
-                        effect.failure_reason.to_string(),
-                    );
-                }
-                clear_active_incoming_prompt(
-                    &mut self.agents,
-                    &self.watchdog_state,
-                    active_agent_index,
-                );
-                return;
-            }
-        };
+        {
+            crate::app_state::resolve_and_submit_text(self, text, app_tx);
+            return;
+        }
         #[cfg(not(feature = "stylos"))]
         let agent_index = {
             self.agents
@@ -2399,100 +1796,11 @@ impl App {
                 .expect("interactive agent")
         };
 
-        #[cfg(feature = "stylos")]
-        if self.agents[agent_index].active_incoming_prompt.is_none() {
-            self.push(Entry::User(text.clone()));
-        }
         #[cfg(not(feature = "stylos"))]
         self.push(Entry::User(text.clone()));
 
+        #[cfg(not(feature = "stylos"))]
         self.submit_text_to_agent(agent_index, text, app_tx);
-    }
-
-    #[cfg(feature = "stylos")]
-    fn handle_watchdog_poll(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) {
-        let plan = plan_watchdog_dispatch(
-            &build_local_agent_status_entries(&self.agents),
-            &self.db,
-            &self.board_claims,
-            self.local_stylos_instance.as_deref(),
-        );
-        let apply_plan = match watchdog_dispatch_apply_plan(plan) {
-            Ok(apply_plan) => apply_plan,
-            Err(pending_watchdog_note) => {
-                self.watchdog_state
-                    .set_pending_watchdog_note(pending_watchdog_note);
-                return;
-            }
-        };
-        self.watchdog_state
-            .set_pending_watchdog_note(apply_plan.pending_watchdog_note);
-        let effect = watchdog_dispatch_effect(&apply_plan);
-        finalize_board_note_injection(&self.db, &self.board_claims, &effect.note_id);
-        let log_agent_id = effect.log_agent_id.clone();
-        self.push(Entry::RemoteEvent {
-            agent_id: effect.log_agent_id,
-            source: if log_agent_id.is_some() { None } else { Some(NonAgentSource::Watchdog) },
-            text: effect.log_text,
-        });
-        apply_active_incoming_prompt(
-            &mut self.agents,
-            &self.watchdog_state,
-            apply_plan.agent_index,
-            apply_plan.action.request.clone(),
-            apply_plan.pending_watchdog_note,
-        );
-        self.submit_text_to_agent(apply_plan.agent_index, effect.prompt, app_tx);
-    }
-
-    #[cfg(feature = "stylos")]
-    fn maybe_emit_done_mention_for_completed_note(
-        &mut self,
-        agent_index: usize,
-        app_tx: &mpsc::UnboundedSender<AppEvent>,
-    ) -> bool {
-        let Some(remote) = self.agents[agent_index]
-            .active_incoming_prompt
-            .as_ref()
-            .cloned()
-        else {
-            return false;
-        };
-        let apply_plan = completed_note_follow_up_apply_plan(plan_completed_note_follow_up(
-            &self.db,
-            &remote,
-        ));
-        if let (Some(request), Some(prompt)) = (
-            apply_plan.continue_request,
-            apply_plan.continue_prompt,
-        ) {
-            continue_current_note_follow_up(
-                &mut self.agents,
-                &self.watchdog_state,
-                agent_index,
-                request,
-            );
-            self.submit_text(prompt, app_tx);
-            return true;
-        }
-        match apply_plan.emission {
-            Some(crate::app_runtime::CompletedNoteFollowUpEmission::RemoteEvent { text }) => {
-                self.push(Entry::RemoteEvent {
-                    agent_id: None,
-                    source: Some(NonAgentSource::Board),
-                    text,
-                });
-            }
-            Some(crate::app_runtime::CompletedNoteFollowUpEmission::Status { text }) => {
-                self.push(Entry::Status {
-                    agent_id: None,
-                    source: Some(NonAgentSource::Board),
-                    text,
-                });
-            }
-            None => return false,
-        }
-        false
     }
 
     fn submit_input(&mut self, app_tx: &mpsc::UnboundedSender<AppEvent>) -> bool {
@@ -2541,25 +1849,6 @@ impl App {
         }
     }
 
-    pub(crate) fn handle_agent_ready_event(
-        &mut self,
-        agent: Box<Agent>,
-        sid: Uuid,
-        frame_requester: &FrameRequester,
-    ) {
-        let agent = *agent;
-        apply_agent_ready_update(
-            &mut self.agents,
-            &mut self.status_model_info,
-            &mut self.workflow_state,
-            sid,
-            agent,
-        );
-        self.agent_busy = self.any_agent_busy();
-        self.mark_dirty_status();
-        self.request_draw(frame_requester);
-    }
-
     pub(crate) fn handle_login_prompt_event(
         &mut self,
         user_code: String,
@@ -2591,28 +1880,13 @@ impl App {
                 #[cfg(not(feature = "stylos"))]
                 self.handle_tick_event(frame_requester);
             }
+            AppEvent::SnapshotUpdated(snapshot) => {
+                self.app_snapshot = snapshot;
+                self.mark_dirty_all();
+                self.request_draw(frame_requester);
+            }
             AppEvent::RuntimeCommand(command) => {
-                self.handle_runtime_command(command, app_tx);
-                if self.dirty.any() {
-                    self.request_draw(frame_requester);
-                }
-            }
-            #[cfg(feature = "stylos")]
-            AppEvent::StylosCmd(cmd) => self.handle_stylos_cmd_event(cmd, app_tx),
-            #[cfg(feature = "stylos")]
-            AppEvent::StylosEvent(text) => self.handle_stylos_event_text(text),
-            #[cfg(feature = "stylos")]
-            AppEvent::IncomingPrompt(request) => self.handle_incoming_prompt_event(request, app_tx),
-            #[cfg(feature = "stylos")]
-            AppEvent::Agent(sid, ev) => {
-                self.handle_agent_event_for_run(sid, ev, frame_requester, app_tx)
-            }
-            #[cfg(feature = "stylos")]
-            AppEvent::WatchdogPoll => self.handle_watchdog_poll(app_tx),
-            #[cfg(not(feature = "stylos"))]
-            AppEvent::Agent(sid, ev) => self.handle_agent_event_for_run(sid, ev, frame_requester),
-            AppEvent::AgentReady(agent, sid) => {
-                self.handle_agent_ready_event(agent, sid, frame_requester);
+                crate::app_state::handle_runtime_command(self, command, frame_requester, app_tx);
             }
             AppEvent::LoginPrompt {
                 user_code,
@@ -2623,9 +1897,6 @@ impl App {
             AppEvent::LoginComplete { profile_name, auth_result } => {
                 self.handle_login_complete_event(profile_name, auth_result, frame_requester)
                     .await;
-            }
-            AppEvent::ShellComplete { output, exit_code } => {
-                self.handle_shell_complete_event(output, exit_code, frame_requester);
             }
             AppEvent::LocalAgentManagement(request) => {
                 self.handle_local_agent_management_request(request, frame_requester);
@@ -2710,25 +1981,6 @@ impl App {
         }
     }
 
-    pub(crate) fn handle_agent_event_for_run(
-        &mut self,
-        sid: Uuid,
-        ev: AgentEvent,
-        frame_requester: &FrameRequester,
-        #[cfg(feature = "stylos")] app_tx: &mpsc::UnboundedSender<AppEvent>,
-    ) {
-        self.activity_counters.agent_event_count += 1;
-        self.process_agent_event(
-            sid,
-            ev,
-            #[cfg(feature = "stylos")]
-            app_tx,
-        );
-        if self.dirty.any() {
-            self.request_draw(frame_requester);
-        }
-    }
-
     pub(crate) fn handle_draw_event(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
@@ -2745,118 +1997,6 @@ impl App {
             self.activity_counters.draw_skip_clean_count += 1;
         }
         Ok(())
-    }
-
-    pub(crate) fn handle_shell_complete_event(
-        &mut self,
-        output: String,
-        exit_code: Option<i32>,
-        frame_requester: &FrameRequester,
-    ) {
-        self.activity_counters.shell_complete_count += 1;
-        #[cfg(feature = "stylos")]
-        self.watchdog_state.set_active_incoming_prompt(false);
-        #[cfg(feature = "stylos")]
-        self.watchdog_state.set_pending_watchdog_note(false);
-        self.clear_agent_activity();
-        self.push(Entry::Assistant {
-            agent_id: None,
-            text: output,
-        });
-        if let Some(code) = exit_code {
-            if code != 0 {
-                self.push(Entry::Assistant {
-                    agent_id: None,
-                    text: format!("exit code: {}", code),
-                });
-            }
-        }
-        self.push(Entry::Blank);
-        self.mark_dirty_all();
-        self.request_draw(frame_requester);
-    }
-
-    #[cfg(feature = "stylos")]
-    pub(crate) fn handle_stylos_cmd_event(
-        &mut self,
-        cmd: crate::stylos::StylosCmdRequest,
-        app_tx: &mpsc::UnboundedSender<AppEvent>,
-    ) {
-        self.push(Entry::RemoteEvent {
-            agent_id: self
-                .agents
-                .iter()
-                .find(|h| is_interactive_agent_handle(h))
-                .map(|h| h.agent_id.clone()),
-            source: None,
-            text: format!(
-                "Stylos cmd scope=local preview={}",
-                cmd.prompt.lines().next().unwrap_or("")
-            ),
-        });
-        if let Some(index) = self.agents.iter().position(is_interactive_agent_handle) {
-            clear_active_incoming_prompt(&mut self.agents, &self.watchdog_state, index);
-        }
-        self.submit_text(cmd.prompt, app_tx);
-    }
-
-    #[cfg(feature = "stylos")]
-    pub(crate) fn handle_stylos_event_text(&mut self, text: String) {
-        self.push(Entry::RemoteEvent {
-            agent_id: None,
-            source: Some(NonAgentSource::Stylos),
-            text,
-        });
-    }
-
-    #[cfg(feature = "stylos")]
-    pub(crate) fn handle_incoming_prompt_event(
-        &mut self,
-        request: IncomingPromptRequest,
-        app_tx: &mpsc::UnboundedSender<AppEvent>,
-    ) {
-        self.activity_counters.incoming_prompt_count += 1;
-        let outcome = plan_incoming_prompt(
-            &build_local_agent_status_entries(&self.agents),
-            &self.board_claims,
-            request,
-        );
-        self.push(Entry::RemoteEvent {
-            agent_id: outcome.log_agent_id.clone(),
-            source: if outcome.log_agent_id.is_some() { None } else { Some(NonAgentSource::Stylos) },
-            text: outcome.log_text.clone(),
-        });
-        let apply_plan = match incoming_prompt_apply_plan(outcome) {
-            Ok(apply_plan) => apply_plan,
-            Err(outcome) => {
-                if let Some(task_failure) = outcome.task_failure {
-                    if let (Some(handle), Some((task_id, reason))) = (
-                        self.stylos.as_ref(),
-                        task_failure.split_once(':'),
-                    ) {
-                        publish_stylos_task_failed(
-                            &self.background_domain,
-                            handle.query_context(),
-                            task_id.to_string(),
-                            reason.to_string(),
-                        );
-                    }
-                }
-                return;
-            }
-        };
-        apply_active_incoming_prompt(
-            &mut self.agents,
-            &self.watchdog_state,
-            apply_plan.accepted_agent_index,
-            apply_plan.accepted_request,
-            apply_plan.pending_watchdog_note,
-        );
-        self.submit_text_to_agent(
-            apply_plan.accepted_agent_index,
-            apply_plan.accepted_prompt,
-            app_tx,
-        );
     }
 
     pub(crate) fn handle_key_event(
@@ -3422,14 +2562,11 @@ fn build_watchdog_review_lines(app: &App) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     #[cfg(feature = "stylos")]
     {
-        let stylos_state = match app.stylos.as_ref().map(|h| h.state()) {
-            Some(StylosRuntimeState::Off) => "off".to_string(),
-            Some(StylosRuntimeState::Active { mode, realm, instance }) => {
-                format!("active mode={} realm={} instance={}", mode, realm, instance)
-            }
-            Some(StylosRuntimeState::Error(err)) => format!("error {}", err),
-            None => "off".to_string(),
-        };
+        let snapshot = app.app_snapshot.clone();
+        let stylos_state = snapshot
+            .stylos_status
+            .clone()
+            .unwrap_or_else(|| "off".to_string());
         lines.push(Line::from(vec![Span::styled(
             "watchdog",
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
@@ -3437,18 +2574,15 @@ fn build_watchdog_review_lines(app: &App) -> Vec<Line<'static>> {
         lines.push(Line::from(format!("stylos: {}", stylos_state)));
         lines.push(Line::from(format!(
             "pending_watchdog_note: {}",
-            app.watchdog_state.pending_watchdog_note()
+            snapshot.pending_watchdog_note
         )));
         lines.push(Line::from(format!(
             "active_incoming_prompts: {}",
-            app.agents
-                .iter()
-                .filter(|handle| handle.active_incoming_prompt.is_some())
-                .count()
+            snapshot.active_incoming_prompt_count
         )));
         lines.push(Line::from(format!(
             "aggregate_busy: {}",
-            app.agents.iter().any(|handle| handle.busy)
+            snapshot.aggregate_busy_agents
         )));
         lines.push(Line::from(""));
     }
@@ -3456,19 +2590,15 @@ fn build_watchdog_review_lines(app: &App) -> Vec<Line<'static>> {
         "local agents",
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
     )]));
-    for handle in &app.agents {
-        let roles = if handle.roles.is_empty() {
+    for agent in &app.app_snapshot.local_agents {
+        let roles = if agent.roles.is_empty() {
             "-".to_string()
         } else {
-            handle.roles.join(",")
+            agent.roles.join(",")
         };
-        #[cfg(feature = "stylos")]
-        let incoming = handle.active_incoming_prompt.is_some();
-        #[cfg(not(feature = "stylos"))]
-        let incoming = false;
         lines.push(Line::from(format!(
             "{} | label={} | roles={} | busy={} | incoming={}",
-            handle.agent_id, handle.label, roles, handle.busy, incoming
+            agent.agent_id, agent.label, roles, agent.busy, agent.incoming
         )));
     }
     lines.push(Line::from(""));
@@ -3476,7 +2606,7 @@ fn build_watchdog_review_lines(app: &App) -> Vec<Line<'static>> {
     lines
 }
 
-fn unix_epoch_now_ms() -> u64 {
+pub(crate) fn unix_epoch_now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
