@@ -801,9 +801,10 @@ pub(crate) fn handle_runtime_command(
             });
             app.mark_dirty_all();
         }
-        crate::app_runtime::RuntimeCommand::UnifiedSearchIndex { full } => {
+        crate::app_runtime::RuntimeCommand::UnifiedSearchIndex { full, source_kind } => {
             #[cfg(not(feature = "semantic-memory"))]
             {
+                let _ = &source_kind;
                 let mode = if full { "full reindex" } else { "index" };
                 app.push(Entry::Assistant {
                     agent_id: None,
@@ -827,17 +828,19 @@ pub(crate) fn handle_runtime_command(
                     return;
                 }
                 app.runtime.agent_busy = true;
+                let scope_suffix = source_kind.as_deref().map(|kind| format!(" ({})", kind)).unwrap_or_default();
                 set_agent_activity(app, AgentActivity::RunningTool(if full {
-                    "unified-search full reindex".to_string()
+                    format!("unified-search full reindex{}", scope_suffix)
                 } else {
-                    "unified-search index pending".to_string()
+                    format!("unified-search index pending{}", scope_suffix)
                 }));
                 app.push(Entry::Assistant {
                     agent_id: None,
-                    text: if full {
-                        "rebuilding generalized unified-search index for this project…".to_string()
-                    } else {
-                        "refreshing generalized unified-search index for this project…".to_string()
+                    text: match (full, source_kind.as_deref()) {
+                        (true, Some(kind)) => format!("rebuilding generalized unified-search index for source kind '{}' in this project…", kind),
+                        (false, Some(kind)) => format!("refreshing generalized unified-search index for source kind '{}' in this project…", kind),
+                        (true, None) => "rebuilding generalized unified-search index for this project…".to_string(),
+                        (false, None) => "refreshing generalized unified-search index for this project…".to_string(),
                     },
                 });
                 let tx = app.runtime.runtime_tx.clone();
@@ -845,7 +848,7 @@ pub(crate) fn handle_runtime_command(
                 let project_dir = app.runtime.project_dir.display().to_string();
                 app.runtime.background_domain().spawn(async move {
                     let result = tokio::task::spawn_blocking(move || {
-                        db.memory_store().rebuild_unified_search_index(Some(&project_dir), None, full)
+                        db.memory_store().rebuild_unified_search_index(Some(&project_dir), source_kind.as_deref(), full)
                     })
                     .await;
                     let text = match result {

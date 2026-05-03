@@ -104,5 +104,5 @@ Active and recent product requirements documents live in `docs/prd/`. Older impl
 | PRD-089 | [Multi-Column Board Note Queries](prd/prd-089-multi-column-board-note-queries.md) | Implemented | v0.57.0 | `themion-core`, `themion-cli`, docs |
 | PRD-090 | [Agent Role Defaults and Role Instruction Guidance](prd/prd-090-agent-role-defaults-and-role-instruction-guidance.md) | Implemented | v0.58.0 | `themion-core`, `themion-cli`, docs |
 | PRD-091 | [Generalized Multi-Source Chunked Semantic Search](prd/prd-091-generalized-multi-source-chunked-semantic-search.md) | Implemented | v0.59.0 | `themion-core`, `themion-cli`, docs |
-| PRD-092 | [Slash Command for Source-Kind-Scoped Unified-Search Indexing](prd/prd-092-source-kind-scoped-unified-search-index-command.md) | Draft | >v0.59.0 +minor | `themion-cli`, `themion-core`, docs |
-| PRD-093 | [Remove `history_search` and Make `unified_search` the Canonical Search Tool](prd/prd-093-remove-history-search-and-canonicalize-unified-search.md) | Draft | >v0.59.0 +minor | `themion-core`, `themion-cli`, docs |
+| PRD-092 | [Slash Command for Source-Kind-Scoped Unified-Search Indexing](prd/prd-092-source-kind-scoped-unified-search-index-command.md) | Implemented | v0.59.1 | `themion-cli`, `themion-core`, docs |
+| PRD-093 | [Remove `history_search` and Make `unified_search` the Canonical Search Tool](prd/prd-093-remove-history-search-and-canonicalize-unified-search.md) | Implemented | v0.59.1 | `themion-core`, `themion-cli`, docs |

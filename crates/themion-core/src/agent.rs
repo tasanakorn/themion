@@ -986,7 +986,7 @@ impl Agent {
             let recall_hint = vec![Message {
                 role: "system".to_string(),
                 content: Some(format!(
-                    "Note: {} earlier turn(s) are stored in history. Use history_recall or history_search without session_id for the current session, or pass session_id=\"*\" to search across all sessions in the current project.",
+                    "Note: {} earlier turn(s) are stored in history. Use history_recall for chronological retrieval, or use unified_search with source_kinds=[\"chat_message\"] for transcript search across the current project.",
                     omitted_turns
                 )),
                 tool_calls: None,

@@ -137,8 +137,8 @@ fn print_usage(program_name: &str) {
   {0}                                Start TUI mode
   {0} --headless                     Start long-running headless mode
   {0} [--dir PATH] PROMPT            Run one non-interactive prompt
-  {0} --command unified-search index [--full] [--dir PATH]
-                                    Build or rebuild generalized unified-search indexes for the selected project
+  {0} --command unified-search index [--full] [--source-kind KIND] [--dir PATH]
+                                    Build or rebuild generalized unified-search indexes for the selected project or one source kind
   {0} --help                         Show this help
 
 Options:
@@ -146,6 +146,7 @@ Options:
   --headless    Start explicit long-running non-TUI mode
   --command     Run an explicit non-prompt CLI command
   --full        Rebuild generalized unified-search indexes for the selected project
+  --source-kind Limit unified-search indexing to one source kind: memory, chat_message, tool_call, or tool_result
   --help        Show this help",
         program_name
     );
@@ -194,17 +195,18 @@ fn main() -> anyhow::Result<()> {
         if headless_mode {
             anyhow::bail!("--command cannot be combined with --headless");
         }
-        if let Some((force_full, rest_after_command)) =
+        if let Some((force_full, source_kind, rest_after_command)) =
             parse_unified_search_index_command(&remaining_args)
         {
             if !rest_after_command.is_empty() {
                 anyhow::bail!(
-                    "unified-search index does not accept extra arguments beyond --full"
+                    "unified-search index does not accept extra arguments beyond --full and --source-kind <kind>"
                 );
             }
             #[cfg(not(feature = "semantic-memory"))]
             {
                 let _ = force_full;
+                let _ = &source_kind;
                 anyhow::bail!(
                     "unified-search index requires building themion-cli with the semantic-memory feature"
                 );
@@ -219,11 +221,12 @@ fn main() -> anyhow::Result<()> {
                     .block_on(headless_runner::run_unified_search_index(
                         app_runtime,
                         force_full,
+                        source_kind,
                     ));
             }
         }
         anyhow::bail!(
-            "unknown command '{}'. Use --command unified-search index [--full]",
+            "unknown command '{}'. Use --command unified-search index [--full] [--source-kind <kind>]",
             remaining_args.join(" ")
         );
     }
@@ -259,21 +262,43 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn parse_unified_search_index_command(args: &[String]) -> Option<(bool, Vec<String>)> {
+fn is_valid_unified_search_source_kind(value: &str) -> bool {
+    matches!(value, "memory" | "chat_message" | "tool_call" | "tool_result")
+}
+
+fn parse_unified_search_index_command(args: &[String]) -> Option<(bool, Option<String>, Vec<String>)> {
     let [domain, command, rest @ ..] = args else {
         return None;
     };
-    if domain != "semantic-memory" || command != "index" {
+    if domain != "unified-search" || command != "index" {
         return None;
     }
     let mut force_full = false;
+    let mut source_kind: Option<String> = None;
     let mut trailing = Vec::new();
-    for arg in rest {
-        if arg == "--full" {
+    let mut i = 0;
+    while i < rest.len() {
+        if rest[i] == "--full" {
             force_full = true;
+            i += 1;
+        } else if rest[i] == "--source-kind" {
+            i += 1;
+            if i >= rest.len() {
+                trailing.push("--source-kind".to_string());
+                break;
+            }
+            let value = rest[i].clone();
+            if !is_valid_unified_search_source_kind(&value) || source_kind.is_some() {
+                trailing.push("--source-kind".to_string());
+                trailing.push(value);
+            } else {
+                source_kind = Some(value);
+            }
+            i += 1;
         } else {
-            trailing.push(arg.clone());
+            trailing.push(rest[i].clone());
+            i += 1;
         }
     }
-    Some((force_full, trailing))
+    Some((force_full, source_kind, trailing))
 }

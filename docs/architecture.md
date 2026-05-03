@@ -90,7 +90,7 @@ tools.rs
   │    ├─ shell_run_command  ──► resolves the user shell, prefers Unix login-shell execution (`-lc`), and falls back to `sh` or platform default shell behavior when needed
   │    ├─ time_sleep  ──► bounded non-shell wait for short sleeps
   │    ├─ history_recall  ──► ctx.db.recall(RecallArgs)
-  │    ├─ history_search  ──► ctx.db.search(SearchArgs)
+  │    ├─ unified_search  ──► generalized indexed retrieval across memory/chat/tool records
   │    ├─ system_inspect_local ──► local runtime/tool/provider readiness snapshot
   │    ├─ local_agent_create / local_agent_delete ──► CLI-owned local team roster mutation within the current instance
   │    ├─ board_*  ──► local durable notes board operations

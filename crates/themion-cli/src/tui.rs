@@ -383,7 +383,6 @@ pub(crate) fn split_tool_call_detail(name: &str, args_json: &str) -> (String, Op
             ),
             None,
         ),
-        "history_search" | "search_history" => (format!("history_search: {}", t("query")), None),
         "workflow_get_state" | "get_workflow_state" => ("workflow: inspect".to_string(), None),
         "workflow_set_active" | "set_workflow" => {
             (format!("workflow: set {}", t("workflow")), None)
@@ -1105,19 +1104,34 @@ impl App {
             )];
         }
 
-        if input == "/unified-search index" || input == "/unified-search reindex" {
+        if let Some(rest) = input
+            .strip_prefix("/unified-search index")
+            .or_else(|| input.strip_prefix("/unified-search reindex"))
+        {
+            let rest = rest.trim();
+            let (full, source_kind) = if rest.is_empty() {
+                (false, None)
+            } else if rest == "full" {
+                (true, None)
+            } else if let Some(kind) = rest.strip_prefix("full ") {
+                (true, Some(kind.trim().to_string()))
+            } else {
+                (false, Some(rest.to_string()))
+            };
+            let valid = source_kind
+                .as_deref()
+                .map(|v| matches!(v, "memory" | "chat_message" | "tool_call" | "tool_result"))
+                .unwrap_or(true);
+            if !valid || source_kind.as_deref().is_some_and(|v| v.contains(' ')) {
+                return vec![
+                    "usage: /unified-search index [full] [memory|chat_message|tool_call|tool_result]"
+                        .to_string(),
+                ];
+            }
             app_tx
                 .send(AppEvent::RuntimeCommand(RuntimeCommand::UnifiedSearchIndex {
-                    full: false,
-                }))
-                .ok();
-            return out;
-        }
-
-        if input == "/unified-search index full" || input == "/unified-search reindex full" {
-            app_tx
-                .send(AppEvent::RuntimeCommand(RuntimeCommand::UnifiedSearchIndex {
-                    full: true,
+                    full,
+                    source_kind,
                 }))
                 .ok();
             return out;
@@ -1215,8 +1229,8 @@ impl App {
                     out.push("  /context                         show prompt-budget and history replay breakdown".to_string());
                     out.push("  /debug api-log enable            enable per-round API call logging for this session".to_string());
                     out.push("  /debug api-log disable           disable per-round API call logging for this session".to_string());
-                    out.push("  /unified-search index           refresh generalized unified-search indexes for this project".to_string());
-                    out.push("  /unified-search index full      rebuild generalized unified-search indexes for this project".to_string());
+                    out.push("  /unified-search index [kind]    refresh generalized unified-search indexes for this project or one kind".to_string());
+                    out.push("  /unified-search index full [kind] rebuild generalized unified-search indexes for this project or one kind".to_string());
                     out.push(
                         "  /config                          show current settings".to_string(),
                     );
@@ -1240,7 +1254,7 @@ impl App {
         }
 
         out.push(format!(
-            "unknown command '{}'.  try /context, /config, /session show, /debug runtime, /debug api-log enable, or /unified-search index",
+            "unknown command '{}'.  try /context, /config, /session show, /debug runtime, /debug api-log enable, or /unified-search index [kind]",
             input
         ));
         out

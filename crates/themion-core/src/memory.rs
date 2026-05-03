@@ -1970,6 +1970,7 @@ fn collect_unified_search_inputs(
             }
         }
     }
+    docs.sort_by(|a, b| b.source_updated_at_ms.cmp(&a.source_updated_at_ms));
     Ok(docs)
 }
 

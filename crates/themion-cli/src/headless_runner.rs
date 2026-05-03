@@ -86,10 +86,11 @@ pub async fn run_non_interactive(_app_runtime: AppState, _prompt: String) -> any
 pub async fn run_unified_search_index(
     app_runtime: AppState,
     force_full: bool,
+    source_kind: Option<String>,
 ) -> anyhow::Result<()> {
     let db = app_runtime.runtime.db.clone();
     let report =
-        tokio::task::spawn_blocking(move || db.memory_store().rebuild_unified_search_index(Some(&app_runtime.runtime.project_dir.display().to_string()), None, force_full))
+        tokio::task::spawn_blocking(move || db.memory_store().rebuild_unified_search_index(Some(&app_runtime.runtime.project_dir.display().to_string()), source_kind.as_deref(), force_full))
             .await
             .map_err(|err| anyhow::anyhow!("unified-search index task failed: {}", err))??;
     println!("{}", serde_json::to_string(&report)?);

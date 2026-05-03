@@ -590,7 +590,10 @@ pub(crate) fn build_main_agent(
 #[derive(Clone)]
 pub(crate) enum RuntimeCommand {
     LoginCodex { profile_name: Option<String> },
-    UnifiedSearchIndex { full: bool },
+    UnifiedSearchIndex {
+        full: bool,
+        source_kind: Option<String>,
+    },
     SessionProfileUse { name: String },
     SessionModelUse { model: String },
     SessionReset,

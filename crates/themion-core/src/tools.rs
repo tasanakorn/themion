@@ -1,5 +1,5 @@
 use crate::db::{
-    CreateNoteArgs, DbHandle, NoteColumn, NoteKind, RecallArgs, RecallDirection, SearchArgs,
+    CreateNoteArgs, DbHandle, NoteColumn, NoteKind, RecallArgs, RecallDirection,
     SessionScope,
 };
 use crate::memory::{
@@ -720,7 +720,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "history_recall",
-                "description": "Retrieve earlier conversation messages from persistent history.",
+                "description": "Retrieve earlier conversation messages chronologically.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -729,22 +729,6 @@ pub fn tool_definitions() -> Value {
                         "direction": { "type": "string", "enum": ["newest", "oldest"] }
                     },
                     "required": []
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "history_search",
-                "description": "Full-text search across conversation history.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": { "type": "string", "description": "FTS5 search query." },
-                        "session_id": { "type": "string", "description": "Optional session selector. Omit for the active session, pass \"*\" for all sessions in the current project, or pass one session UUID in the current project." },
-                        "limit": { "type": "integer", "description": "Max results. Default: 10, max: 100." }
-                    },
-                    "required": ["query"]
                 }
             }
         }),
@@ -1542,37 +1526,6 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 args["limit"].as_u64().map(|n| n as u32).unwrap_or(50),
             )?;
             Ok(serde_json::to_string(&hashtags)?)
-        }
-        "history_search" | "search_history" => {
-            let query = args["query"].as_str().unwrap_or("").to_string();
-            let session_scope = match args["session_id"].as_str() {
-                Some("*") => SessionScope::AllInCurrentProject,
-                Some(value) => SessionScope::Exact(
-                    Uuid::parse_str(value).map_err(|_| anyhow::anyhow!("invalid session_id"))?,
-                ),
-                None => SessionScope::Exact(ctx.session_id),
-            };
-            let limit = args["limit"].as_u64().map(|n| n as u32).unwrap_or(10);
-            match ctx.db.search(SearchArgs {
-                query,
-                session_scope,
-                current_project_dir: ctx.project_dir.clone(),
-                limit,
-            }) {
-                Ok(hits) => Ok(serde_json::to_string(
-                    &hits
-                        .iter()
-                        .map(|h| {
-                            serde_json::json!({
-                                "session_id": h.session_id, "turn_seq": h.turn_seq,
-                                "role": h.role, "snippet": h.snippet,
-                            })
-                        })
-                        .collect::<Vec<_>>(),
-                )
-                .unwrap_or_default()),
-                Err(e) => Ok(format!("Error: {e}")),
-            }
         }
         "local_agent_create" | "local_agent_delete" => {
             let invoker = ctx
