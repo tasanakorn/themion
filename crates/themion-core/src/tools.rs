@@ -246,11 +246,11 @@ fn shell_command_argv(command: &str) -> Vec<String> {
 
 fn memory_tool_definitions() -> Vec<Value> {
     vec![
-        memory_tool("memory_create_node", "Create a Project Memory node. Defaults to the current project; use project_dir=\"[GLOBAL]\" only for cross-project knowledge.", json!({
+        memory_tool("memory_create_node", "Create a Project Memory node. Use an absolute project path, omit project_dir for the current project, or use project_dir=\"[GLOBAL]\" only for cross-project knowledge.", json!({
             "type":"object",
             "properties":{
                 "node_id":{"type":"string","description":"Optional UUID. Generated when omitted."},
-                "project_dir":{"type":"string","description":"Project context. Default: current project; use [GLOBAL] for cross-project knowledge."},
+                "project_dir":{"type":"string","description":"Project context. Use an absolute path, omit for the current project, or use [GLOBAL] for cross-project knowledge."},
                 "node_type":{"type":"string","description":"Node kind. Default: observation."},
                 "title":{"type":"string"},
                 "content":{"type":"string","description":"Optional descriptive/body text."},
@@ -297,12 +297,12 @@ fn memory_tool_definitions() -> Vec<Value> {
             "properties":{"node_id":{"type":"string"}},
             "required":["node_id"]
         })),
-        memory_tool("unified_search", "Search indexed content across one or more source kinds with fts, semantic, or hybrid retrieval. Omit source_kinds for the default human-oriented kinds memory and chat_message; [GLOBAL] searches Global Knowledge where supported.", json!({
+        memory_tool("unified_search", "Search indexed content across one or more source kinds with fts, semantic, or hybrid retrieval. Use an absolute project path, omit project_dir for the current project, or use [GLOBAL] for Global Knowledge where supported; omit source_kinds for default human-oriented kinds memory and chat_message.", json!({
             "type":"object",
             "properties":{
                 "query":{"type":"string","description":"Query text."},
                 "mode":{"type":"string","enum":["fts","semantic","hybrid"],"description":"Retrieval mode. Default: fts."},
-                "project_dir":{"type":"string","description":"Project context. Default: current project; use [GLOBAL] for Global Knowledge."},
+                "project_dir":{"type":"string","description":"Project context. Use an absolute path, omit for the current project, or use [GLOBAL] for Global Knowledge."},
                 "source_kinds":{"type":"array","items":{"type":"string","enum":["memory","chat_message","tool_call","tool_result"]},"description":"Indexed source kinds. Omit for default human-oriented kinds: memory and chat_message."},
                 "hashtags":{"type":"array","items":{"type":"string"}},
                 "hashtag_match":{"type":"string","enum":["any","all"],"description":"Defaults to any."},
@@ -328,10 +328,10 @@ fn memory_tool_definitions() -> Vec<Value> {
             "properties":{"node_id":{"type":"string"}},
             "required":["node_id"]
         })),
-        memory_tool("memory_list_hashtags", "List Project Memory hashtags, optionally filtered by prefix. Defaults to the current project; [GLOBAL] means Global Knowledge.", json!({
+        memory_tool("memory_list_hashtags", "List Project Memory hashtags, optionally filtered by prefix. Use an absolute project path, omit project_dir for the current project, or use [GLOBAL] for Global Knowledge.", json!({
             "type":"object",
             "properties":{
-                "project_dir":{"type":"string","description":"Project context. Default: current project; use [GLOBAL] for Global Knowledge."},
+                "project_dir":{"type":"string","description":"Project context. Use an absolute path, omit for the current project, or use [GLOBAL] for Global Knowledge."},
                 "prefix":{"type":"string"},
                 "limit":{"type":"integer","description":"Default 50, max 200."}
             },
@@ -340,7 +340,7 @@ fn memory_tool_definitions() -> Vec<Value> {
         memory_tool("unified_search_rebuild", "Rebuild or refresh the generalized unified search index for all or one scoped source kind.", json!({
             "type":"object",
             "properties":{
-                "project_dir":{"type":"string","description":"Optional project scope. Default: current project."},
+                "project_dir":{"type":"string","description":"Project scope. Use an absolute path or omit for the current project."},
                 "source_kind":{"type":"string","enum":["memory","chat_message","tool_call","tool_result"],"description":"Optional source kind filter."},
                 "full":{"type":"boolean","description":"When true, clear derived rows in scope before rebuilding. Default: false."}
             },
@@ -527,6 +527,7 @@ fn resolve_memory_project_dir(args: &Value, ctx: &ToolCtx) -> String {
         .filter(|v| !v.is_empty())
     {
         Some(GLOBAL_PROJECT_DIR) => GLOBAL_PROJECT_DIR.to_string(),
+        Some(".") => ctx.project_dir.to_string_lossy().to_string(),
         Some(value) => value.to_string(),
         None => ctx.project_dir.to_string_lossy().to_string(),
     }
@@ -1511,7 +1512,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
         }
 
         "unified_search_rebuild" => {
-            let project_dir = args["project_dir"].as_str().map(str::to_string).unwrap_or_else(|| ctx.project_dir.to_string_lossy().to_string());
+            let project_dir = resolve_memory_project_dir(&args, ctx);
             let report = ctx.db.memory_store().rebuild_unified_search_index(
                 Some(&project_dir),
                 args["source_kind"].as_str(),

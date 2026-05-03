@@ -16,6 +16,13 @@ fn test_ctx(db: std::sync::Arc<DbHandle>) -> ToolCtx {
     }
 }
 
+fn test_ctx_with_project_dir(db: std::sync::Arc<DbHandle>, project_dir: &str) -> ToolCtx {
+    ToolCtx {
+        project_dir: PathBuf::from(project_dir),
+        ..test_ctx(db)
+    }
+}
+
 async fn call_json(ctx: &ToolCtx, name: &str, args: Value) -> Value {
     let result = call_tool(name, &args.to_string(), ctx).await;
     assert!(!result.starts_with("Error:"), "tool failed: {result}");
@@ -197,6 +204,165 @@ async fn memory_project_dir_defaults_and_global_selector_partition_results() {
     .await;
     assert_eq!(global_results["results"].as_array().unwrap().len(), 1);
     assert_eq!(global_results["results"][0]["source_id"], global_node["node_id"]);
+}
+
+#[tokio::test]
+async fn project_dir_dot_matches_current_project_for_targeted_tools() {
+    let db = DbHandle::open_in_memory().unwrap();
+    let current_project = "/tmp/themion-prd094-current-project";
+    let other_project = "/tmp/themion-prd094-other-project";
+    let ctx = test_ctx_with_project_dir(db.clone(), current_project);
+
+    let default_node = call_json(
+        &ctx,
+        "memory_create_node",
+        json!({"title": "Current project default", "hashtags": ["dot-fallback"]}),
+    )
+    .await;
+    let explicit_node = call_json(
+        &ctx,
+        "memory_create_node",
+        json!({
+            "project_dir": current_project,
+            "title": "Current project explicit",
+            "hashtags": ["dot-fallback"]
+        }),
+    )
+    .await;
+    let dot_node = call_json(
+        &ctx,
+        "memory_create_node",
+        json!({
+            "project_dir": ".",
+            "title": "Current project dot",
+            "hashtags": ["dot-fallback"]
+        }),
+    )
+    .await;
+    call_json(
+        &ctx,
+        "memory_create_node",
+        json!({
+            "project_dir": other_project,
+            "title": "Other project explicit",
+            "hashtags": ["other-project-only"]
+        }),
+    )
+    .await;
+
+    assert_eq!(default_node["project_dir"], current_project);
+    assert_eq!(explicit_node["project_dir"], current_project);
+    assert_eq!(dot_node["project_dir"], current_project);
+
+    let default_results = call_json(
+        &ctx,
+        "unified_search",
+        json!({"hashtags": ["dot-fallback"], "source_kinds": ["memory"], "limit": 10}),
+    )
+    .await;
+    let explicit_results = call_json(
+        &ctx,
+        "unified_search",
+        json!({
+            "project_dir": current_project,
+            "hashtags": ["dot-fallback"],
+            "source_kinds": ["memory"],
+            "limit": 10
+        }),
+    )
+    .await;
+    let dot_results = call_json(
+        &ctx,
+        "unified_search",
+        json!({
+            "project_dir": ".",
+            "hashtags": ["dot-fallback"],
+            "source_kinds": ["memory"],
+            "limit": 10
+        }),
+    )
+    .await;
+
+    assert_eq!(default_results["results"].as_array().unwrap().len(), 3);
+    assert_eq!(explicit_results["results"].as_array().unwrap().len(), 3);
+    assert_eq!(dot_results["results"].as_array().unwrap().len(), 3);
+
+    let default_tags = call_json(&ctx, "memory_list_hashtags", json!({})).await;
+    let explicit_tags = call_json(
+        &ctx,
+        "memory_list_hashtags",
+        json!({"project_dir": current_project}),
+    )
+    .await;
+    let dot_tags = call_json(
+        &ctx,
+        "memory_list_hashtags",
+        json!({"project_dir": "."}),
+    )
+    .await;
+
+    assert_eq!(default_tags, explicit_tags);
+    assert_eq!(default_tags, dot_tags);
+    assert_eq!(default_tags.as_array().unwrap().len(), 1);
+    assert_eq!(default_tags[0]["hashtag"], "#dot_fallback");
+
+    let other_tags = call_json(
+        &ctx,
+        "memory_list_hashtags",
+        json!({"project_dir": other_project}),
+    )
+    .await;
+    assert_eq!(other_tags.as_array().unwrap().len(), 1);
+    assert_eq!(other_tags[0]["hashtag"], "#other_project_only");
+}
+
+#[tokio::test]
+async fn unified_search_rebuild_treats_project_dir_dot_as_current_project() {
+    let db = DbHandle::open_in_memory().unwrap();
+    let current_project = "/tmp/themion-prd094-rebuild-project";
+    let ctx = test_ctx_with_project_dir(db.clone(), current_project);
+
+    call_json(
+        &ctx,
+        "memory_create_node",
+        json!({
+            "title": "Rebuild target node",
+            "content": "used to test project_dir dot rebuild",
+            "hashtags": ["rebuild-dot"]
+        }),
+    )
+    .await;
+
+    let default_rebuild = call_json(&ctx, "unified_search_rebuild", json!({})).await;
+    let explicit_rebuild = call_json(
+        &ctx,
+        "unified_search_rebuild",
+        json!({"project_dir": current_project}),
+    )
+    .await;
+    let dot_rebuild = call_json(
+        &ctx,
+        "unified_search_rebuild",
+        json!({"project_dir": "."}),
+    )
+    .await;
+
+    assert_eq!(default_rebuild["project_dir"], current_project);
+    assert_eq!(explicit_rebuild["project_dir"], current_project);
+    assert_eq!(dot_rebuild["project_dir"], current_project);
+
+    let dot_results = call_json(
+        &ctx,
+        "unified_search",
+        json!({
+            "project_dir": ".",
+            "query": "rebuild target",
+            "source_kinds": ["memory"],
+            "limit": 10
+        }),
+    )
+    .await;
+    assert_eq!(dot_results["results"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
