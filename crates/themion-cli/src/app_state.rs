@@ -1888,7 +1888,7 @@ pub fn build_agent(
 
     #[cfg(feature = "stylos")]
     {
-        agent.set_stylos_tool_invoker(crate::app_runtime::stylos_tool_invoker(stylos_tool_bridge));
+        agent.set_stylos_tool_invoker(crate::app_runtime::stylos_tool_invoker(stylos_tool_bridge, local_agent_id));
         agent.set_local_instance_id(local_instance_id.map(str::to_string));
         agent.set_local_agent_id(Some(local_agent_id.to_string()));
     }

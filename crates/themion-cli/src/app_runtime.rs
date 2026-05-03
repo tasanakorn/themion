@@ -130,13 +130,16 @@ impl Default for SharedStylosStatusHub {
 #[cfg(feature = "stylos")]
 pub(crate) fn stylos_tool_invoker(
     bridge: Option<crate::stylos::StylosToolBridge>,
+    local_agent_id: &str,
 ) -> Option<themion_core::tools::StylosToolInvoker> {
+    let local_agent_id = local_agent_id.to_string();
     bridge.map(|bridge| {
         std::sync::Arc::new(move |name: String, args: serde_json::Value| {
             let bridge = bridge.clone();
+            let local_agent_id = local_agent_id.clone();
             let fut: std::pin::Pin<
                 Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>,
-            > = Box::pin(async move { bridge.invoke(None, &name, args).await });
+            > = Box::pin(async move { bridge.invoke(Some(&local_agent_id), &name, args).await });
             fut
         }) as themion_core::tools::StylosToolInvoker
     })
