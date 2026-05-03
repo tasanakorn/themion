@@ -118,6 +118,17 @@ When adding code:
 - When validation is needed after code changes, check the narrowest useful target first, then also run the relevant non-`--all-features` build(s) for the touched crate so default or specifically targeted feature combinations are verified, and finally run an `--all-features` build for each touched crate before considering the task done.
 - Do not reference feature-gated modules, types, or helpers from always-on code paths unless the reference is guarded consistently.
 
+## Tool design and implementation guidance
+
+- Follow `docs/tool-design-and-implementation-guide.md` when adding, removing, or changing tools.
+- Treat tool schemas as AI-model-facing contracts first, not human-friendly documentation surfaces. Prefer short, exact, systematic wording over conversational prose.
+- Prefer the smallest stable tool surface that cleanly solves the product need. Reduce the number of tools and the number of parameters unless extra surface clearly improves correctness, safety, or round-trip reduction.
+- Prefer one canonical parameter shape per concept. Avoid permanent dual-parameter compatibility shapes such as old+new aliases in the long-term public contract unless the product requirement explicitly needs both.
+- Design read/query tools to reduce common fan-out patterns. If callers routinely need several near-identical calls and client-side merging, prefer one model-friendly query shape that answers the combined question directly.
+- Keep tool descriptions compact: usually one short purpose sentence, plus one short constraint sentence only when needed. Keep parameter descriptions literal, bounded, and compact.
+- Keep exact limits, special tokens, and contract-critical semantics, but move broad policy or tutorial-style explanation out of per-tool schema text when possible.
+- When reviewing a proposed new tool, ask first whether an existing tool can absorb the capability more cleanly. Do not mirror internal helper boundaries into separate tools without a strong product reason.
+
 ## Tools and file edits
 
 - Prefer focused edits to existing files.

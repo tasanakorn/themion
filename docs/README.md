@@ -101,3 +101,4 @@ Active and recent product requirements documents live in `docs/prd/`. Older impl
 | PRD-086 | [Support Multiple Codex Profiles with Profile-Scoped Login State](prd/prd-086-multiple-codex-profiles.md) | Implemented | v0.56.0 | `themion-cli`, `themion-core`, docs |
 | PRD-087 | [Complete App-State Ownership of TUI Runtime Coordination](prd/prd-087-complete-app-state-and-tui-runtime-ownership-refactor.md) | Implemented | v0.56.0 | `themion-cli`, docs |
 | PRD-088 | [Reimplement the Watchdog as an Independent Board-Note Scheduler](prd/prd-088-reimplement-watchdog-as-independent-board-note-scheduler.md) | Implemented | v0.56.0 | `themion-cli`, docs |
+| PRD-089 | [Multi-Column Board Note Queries](prd/prd-089-multi-column-board-note-queries.md) | Implemented | v0.57.0 | `themion-core`, `themion-cli`, docs |

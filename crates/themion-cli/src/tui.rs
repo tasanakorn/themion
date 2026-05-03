@@ -430,16 +430,25 @@ pub(crate) fn split_tool_call_detail(name: &str, args_json: &str) -> (String, Op
                 None,
             )
         }
-        "board_list_notes" => (
-            format!(
-                "board_list_notes column={}",
-                center_trim(
-                    args["column"].as_str().unwrap_or("?"),
-                    TOOL_DETAIL_MAX_CHARS
-                )
-            ),
-            None,
-        ),
+        "board_list_notes" => {
+            let columns = args["columns"]
+                .as_array()
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_else(|| "*".to_string());
+            (
+                format!(
+                    "board_list_notes columns={}",
+                    center_trim(&columns, TOOL_DETAIL_MAX_CHARS)
+                ),
+                None,
+            )
+        }
         "board_read_note" => (format!("board_read_note {}", board_note_display()), None),
         "board_move_note" => (
             format!(

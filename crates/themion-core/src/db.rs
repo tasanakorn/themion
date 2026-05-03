@@ -982,22 +982,41 @@ impl DbHandle {
         &self,
         to_instance: Option<&str>,
         to_agent_id: Option<&str>,
-        column: Option<NoteColumn>,
+        columns: &[NoteColumn],
     ) -> Result<Vec<BoardNote>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+        let mut sql = String::from(
             "SELECT note_id, note_slug, note_kind, origin_note_id, completion_notified_at_ms, from_instance, from_agent_id, to_instance, to_agent_id, body,
                     column_name, result_text, injection_state, blocked_until_ms, meta_json, created_at_ms, updated_at_ms, injected_at_ms
              FROM board_notes
              WHERE (?1 IS NULL OR to_instance = ?1)
-               AND (?2 IS NULL OR to_agent_id = ?2)
-               AND (?3 IS NULL OR column_name = ?3)
-             ORDER BY created_at_ms ASC",
-        )?;
-        let rows = stmt.query_map(
-            rusqlite::params![to_instance, to_agent_id, column.map(|c| c.as_str())],
-            map_note_row,
-        )?;
+               AND (?2 IS NULL OR to_agent_id = ?2)",
+        );
+        if !columns.is_empty() {
+            sql.push_str("
+               AND column_name IN (");
+            for i in 0..columns.len() {
+                if i > 0 {
+                    sql.push_str(", ");
+                }
+                sql.push('?');
+                sql.push_str(&(i + 3).to_string());
+            }
+            sql.push(')');
+        }
+        sql.push_str("
+             ORDER BY created_at_ms ASC");
+
+        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(2 + columns.len());
+        params.push(&to_instance);
+        params.push(&to_agent_id);
+        let column_names: Vec<&str> = columns.iter().map(|c| c.as_str()).collect();
+        for name in &column_names {
+            params.push(name);
+        }
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), map_note_row)?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);

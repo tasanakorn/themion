@@ -821,13 +821,16 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "board_list_notes",
-                "description": "List board notes, optionally filtered by target or column.",
+                "description": "List board notes filtered by target and optional columns.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "to_instance": { "type": "string" },
                         "to_agent_id": { "type": "string" },
-                        "column": { "type": "string", "enum": ["todo", "in_progress", "blocked", "done"] }
+                        "columns": {
+                            "type": "array",
+                            "items": { "type": "string", "enum": ["todo", "in_progress", "blocked", "done"] }
+                        }
                     },
                     "required": []
                 }
@@ -1230,14 +1233,23 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             .to_string())
         }
         "board_list_notes" => {
-            let column = args["column"]
-                .as_str()
-                .map(|v| parse_note_column(v).ok_or_else(|| anyhow::anyhow!("invalid column")))
-                .transpose()?;
+            let mut columns = Vec::new();
+            if let Some(values) = args["columns"].as_array() {
+                for value in values {
+                    let raw = value
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("invalid columns"))?;
+                    let column = parse_note_column(raw)
+                        .ok_or_else(|| anyhow::anyhow!("invalid column"))?;
+                    if !columns.contains(&column) {
+                        columns.push(column);
+                    }
+                }
+            }
             let notes = ctx.db.list_board_notes(
                 args["to_instance"].as_str(),
                 args["to_agent_id"].as_str(),
-                column,
+                &columns,
             )?;
             Ok(Value::Array(notes.iter().map(board_note_to_json).collect()).to_string())
         }
