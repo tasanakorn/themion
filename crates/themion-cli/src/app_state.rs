@@ -801,14 +801,14 @@ pub(crate) fn handle_runtime_command(
             });
             app.mark_dirty_all();
         }
-        crate::app_runtime::RuntimeCommand::SemanticMemoryIndex { full } => {
+        crate::app_runtime::RuntimeCommand::UnifiedSearchIndex { full } => {
             #[cfg(not(feature = "semantic-memory"))]
             {
                 let mode = if full { "full reindex" } else { "index" };
                 app.push(Entry::Assistant {
                     agent_id: None,
                     text: format!(
-                        "semantic-memory {} is unavailable in this build; enable the semantic-memory feature",
+                        "unified-search {} is unavailable in this build; enable the semantic-memory feature",
                         mode
                     ),
                 });
@@ -828,23 +828,24 @@ pub(crate) fn handle_runtime_command(
                 }
                 app.runtime.agent_busy = true;
                 set_agent_activity(app, AgentActivity::RunningTool(if full {
-                    "semantic-memory full reindex".to_string()
+                    "unified-search full reindex".to_string()
                 } else {
-                    "semantic-memory index pending".to_string()
+                    "unified-search index pending".to_string()
                 }));
                 app.push(Entry::Assistant {
                     agent_id: None,
                     text: if full {
-                        "rebuilding all stale or missing Project Memory semantic embeddings…".to_string()
+                        "rebuilding generalized unified-search index for this project…".to_string()
                     } else {
-                        "indexing missing or pending Project Memory semantic embeddings…".to_string()
+                        "refreshing generalized unified-search index for this project…".to_string()
                     },
                 });
                 let tx = app.runtime.runtime_tx.clone();
                 let db = app.runtime.db.clone();
+                let project_dir = app.runtime.project_dir.display().to_string();
                 app.runtime.background_domain().spawn(async move {
                     let result = tokio::task::spawn_blocking(move || {
-                        db.memory_store().index_pending_embeddings(full)
+                        db.memory_store().rebuild_unified_search_index(Some(&project_dir), None, full)
                     })
                     .await;
                     let text = match result {
@@ -852,16 +853,16 @@ pub(crate) fn handle_runtime_command(
                             .unwrap_or_else(|err| format!("indexing report serialization failed: {}", err)),
                         Ok(Err(err)) => {
                             if full {
-                                format!("semantic-memory full reindex failed: {}", err)
+                                format!("unified-search full reindex failed: {}", err)
                             } else {
-                                format!("semantic-memory indexing failed: {}", err)
+                                format!("unified-search indexing failed: {}", err)
                             }
                         }
                         Err(err) => {
                             if full {
-                                format!("semantic-memory full reindex task failed: {}", err)
+                                format!("unified-search full reindex task failed: {}", err)
                             } else {
-                                format!("semantic-memory indexing task failed: {}", err)
+                                format!("unified-search indexing task failed: {}", err)
                             }
                         }
                     };

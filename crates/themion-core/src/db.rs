@@ -1197,6 +1197,72 @@ impl DbHandle {
         }
         Ok(out)
     }
+
+    pub fn unified_search_rows(&self, args: SearchArgs) -> Result<Vec<UnifiedSearchSourceRow>> {
+        if !self.fts5 {
+            return Ok(vec![]);
+        }
+        let limit = args.limit.min(100) as i64;
+        let conn = self.conn.lock().unwrap();
+        let project_str = args.current_project_dir.to_string_lossy().into_owned();
+        let mut out = Vec::new();
+        let sql = "SELECT m.message_id, m.session_id, t.turn_seq, m.role, m.content, m.tool_calls_json, m.tool_call_id
+             FROM agent_messages_fts
+             JOIN agent_messages m ON agent_messages_fts.rowid = m.message_id
+             JOIN agent_turns t ON m.turn_id = t.turn_id
+             JOIN agent_sessions s ON m.session_id = s.session_id
+             WHERE agent_messages_fts MATCH ?1
+               AND s.project_dir = ?2
+             LIMIT ?3";
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(rusqlite::params![args.query, project_str, limit], |row| {
+            let message_id: i64 = row.get(0)?;
+            let session_id: String = row.get(1)?;
+            let turn_seq: u32 = row.get::<_, i64>(2)? as u32;
+            let role: String = row.get(3)?;
+            let content: Option<String> = row.get(4)?;
+            let tool_calls_json: Option<String> = row.get(5)?;
+            let _tool_call_id: Option<String> = row.get(6)?;
+            let snippet = content.clone().unwrap_or_default();
+            let (source_kind, source_id, title) = if role == "tool" {
+                let tool_name = content
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                    .and_then(|value| value.get("tool_name").and_then(|v| v.as_str()).map(str::to_string))
+                    .unwrap_or_else(|| "tool_result".to_string());
+                ("tool_result".to_string(), format!("{}:{}", session_id, message_id), tool_name)
+            } else if tool_calls_json.as_deref().map(|v| !v.trim().is_empty()).unwrap_or(false) {
+                let tool_name = serde_json::from_str::<serde_json::Value>(tool_calls_json.as_deref().unwrap_or("[]"))
+                    .ok()
+                    .and_then(|value| value.as_array().and_then(|arr| arr.first().cloned()))
+                    .and_then(|value| value.get("function").and_then(|f| f.get("name")).and_then(|v| v.as_str()).map(str::to_string))
+                    .unwrap_or_else(|| "tool_call".to_string());
+                ("tool_call".to_string(), format!("{}:{}", session_id, message_id), tool_name)
+            } else {
+                let source_kind = if role == "user" || role == "assistant" || role == "system" {
+                    "chat_message"
+                } else {
+                    "chat_message"
+                };
+                let title = role.clone();
+                (source_kind.to_string(), format!("{}:{}", session_id, message_id), title)
+            };
+            Ok(UnifiedSearchSourceRow {
+                source_kind,
+                source_id,
+                project_dir: project_str.clone(),
+                session_id: Some(session_id),
+                turn_seq: Some(turn_seq),
+                role: Some(role),
+                title,
+                snippet,
+            })
+        })?;
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
 }
 
 fn map_note_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BoardNote> {
@@ -1280,6 +1346,19 @@ pub struct SearchHit {
     pub role: String,
     pub snippet: String,
 }
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UnifiedSearchSourceRow {
+    pub source_kind: String,
+    pub source_id: String,
+    pub project_dir: String,
+    pub session_id: Option<String>,
+    pub turn_seq: Option<u32>,
+    pub role: Option<String>,
+    pub title: String,
+    pub snippet: String,
+}
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoteColumn {

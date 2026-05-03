@@ -43,20 +43,20 @@ async fn knowledge_base_node_is_retrievable_by_hashtag_and_keyword() {
 
     let by_tag = call_json(
         &ctx,
-        "memory_search",
-        json!({"hashtags": ["rust"], "limit": 10}),
+        "unified_search",
+        json!({"hashtags": ["rust"], "source_kinds": ["memory"], "limit": 10}),
     )
     .await;
-    assert_eq!(by_tag.as_array().unwrap().len(), 1);
-    assert_eq!(by_tag[0]["node_id"], node["node_id"]);
+    assert_eq!(by_tag["results"].as_array().unwrap().len(), 1);
+    assert_eq!(by_tag["results"][0]["source_id"], node["node_id"]);
 
     let by_keyword = call_json(
         &ctx,
-        "memory_search",
-        json!({"query": "durable", "hashtags": ["#knowledge_base"]}),
+        "unified_search",
+        json!({"query": "durable", "hashtags": ["#knowledge_base"], "source_kinds": ["memory"]}),
     )
     .await;
-    assert_eq!(by_keyword.as_array().unwrap().len(), 1);
+    assert_eq!(by_keyword["results"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -128,7 +128,7 @@ async fn memory_links_are_returned_and_deleted_with_nodes() {
 }
 
 #[tokio::test]
-async fn memory_search_supports_all_match_hashtags() {
+async fn unified_search_supports_all_match_hashtags() {
     let db = DbHandle::open_in_memory().unwrap();
     let ctx = test_ctx(db);
 
@@ -147,12 +147,12 @@ async fn memory_search_supports_all_match_hashtags() {
 
     let results = call_json(
         &ctx,
-        "memory_search",
+        "unified_search",
         json!({"hashtags": ["rust", "provider"], "hashtag_match": "all"}),
     )
     .await;
-    assert_eq!(results.as_array().unwrap().len(), 1);
-    assert_eq!(results[0]["node_id"], both["node_id"]);
+    assert_eq!(results["results"].as_array().unwrap().len(), 1);
+    assert_eq!(results["results"][0]["source_id"], both["node_id"]);
 }
 
 #[tokio::test]
@@ -182,21 +182,21 @@ async fn memory_project_dir_defaults_and_global_selector_partition_results() {
 
     let default_results = call_json(
         &ctx,
-        "memory_search",
+        "unified_search",
         json!({"hashtags": ["partition"], "limit": 10}),
     )
     .await;
-    assert_eq!(default_results.as_array().unwrap().len(), 1);
-    assert_eq!(default_results[0]["node_id"], project_node["node_id"]);
+    assert_eq!(default_results["results"].as_array().unwrap().len(), 1);
+    assert_eq!(default_results["results"][0]["source_id"], project_node["node_id"]);
 
     let global_results = call_json(
         &ctx,
-        "memory_search",
+        "unified_search",
         json!({"project_dir": "[GLOBAL]", "hashtags": ["partition"], "limit": 10}),
     )
     .await;
-    assert_eq!(global_results.as_array().unwrap().len(), 1);
-    assert_eq!(global_results[0]["node_id"], global_node["node_id"]);
+    assert_eq!(global_results["results"].as_array().unwrap().len(), 1);
+    assert_eq!(global_results["results"][0]["source_id"], global_node["node_id"]);
 }
 
 #[tokio::test]
@@ -283,4 +283,74 @@ async fn board_and_file_mutations_return_compact_acks() {
     .await;
     assert_eq!(write["operation"], "write");
     assert_eq!(write["written_bytes"], 3);
+}
+
+#[tokio::test]
+async fn unified_search_reports_unavailable_non_memory_source_kinds() {
+    let db = DbHandle::open_in_memory().unwrap();
+    let ctx = test_ctx(db);
+
+    call_json(
+        &ctx,
+        "memory_create_node",
+        json!({"title": "Project fact", "content": "search me"}),
+    )
+    .await;
+
+    let results = call_json(
+        &ctx,
+        "unified_search",
+        json!({"query": "search", "source_kinds": ["memory", "chat_message"], "limit": 10}),
+    )
+    .await;
+
+    assert_eq!(results["degraded"], false);
+    assert_eq!(results["unavailable_source_kinds"], json!([]));
+    assert_eq!(results["results"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn unified_search_returns_chat_message_and_tool_result_rows() {
+    use themion_core::client::Message;
+
+    let db = DbHandle::open_in_memory().unwrap();
+    let session_id = Uuid::new_v4();
+    let workflow = WorkflowState::default();
+    db.insert_session(session_id, PathBuf::from(".").as_path(), true).unwrap();
+    let turn_id = db.begin_turn(session_id, 1, &workflow, None).unwrap();
+
+    let user_msg = Message {
+        role: "user".to_string(),
+        content: Some("searchable chat text".to_string()),
+        tool_calls: None,
+        tool_call_id: None,
+    };
+    db.append_message(turn_id, session_id, 1, &user_msg, &workflow).unwrap();
+
+    let tool_msg = Message {
+        role: "tool".to_string(),
+        content: Some(r#"{"tool_name":"fs_read_file","result":"searchable tool result"}"#.to_string()),
+        tool_calls: None,
+        tool_call_id: Some("call-1".to_string()),
+    };
+    db.append_message(turn_id, session_id, 2, &tool_msg, &workflow).unwrap();
+
+    let ctx = test_ctx(db.clone());
+    let chat_results = call_json(
+        &ctx,
+        "unified_search",
+        json!({"query": "chat", "source_kinds": ["chat_message"], "limit": 10}),
+    )
+    .await;
+    assert_eq!(chat_results["results"].as_array().unwrap().len(), 1);
+    assert_eq!(chat_results["results"][0]["source_kind"], "chat_message");
+
+    let tool_results = call_json(
+        &ctx,
+        "unified_search",
+        json!({"query": "tool", "source_kinds": ["tool_result"], "limit": 10}),
+    )
+    .await;
+    assert_eq!(tool_results["results"].as_array().unwrap().len(), 1);
+    assert_eq!(tool_results["results"][0]["source_kind"], "tool_result");
 }

@@ -137,15 +137,15 @@ fn print_usage(program_name: &str) {
   {0}                                Start TUI mode
   {0} --headless                     Start long-running headless mode
   {0} [--dir PATH] PROMPT            Run one non-interactive prompt
-  {0} --command semantic-memory index [--full] [--dir PATH]
-                                    Build missing/pending Project Memory semantic indexes
+  {0} --command unified-search index [--full] [--dir PATH]
+                                    Build or rebuild generalized unified-search indexes for the selected project
   {0} --help                         Show this help
 
 Options:
   --dir PATH    Override project directory
   --headless    Start explicit long-running non-TUI mode
   --command     Run an explicit non-prompt CLI command
-  --full        Rebuild semantic indexes for all stale or missing Project Memory nodes
+  --full        Rebuild generalized unified-search indexes for the selected project
   --help        Show this help",
         program_name
     );
@@ -195,18 +195,18 @@ fn main() -> anyhow::Result<()> {
             anyhow::bail!("--command cannot be combined with --headless");
         }
         if let Some((force_full, rest_after_command)) =
-            parse_semantic_memory_index_command(&remaining_args)
+            parse_unified_search_index_command(&remaining_args)
         {
             if !rest_after_command.is_empty() {
                 anyhow::bail!(
-                    "semantic-memory index does not accept extra arguments beyond --full"
+                    "unified-search index does not accept extra arguments beyond --full"
                 );
             }
             #[cfg(not(feature = "semantic-memory"))]
             {
                 let _ = force_full;
                 anyhow::bail!(
-                    "semantic-memory index requires building themion-cli with the semantic-memory feature"
+                    "unified-search index requires building themion-cli with the semantic-memory feature"
                 );
             }
             #[cfg(feature = "semantic-memory")]
@@ -216,14 +216,14 @@ fn main() -> anyhow::Result<()> {
                 return runtime_domains
                     .background()
                     .expect("background runtime available in headless mode")
-                    .block_on(headless_runner::run_semantic_memory_index(
+                    .block_on(headless_runner::run_unified_search_index(
                         app_runtime,
                         force_full,
                     ));
             }
         }
         anyhow::bail!(
-            "unknown command '{}'. Use --command semantic-memory index [--full]",
+            "unknown command '{}'. Use --command unified-search index [--full]",
             remaining_args.join(" ")
         );
     }
@@ -259,7 +259,7 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn parse_semantic_memory_index_command(args: &[String]) -> Option<(bool, Vec<String>)> {
+fn parse_unified_search_index_command(args: &[String]) -> Option<(bool, Vec<String>)> {
     let [domain, command, rest @ ..] = args else {
         return None;
     };

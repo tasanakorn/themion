@@ -590,7 +590,7 @@ pub(crate) fn build_main_agent(
 #[derive(Clone)]
 pub(crate) enum RuntimeCommand {
     LoginCodex { profile_name: Option<String> },
-    SemanticMemoryIndex { full: bool },
+    UnifiedSearchIndex { full: bool },
     SessionProfileUse { name: String },
     SessionModelUse { model: String },
     SessionReset,
@@ -631,7 +631,7 @@ pub(crate) fn execute_runtime_command(
     context: RuntimeCommandContext<'_>,
 ) -> RuntimeCommandOutcome {
     match command {
-        RuntimeCommand::LoginCodex { .. } | RuntimeCommand::SemanticMemoryIndex { .. } => {
+        RuntimeCommand::LoginCodex { .. } | RuntimeCommand::UnifiedSearchIndex { .. } => {
             RuntimeCommandOutcome::Noop
         }
         RuntimeCommand::SessionProfileUse { name } => {

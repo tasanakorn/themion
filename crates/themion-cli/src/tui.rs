@@ -484,7 +484,7 @@ pub(crate) fn split_tool_call_detail(name: &str, args_json: &str) -> (String, Op
             None,
         ),
         "memory_get_node" => (format!("memory_get_node {}", t("node_id")), None),
-        "memory_search" => with_reason_first(format!("memory_search {}", t("query"))),
+        "unified_search" => with_reason_first(format!("unified_search {}", t("query"))),
         "memory_open_graph" => (format!("memory_open_graph {}", t("node_id")), None),
         "memory_delete_node" => (format!("memory_delete_node {}", t("node_id")), None),
         "memory_list_hashtags" => (format!("memory_list_hashtags {}", t("prefix")), None),
@@ -1105,18 +1105,18 @@ impl App {
             )];
         }
 
-        if input == "/semantic-memory index" || input == "/semantic-memory reindex" {
+        if input == "/unified-search index" || input == "/unified-search reindex" {
             app_tx
-                .send(AppEvent::RuntimeCommand(RuntimeCommand::SemanticMemoryIndex {
+                .send(AppEvent::RuntimeCommand(RuntimeCommand::UnifiedSearchIndex {
                     full: false,
                 }))
                 .ok();
             return out;
         }
 
-        if input == "/semantic-memory index full" || input == "/semantic-memory reindex full" {
+        if input == "/unified-search index full" || input == "/unified-search reindex full" {
             app_tx
-                .send(AppEvent::RuntimeCommand(RuntimeCommand::SemanticMemoryIndex {
+                .send(AppEvent::RuntimeCommand(RuntimeCommand::UnifiedSearchIndex {
                     full: true,
                 }))
                 .ok();
@@ -1215,8 +1215,8 @@ impl App {
                     out.push("  /context                         show prompt-budget and history replay breakdown".to_string());
                     out.push("  /debug api-log enable            enable per-round API call logging for this session".to_string());
                     out.push("  /debug api-log disable           disable per-round API call logging for this session".to_string());
-                    out.push("  /semantic-memory index           build missing or pending semantic indexes".to_string());
-                    out.push("  /semantic-memory index full      rebuild all stale or missing semantic indexes".to_string());
+                    out.push("  /unified-search index           refresh generalized unified-search indexes for this project".to_string());
+                    out.push("  /unified-search index full      rebuild generalized unified-search indexes for this project".to_string());
                     out.push(
                         "  /config                          show current settings".to_string(),
                     );
@@ -1240,7 +1240,7 @@ impl App {
         }
 
         out.push(format!(
-            "unknown command '{}'.  try /context, /config, /session show, /debug runtime, /debug api-log enable, or /semantic-memory index",
+            "unknown command '{}'.  try /context, /config, /session show, /debug runtime, /debug api-log enable, or /unified-search index",
             input
         ));
         out
