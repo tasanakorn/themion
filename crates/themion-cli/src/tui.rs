@@ -2094,8 +2094,11 @@ pub(crate) fn unix_epoch_now_ms() -> u64 {
 #[cfg(all(test, feature = "stylos"))]
 mod tests {
     use super::*;
-    use crate::app_runtime::{allocate_default_local_agent_id, build_local_agent_roster, is_interactive_agent_handle, validate_agent_roles};
-    use crate::stylos::{IncomingPromptRequest, IncomingPromptSource};
+    use crate::app_runtime::{
+        allocate_default_local_agent_id, build_local_agent_roster, is_interactive_agent_handle,
+        normalize_created_agent_roles, validate_agent_roles,
+    };
+    use crate::local_prompts::{IncomingPromptRequest, IncomingPromptSource};
 
     fn handle(agent_id: &str, roles: &[&str]) -> AgentHandle {
         AgentHandle {
@@ -2157,7 +2160,27 @@ mod tests {
             handle("smith-2", &["worker"]),
             handle("smith-4", &["worker"]),
         ];
-        assert_eq!(allocate_default_local_agent_id(&build_local_agent_roster(&agents)), "smith-3");
+        assert_eq!(
+            allocate_default_local_agent_id(&build_local_agent_roster(&agents)),
+            "smith-3"
+        );
+    }
+
+    #[test]
+    fn created_agent_roles_default_to_executor_when_omitted_or_empty() {
+        assert_eq!(normalize_created_agent_roles(None), vec!["executor"]);
+        assert_eq!(
+            normalize_created_agent_roles(Some(&serde_json::json!([]))),
+            vec!["executor"]
+        );
+    }
+
+    #[test]
+    fn created_agent_roles_preserve_explicit_roles_without_executor_default() {
+        assert_eq!(
+            normalize_created_agent_roles(Some(&serde_json::json!(["reviewer"]))),
+            vec!["reviewer"]
+        );
     }
 
     #[test]

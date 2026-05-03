@@ -202,6 +202,54 @@ fn summarize_tool_calls(tool_calls: &[crate::client::ToolCall]) -> String {
     parts.join("\n")
 }
 
+fn role_instruction(role: &str) -> Option<&'static str> {
+    match role {
+        "master" => Some("- master: Lead the team; for non-trivial work, consider creating or delegating to another local agent instead of handling everything yourself. Use board notes or local-agent tools when useful. Simple direct Q&A may be answered directly."),
+        "interactive" => Some("- interactive: Own human-facing conversation; respond directly to the user when active/targeted."),
+        "executor" => Some("- executor: Do general implementation, investigation, and task execution; report concise results to the task originator."),
+        "reviewer" => Some("- reviewer: Review, audit, and validate; do not change files unless explicitly asked."),
+        "architect" => Some("- architect: Cover system design; explore, clarify, refine requirements, plan, and identify tradeoffs."),
+        _ => None,
+    }
+}
+
+fn build_local_agent_role_context_text(agent_id: &str, label: &str, roles: &[String]) -> String {
+    let roles_text = if roles.is_empty() {
+        "executor".to_string()
+    } else {
+        roles.join(", ")
+    };
+    let resolved_roles = if roles.is_empty() {
+        vec!["executor".to_string()]
+    } else {
+        roles.to_vec()
+    };
+    let identity = if label == agent_id {
+        format!("- You are agent `{agent_id}`.")
+    } else {
+        format!("- You are agent `{agent_id}` (alias: `{label}`).")
+    };
+    let mut lines = vec![
+        "Local agent role context:".to_string(),
+        identity,
+        format!("- Your roles are: {roles_text}."),
+        "- Known roles: master=team leader; interactive=human responder; executor=general worker; reviewer=review/validation; architect=design/planning.".to_string(),
+        "- Act only from your listed roles; do not assume unlisted roles.".to_string(),
+        String::new(),
+        "Your role instructions:".to_string(),
+    ];
+    for role in &resolved_roles {
+        if let Some(instruction) = role_instruction(role) {
+            lines.push(instruction.to_string());
+        }
+    }
+    if !resolved_roles.iter().any(|role| role == "interactive") {
+        lines.push(String::new());
+        lines.push("Keep direct chat very short and activity-oriented; report final results to the requester, board note, or coordinating master/interactive agent.".to_string());
+    }
+    lines.join("\n")
+}
+
 fn build_pure_message_turn(turn_messages: &[Message]) -> Vec<Message> {
     let mut out = Vec::new();
     for msg in turn_messages {
@@ -357,6 +405,9 @@ pub struct Agent {
     turn_seq_counter: u32,
     model_info: Option<ModelInfo>,
     workflow_state: WorkflowState,
+    local_role_agent_id: Option<String>,
+    local_role_label: Option<String>,
+    local_role_roles: Vec<String>,
     #[cfg(feature = "stylos")]
     local_agent_id: Option<String>,
     #[cfg(feature = "stylos")]
@@ -404,6 +455,9 @@ impl Agent {
             turn_seq_counter: 0,
             model_info: None,
             workflow_state: WorkflowState::default(),
+            local_role_agent_id: None,
+            local_role_label: None,
+            local_role_roles: Vec::new(),
             #[cfg(feature = "stylos")]
             local_agent_id: None,
             #[cfg(feature = "stylos")]
@@ -466,6 +520,9 @@ impl Agent {
             turn_seq_counter: 0,
             model_info: None,
             workflow_state,
+            local_role_agent_id: None,
+            local_role_label: None,
+            local_role_roles: Vec::new(),
             #[cfg(feature = "stylos")]
             local_agent_id: None,
             #[cfg(feature = "stylos")]
@@ -584,6 +641,17 @@ impl Agent {
         )
     }
 
+    pub fn set_local_agent_role_context(
+        &mut self,
+        agent_id: impl Into<String>,
+        label: impl Into<String>,
+        roles: Vec<String>,
+    ) {
+        self.local_role_agent_id = Some(agent_id.into());
+        self.local_role_label = Some(label.into());
+        self.local_role_roles = roles;
+    }
+
     #[cfg(feature = "stylos")]
     pub fn set_stylos_tool_invoker(&mut self, invoker: Option<crate::tools::StylosToolInvoker>) {
         self.stylos_tool_invoker = invoker;
@@ -640,6 +708,29 @@ impl Agent {
             extra_text: None,
             tool_estimate: None,
         });
+
+        if let Some(agent_id) = self.local_role_agent_id.as_deref() {
+            let label = self.local_role_label.as_deref().unwrap_or(agent_id);
+            let role_context = vec![Message {
+                role: "system".to_string(),
+                content: Some(build_local_agent_role_context_text(
+                    agent_id,
+                    label,
+                    &self.local_role_roles,
+                )),
+                tool_calls: None,
+                tool_call_id: None,
+            }];
+            sections.push(PromptSectionReport {
+                kind: PromptSectionKind::RoleContext,
+                label: "local agent role context".to_string(),
+                chars: estimate_messages_chars(&role_context),
+                tokens_estimate: token_ctx.estimate_messages(&role_context),
+                messages: role_context,
+                extra_text: None,
+                tool_estimate: None,
+            });
+        }
 
         #[cfg(feature = "stylos")]
         let board_guidance_text = {
@@ -2216,5 +2307,30 @@ mod tests {
     fn estimate_messages_tokens_uses_char_div_ceil_four() {
         let messages = vec![msg("user", "12345678")];
         assert_eq!(estimate_messages_tokens(&messages), 3);
+    }
+
+    #[test]
+    fn role_context_for_executor_omits_master_and_interactive_actions() {
+        let text =
+            build_local_agent_role_context_text("smith-1", "smith-1", &["executor".to_string()]);
+        assert!(text.contains("Your roles are: executor."));
+        assert!(text.contains("Known roles: master=team leader"));
+        assert!(text.contains("- executor: Do general implementation"));
+        assert!(text.contains("Keep direct chat very short"));
+        assert!(!text.contains("- master: Lead the team"));
+        assert!(!text.contains("- interactive: Own human-facing conversation"));
+    }
+
+    #[test]
+    fn role_context_for_master_interactive_includes_matching_actions() {
+        let text = build_local_agent_role_context_text(
+            "master",
+            "master",
+            &["master".to_string(), "interactive".to_string()],
+        );
+        assert!(text.contains("Your roles are: master, interactive."));
+        assert!(text.contains("- master: Lead the team"));
+        assert!(text.contains("- interactive: Own human-facing conversation"));
+        assert!(!text.contains("Keep direct chat very short"));
     }
 }

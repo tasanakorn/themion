@@ -36,6 +36,7 @@ pub struct ToolEstimateReport {
 pub enum PromptSectionKind {
     SystemPrompt,
     CodingGuardrails,
+    RoleContext,
     BoardGuidance,
     MemoryGuidance,
     CodexCliWebSearch,

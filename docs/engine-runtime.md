@@ -72,6 +72,8 @@ This keeps Codex aligned with Themion's existing profile-centric session/config 
 
 This keeps reusable harness behavior in core while allowing the CLI to publish process-level multi-agent status for Stylos. The first PRD-081 implementation slice extends that boundary: `themion-core` now exposes `local_agent_create` and `local_agent_delete` as tools, but actual roster mutation remains CLI-local because `themion-cli` owns the in-process `Vec<AgentHandle>` plus local agent construction and removal.
 
+Each core `Agent` also receives a CLI-provided local role context derived from its runtime descriptor. The prompt includes a separate compact role-context section with the active `agent_id`, optional alias, resolved role list, a short known-role glossary, and detailed action guidance only for the active agent's own roles. Dynamically created agents with omitted or empty roles resolve to `executor`; they do not inherit `master` or `interactive` from the predefined agent.
+
 ## CLI-local runtime domains
 
 `themion-cli` now owns explicit Tokio runtime construction through a CLI-local runtime topology helper.
@@ -172,6 +174,8 @@ Current behavior:
 
 - `local_agent_create` accepts optional `agent_id`, optional `label`, and optional `roles`
 - when `agent_id` is omitted, the CLI runtime allocates the next free `smith-N` worker id in the current local roster
+- when `roles` is omitted or empty for an additional created agent, the CLI runtime assigns `executor`
+- explicit valid role lists are preserved without adding `executor` implicitly
 - `master` remains reserved for the predefined leader and cannot be recreated through the tool
 - the current implementation rejects duplicate ids, another `master`, and another `interactive` role
 - `local_agent_delete` accepts a target `agent_id` for a non-leader local agent

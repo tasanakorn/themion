@@ -1829,6 +1829,9 @@ pub fn build_agent(
     local_agent_tool_invoker: Option<themion_core::tools::LocalAgentToolInvoker>,
     system_inspection: Option<SystemInspectionResult>,
     api_log_enabled: bool,
+    local_role_agent_id: &str,
+    local_role_label: &str,
+    local_role_roles: Vec<String>,
 ) -> anyhow::Result<Agent> {
     let client: Box<dyn ChatBackend + Send + Sync> = match session.provider.as_str() {
         "openai-codex" => {
@@ -1881,6 +1884,7 @@ pub fn build_agent(
     agent.set_api_log_enabled(api_log_enabled);
     agent.set_system_inspection(system_inspection);
     agent.set_local_agent_tool_invoker(local_agent_tool_invoker);
+    agent.set_local_agent_role_context(local_role_agent_id, local_role_label, local_role_roles);
 
     #[cfg(feature = "stylos")]
     {

@@ -890,7 +890,7 @@ pub fn tool_definitions() -> Value {
                     "properties": {
                         "agent_id": { "type": "string", "description": "Optional explicit agent id. When omitted, the runtime allocates the next free smith-N worker id." },
                         "label": { "type": "string", "description": "Optional user-visible label. Defaults to agent_id." },
-                        "roles": { "type": "array", "items": { "type": "string" }, "description": "Optional role list for the new agent. Must not violate local role invariants." },
+                        "roles": { "type": "array", "items": { "type": "string" }, "description": "Optional role list. Omitted or empty defaults to executor. Must not violate local role invariants." },
                         "reason": { "type": "string", "description": "Optional reason." }
                     },
                     "required": []
@@ -1239,8 +1239,8 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                     let raw = value
                         .as_str()
                         .ok_or_else(|| anyhow::anyhow!("invalid columns"))?;
-                    let column = parse_note_column(raw)
-                        .ok_or_else(|| anyhow::anyhow!("invalid column"))?;
+                    let column =
+                        parse_note_column(raw).ok_or_else(|| anyhow::anyhow!("invalid column"))?;
                     if !columns.contains(&column) {
                         columns.push(column);
                     }

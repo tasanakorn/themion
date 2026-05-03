@@ -577,6 +577,9 @@ pub(crate) fn build_main_agent(
         Some(build_local_agent_tool_invoker(local_agent_mgmt_tx)),
         system_inspection,
         api_log_enabled,
+        "master",
+        "master",
+        vec!["master".to_string(), "interactive".to_string()],
     )
 }
 
@@ -1451,6 +1454,14 @@ fn normalize_role_list(value: Option<&serde_json::Value>) -> Vec<String> {
     roles
 }
 
+pub(crate) fn normalize_created_agent_roles(value: Option<&serde_json::Value>) -> Vec<String> {
+    let mut roles = normalize_role_list(value);
+    if roles.is_empty() {
+        roles.push("executor".to_string());
+    }
+    roles
+}
+
 pub(crate) fn allocate_default_local_agent_id(agents: &[LocalAgentRosterEntry]) -> String {
     let mut n = 1usize;
     loop {
@@ -1463,6 +1474,7 @@ pub(crate) fn allocate_default_local_agent_id(agents: &[LocalAgentRosterEntry]) 
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn validate_agent_roles(agents: &[LocalAgentRosterEntry]) -> anyhow::Result<()> {
     let master_count = agents
         .iter()
@@ -1520,7 +1532,7 @@ fn create_local_agent(
         .filter(|v| !v.is_empty())
         .unwrap_or(agent_id.as_str())
         .to_string();
-    let roles = normalize_role_list(args.get("roles"));
+    let roles = normalize_created_agent_roles(args.get("roles"));
     if roles.iter().any(|r| normalize_primary_role(r) == "master") {
         anyhow::bail!("cannot create another master agent");
     }
@@ -1545,6 +1557,9 @@ fn create_local_agent(
         ctx.local_agent_tool_invoker,
         None,
         ctx.api_log_enabled,
+        &agent_id,
+        &label,
+        roles.clone(),
     )?;
     ctx.agents.push(build_local_agent_handle(NewLocalAgentHandleParts {
         agent,

@@ -102,3 +102,4 @@ Active and recent product requirements documents live in `docs/prd/`. Older impl
 | PRD-087 | [Complete App-State Ownership of TUI Runtime Coordination](prd/prd-087-complete-app-state-and-tui-runtime-ownership-refactor.md) | Implemented | v0.56.0 | `themion-cli`, docs |
 | PRD-088 | [Reimplement the Watchdog as an Independent Board-Note Scheduler](prd/prd-088-reimplement-watchdog-as-independent-board-note-scheduler.md) | Implemented | v0.56.0 | `themion-cli`, docs |
 | PRD-089 | [Multi-Column Board Note Queries](prd/prd-089-multi-column-board-note-queries.md) | Implemented | v0.57.0 | `themion-core`, `themion-cli`, docs |
+| PRD-090 | [Agent Role Defaults and Role Instruction Guidance](prd/prd-090-agent-role-defaults-and-role-instruction-guidance.md) | Implemented | v0.58.0 | `themion-core`, `themion-cli`, docs |
