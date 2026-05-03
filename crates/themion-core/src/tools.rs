@@ -297,13 +297,13 @@ fn memory_tool_definitions() -> Vec<Value> {
             "properties":{"node_id":{"type":"string"}},
             "required":["node_id"]
         })),
-        memory_tool("unified_search", "Search indexed content across one or more source kinds with fts, semantic, or hybrid retrieval. Defaults to the current project only; [GLOBAL] searches Global Knowledge where supported.", json!({
+        memory_tool("unified_search", "Search indexed content across one or more source kinds with fts, semantic, or hybrid retrieval. Omit source_kinds for the default human-oriented kinds memory and chat_message; [GLOBAL] searches Global Knowledge where supported.", json!({
             "type":"object",
             "properties":{
                 "query":{"type":"string","description":"Query text."},
                 "mode":{"type":"string","enum":["fts","semantic","hybrid"],"description":"Retrieval mode. Default: fts."},
                 "project_dir":{"type":"string","description":"Project context. Default: current project; use [GLOBAL] for Global Knowledge."},
-                "source_kinds":{"type":"array","items":{"type":"string","enum":["memory","chat_message","tool_call","tool_result"]},"description":"Indexed source kinds. Omit for all supported kinds."},
+                "source_kinds":{"type":"array","items":{"type":"string","enum":["memory","chat_message","tool_call","tool_result"]},"description":"Indexed source kinds. Omit for default human-oriented kinds: memory and chat_message."},
                 "hashtags":{"type":"array","items":{"type":"string"}},
                 "hashtag_match":{"type":"string","enum":["any","all"],"description":"Defaults to any."},
                 "node_type":{"type":"string"},
@@ -1432,8 +1432,6 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 .unwrap_or_else(|| vec![
                     "memory".to_string(),
                     "chat_message".to_string(),
-                    "tool_call".to_string(),
-                    "tool_result".to_string(),
                 ]);
             let wants_memory = requested_source_kinds.iter().any(|kind| kind == "memory");
             let wants_db_rows = requested_source_kinds

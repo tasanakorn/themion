@@ -105,7 +105,7 @@ Implementation-ready query contract decisions:
 - the canonical generalized tool name is `unified_search`
 - `unified_search` accepts an explicit `source_kinds` array
 - `source_kinds` values are limited to `memory`, `chat_message`, `tool_call`, and `tool_result`
-- omitted `source_kinds` means all indexed source kinds allowed by the generalized search surface
+- omitted `source_kinds` means the default human-oriented source kinds allowed by the generalized search surface: `memory` and `chat_message`
 - `project_dir` remains an explicit required scope for project-local search, with `"[GLOBAL]"` continuing to mean Global Knowledge where relevant
 - retrieval mode remains explicit, using `fts`, `semantic`, and `hybrid`
 - result payloads must be source-aware and aggregated to source-object results rather than raw chunk rows
@@ -121,7 +121,7 @@ Implementation-ready `unified_search` tool shape:
 
 Implementation-ready default decisions:
 
-- omitted `source_kinds` means all currently indexed generalized source kinds
+- omitted `source_kinds` means the default human-oriented generalized source kinds: `memory` and `chat_message`
 - omitted `limit` defaults to `10`
 - `limit` maximum is `50`
 - `mode=fts` searches only sources that have exact-search support in the generalized surface
@@ -268,6 +268,7 @@ Concrete first-implementation filtering behavior:
 - filter by `project_dir`
 - filter by `source_kinds`
 - do not expose additional source-specific filter fields in `unified_search` in v1
+- keep `tool_call` and `tool_result` indexed and searchable only through explicit opt-in via `source_kinds` rather than the omitted-`source_kinds` default
 - keep deeper source-specific filtering for future work or source-specific tools
 
 ### 6. Aggregate multi-chunk hits to one source-level result per source object
@@ -454,7 +455,7 @@ Implementation-ready rollout sequence:
 5. validate same-object multi-chunk aggregation on representative long records
 6. add `unified_search` and wire it to the new index
 7. remove `memory_search` in the same implementation slice
-8. update tool docs/prompt guidance to use `unified_search`, including memory-only searches via `source_kinds=["memory"]`
+8. update tool docs/prompt guidance to use `unified_search`, including memory-only searches via `source_kinds=["memory"]` and explicit tool-record searches via `source_kinds=["tool_call"]` or `source_kinds=["tool_result"]`
 9. retire the old memory-only embedding table after the generalized path is verified, or leave it only as a short-lived transitional artifact with a removal plan
 
 ## Changes by Component
@@ -463,7 +464,7 @@ Implementation-ready rollout sequence:
 | --- | --- |
 | `crates/themion-core/src/memory.rs` | Replace the memory-only one-row-per-node semantic storage dependency with a generalized source-document and chunk-embedding model, while preserving Project Memory as one supported source kind. |
 | `crates/themion-core/src/db.rs` and related history storage modules | Expose the source records and metadata needed to index chat messages, tool calls, and tool results into the generalized semantic index with explicit project scoping, source freshness markers, and practical chunk-position metadata. |
-| `crates/themion-core/src/tools.rs` | Remove `memory_search` and add the `unified_search` contract with explicit `source_kinds`, project scope, retrieval mode, and source-aware result payloads. |
+| `crates/themion-core/src/tools.rs` | Remove `memory_search` and add the `unified_search` contract with explicit `source_kinds`, project scope, retrieval mode, source-aware result payloads, and omitted-`source_kinds` default behavior that excludes tool noise unless explicitly requested. |
 | `crates/themion-core/src/agent.rs` | Remove prompt/tool guidance that prefers `memory_search` and align tool exposure metadata with `unified_search` as the canonical generalized retrieval surface. |
 | `crates/themion-core/src/` search query path | Add source-object grouping and score aggregation so multiple matching chunks from the same source object become one top-level result with one primary snippet and optional supporting evidence. |
 | `crates/themion-cli/src/` runtime or command wiring | Add explicit maintenance/reindex paths for full rebuild, targeted rebuild, stale refresh, and index progress inspection without making those flows part of ordinary query behavior, including a human-invocable slash-command/runtime command path that replaces or supersedes the old `/semantic-memory index` flow. |
@@ -509,6 +510,7 @@ Required migration shape:
 - index one Project Memory node with content long enough to require chunking → verify: multiple chunk rows are created for one source record and retrieval still returns one memory result through `unified_search`.
 - index one chat message and one tool result in the same project → verify: both appear in the generalized source-document index with correct `source_kind` and `project_dir` metadata.
 - search with `source_kinds=["memory","chat_message"]` and one project scope → verify: results may come from either source kind but never from another project.
+- search with omitted `source_kinds` and one project scope → verify: default results come from `memory` and `chat_message`, not `tool_call` or `tool_result`.
 - search with `source_kinds=["chat_message","tool_result"]` and one project scope → verify: results may come from either source kind and result payloads identify which source kind matched.
 - search a long tool result where only one chunk is relevant → verify: the source-level result is returned with a useful supporting snippet from the matching chunk.
 - search a source object where several chunks match well → verify: one top-level result is returned for that object, the best chunk becomes the primary snippet, and optional supporting snippets remain attached to that one object result.
@@ -538,7 +540,7 @@ Required migration shape:
 - [ ] define one canonical chunking path and a documented `chunking_version`
 - [ ] use `chunk_len=1200` and `chunk_overlap=200` for the character-based fallback chunker
 - [ ] preserve structured filtering by `project_dir` and `source_kind` before semantic ranking
-- [ ] remove `memory_search` and add the `unified_search` contract with explicit `source_kinds`, `mode`, and bounded `limit`
+- [ ] remove `memory_search` and add the `unified_search` contract with explicit `source_kinds`, `mode`, bounded `limit`, and omitted-`source_kinds` default behavior that excludes `tool_call` and `tool_result` unless explicitly requested
 - [ ] return one shared result schema across `fts`, `semantic`, and `hybrid`, including `score` and `score_kind`
 - [ ] aggregate same-object multi-chunk hits into one top-level source result with one primary snippet and optional bounded supporting evidence
 - [ ] implement the documented bounded source-score aggregation rule based on best chunk plus capped support bonus
@@ -558,7 +560,7 @@ This PRD is implementation-ready because it resolves the following concrete deci
 - first supported source kinds are exactly `memory`, `chat_message`, `tool_call`, and `tool_result`
 - the new canonical tool name is `unified_search`
 - `memory_search` is removed when `unified_search` lands
-- omitted `source_kinds` means all indexed generalized source kinds available to that search surface
+- omitted `source_kinds` means the default human-oriented generalized source kinds available to that search surface: `memory` and `chat_message`
 - generalized search exposes `mode`, `limit`, and explicit `project_dir`
 - `limit` defaults to `10` and caps at `50`
 - `unified_search` returns one shared result schema for all three modes
@@ -578,7 +580,7 @@ This PRD is implementation-ready because it resolves the following concrete deci
 
 ## Implementation notes
 
-- Landed in `v0.59.0`.
+- Landed in `v0.59.0`, with a later follow-up refinement to make omitted `source_kinds` default to the human-oriented kinds `memory` and `chat_message` rather than including tool records.
 - `memory_search` was replaced by `unified_search`.
 - Generalized derived index tables now exist for normalized source documents and chunk embeddings.
 - Supported source kinds are `memory`, `chat_message`, `tool_call`, and `tool_result`.
