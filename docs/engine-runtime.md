@@ -83,7 +83,7 @@ Current phase-1 runtime domains:
 - `tui` — one-worker multi-thread runtime for TUI event intake, tick scheduling, frame scheduling, and TUI-side bridge tasks
 - `core` — multi-thread runtime for startup coordination, print-mode execution, and core harness orchestration paths
 - `network` — multi-thread runtime for long-lived Stylos networking tasks
-- `background` — multi-thread runtime domain for lower-priority maintenance work such as Project Memory semantic index generation and CLI/TUI-triggered semantic reindex jobs
+- `background` — multi-thread runtime domain for lower-priority maintenance work such as Project Memory semantic index generation, append-triggered pending unified-search follow-up work, and CLI/TUI-triggered semantic reindex jobs
 
 Mode differences:
 
@@ -162,6 +162,30 @@ process
    ├─ terminal input thread
    └─ spawn_blocking worker threads
 ```
+
+## Automatic chat-message unified-search registration and idle-only background embedding
+
+New transcript writes now feed the generalized unified-search pipeline in two stages.
+
+Current behavior:
+
+- `agent_messages` remains the durable source-of-truth transcript store
+- when `DbHandle::append_message(...)` persists a new indexable `chat_message`, `themion-core` now performs a lightweight best-effort follow-up registration into `unified_search_documents`
+- that append-time registration reuses the same normalized unified-search identity as rebuilds and leaves the document in durable `embedding_state = "pending"` rather than generating embeddings inline
+- chat-message append-time registration currently keeps the existing indexability rules used by generalized unified search: non-empty `user` or eligible `assistant` content is indexable, while `tool` rows and assistant rows carrying `tool_calls_json` are excluded from `chat_message` indexing
+- chunk generation and embedding are deferred to runtime-owned background work rather than blocking transcript persistence
+- `themion-cli` starts a background worker on the CLI-owned `background` runtime domain that observes the hub-owned `AppSnapshot` stream
+- that worker drains pending `source_kind="chat_message"` unified-search documents only when all local agents are idle
+- if any local agent is busy, the pending backlog remains durable and waits for a later all-idle window
+- on successful background indexing, the pending row becomes `ready` and chunk rows are written
+- if background indexing fails, the document keeps durable error visibility through `last_error` but remains in retryable `pending` state so a later idle-time background pass can try again automatically; manual rebuild remains the explicit repair/backfill path
+- manual `unified_search_rebuild` remains the repair and historical backfill path; the automatic append-time path is for newly appended transcript data
+
+This keeps the ownership split explicit:
+
+- `themion-core` owns chat-message indexability, append-time pending registration, durable pending/failed state, and final chunk/embedding writes
+- `themion-cli` owns only the scheduling decision of when background pending work may run
+- the TUI does not own indexing policy or worker lifecycle
 
 ## Local agent membership tools
 

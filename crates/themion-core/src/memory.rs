@@ -363,6 +363,32 @@ struct UnifiedSearchDocumentInput {
 }
 
 #[derive(Debug, Clone)]
+pub struct AppendedChatMessageIndexArgs {
+    pub message_id: i64,
+    pub session_id: String,
+    pub turn_seq: u32,
+    pub role: String,
+    pub content: Option<String>,
+    pub tool_calls_json: Option<String>,
+    pub project_dir: String,
+    pub created_at_s: i64,
+}
+
+#[derive(Debug, Clone)]
+#[cfg(feature = "semantic-memory")]
+struct PendingUnifiedSearchDocument {
+    source_kind: String,
+    source_id: String,
+    project_dir: String,
+    session_id: Option<String>,
+    turn_seq: Option<u32>,
+    tool_call_id: Option<String>,
+    title: String,
+    source_text: String,
+    source_updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone)]
 #[cfg(feature = "semantic-memory")]
 struct UnifiedSearchChunkDraft {
     chunk_index: u32,
@@ -941,6 +967,91 @@ impl<'a> MemoryStore<'a> {
         })
     }
 
+
+    #[cfg(feature = "semantic-memory")]
+    pub fn register_appended_chat_message_for_unified_search(
+        &self,
+        args: AppendedChatMessageIndexArgs,
+    ) -> Result<bool> {
+        let Some(doc) = build_chat_message_document_input(
+            args.message_id,
+            &args.session_id,
+            args.turn_seq,
+            &args.role,
+            args.content.as_deref(),
+            args.tool_calls_json.as_deref(),
+            &args.project_dir,
+            args.created_at_s,
+        ) else {
+            return Ok(false);
+        };
+        let conn = self.conn.lock().unwrap();
+        upsert_unified_search_document_pending(&conn, &doc)?;
+        Ok(true)
+    }
+
+    #[cfg(not(feature = "semantic-memory"))]
+    pub fn register_appended_chat_message_for_unified_search(
+        &self,
+        _args: AppendedChatMessageIndexArgs,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
+    pub fn drain_pending_chat_message_unified_search(
+        &self,
+        project_dir: &str,
+        limit: u32,
+    ) -> Result<UnifiedSearchIndexReport> {
+        #[cfg(not(feature = "semantic-memory"))]
+        {
+            let _ = (project_dir, limit);
+            return Ok(UnifiedSearchIndexReport {
+                mode: "unified-search-index".to_string(),
+                requested_full: false,
+                project_dir: Some(project_dir.to_string()),
+                source_kind: Some("chat_message".to_string()),
+                queued_before: 0,
+                indexed_documents: 0,
+                skipped_documents: 0,
+                failed_documents: 0,
+                removed_documents: 0,
+                remaining_pending: 0,
+            });
+        }
+        #[cfg(feature = "semantic-memory")]
+        {
+            let project_dir = normalize_project_dir(project_dir)?;
+            let conn = self.conn.lock().unwrap();
+            let pending = list_pending_unified_search_documents(&conn, &project_dir, "chat_message", limit)?;
+            let queued_before = pending.len() as u32;
+            let mut indexed_documents = 0u32;
+            let mut failed_documents = 0u32;
+            for doc in pending.iter() {
+                match index_pending_unified_search_document(&conn, doc) {
+                    Ok(()) => indexed_documents += 1,
+                    Err(_) => failed_documents += 1,
+                }
+            }
+            let remaining_pending: u32 = conn.query_row(
+                "SELECT COUNT(*) FROM unified_search_documents WHERE project_dir = ?1 AND source_kind = 'chat_message' AND embedding_state = 'pending'",
+                params![project_dir],
+                |row| row.get::<_, i64>(0),
+            )? as u32;
+            Ok(UnifiedSearchIndexReport {
+                mode: "unified-search-index".to_string(),
+                requested_full: false,
+                project_dir: Some(project_dir),
+                source_kind: Some("chat_message".to_string()),
+                queued_before,
+                indexed_documents,
+                skipped_documents: 0,
+                failed_documents,
+                removed_documents: 0,
+                remaining_pending,
+            })
+        }
+    }
 
     pub fn rebuild_unified_search_index(
         &self,
@@ -1899,20 +2010,18 @@ fn collect_unified_search_inputs(
         })?;
         for row in rows {
             let (message_id, session_id, turn_seq, role, content, tool_calls_json, tool_call_id, project_dir, created_at) = row?;
-            if (source_kind.is_none() || source_kind == Some("chat_message")) && role != "tool" && tool_calls_json.is_none() {
-                let text = content.clone().unwrap_or_default();
-                if !text.trim().is_empty() {
-                    docs.push(UnifiedSearchDocumentInput {
-                        source_kind: "chat_message".to_string(),
-                        source_id: message_id.to_string(),
-                        project_dir: project_dir.clone(),
-                        session_id: Some(session_id.clone()),
-                        turn_seq: Some(turn_seq),
-                        tool_call_id: None,
-                        title: role.clone(),
-                        source_text: text,
-                        source_updated_at_ms: created_at * 1000,
-                    });
+            if source_kind.is_none() || source_kind == Some("chat_message") {
+                if let Some(doc) = build_chat_message_document_input(
+                    message_id,
+                    &session_id,
+                    turn_seq,
+                    &role,
+                    content.as_deref(),
+                    tool_calls_json.as_deref(),
+                    &project_dir,
+                    created_at,
+                ) {
+                    docs.push(doc);
                 }
             }
             if (source_kind.is_none() || source_kind == Some("tool_call")) && tool_calls_json.as_deref().map(|v| !v.trim().is_empty()).unwrap_or(false) {
@@ -1994,19 +2103,200 @@ fn clear_unified_search_scope(
 
 #[cfg(feature = "semantic-memory")]
 #[cfg(feature = "semantic-memory")]
+fn build_chat_message_document_input(
+    message_id: i64,
+    session_id: &str,
+    turn_seq: u32,
+    role: &str,
+    content: Option<&str>,
+    tool_calls_json: Option<&str>,
+    project_dir: &str,
+    created_at_s: i64,
+) -> Option<UnifiedSearchDocumentInput> {
+    if role == "tool" || tool_calls_json.is_some() {
+        return None;
+    }
+    let text = content.unwrap_or_default().trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(UnifiedSearchDocumentInput {
+        source_kind: "chat_message".to_string(),
+        source_id: message_id.to_string(),
+        project_dir: project_dir.to_string(),
+        session_id: Some(session_id.to_string()),
+        turn_seq: Some(turn_seq),
+        tool_call_id: None,
+        title: role.to_string(),
+        source_text: text.to_string(),
+        source_updated_at_ms: created_at_s * 1000,
+    })
+}
+
+#[cfg(feature = "semantic-memory")]
+fn upsert_unified_search_document_pending(conn: &Connection, doc: &UnifiedSearchDocumentInput) -> Result<()> {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT document_id FROM unified_search_documents WHERE source_kind = ?1 AND source_id = ?2 AND project_dir = ?3",
+            params![doc.source_kind, doc.source_id, doc.project_dir],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let document_id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM unified_search_chunks WHERE document_id = ?1",
+        params![document_id],
+    )?;
+    tx.execute(
+        "INSERT INTO unified_search_documents (document_id, source_kind, source_id, project_dir, session_id, turn_seq, tool_call_id, title, source_text, source_updated_at_ms, chunking_version, embedding_model, embedding_state, last_indexed_at_ms, last_error)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'pending', NULL, NULL)
+         ON CONFLICT(document_id) DO UPDATE SET
+             session_id=excluded.session_id,
+             turn_seq=excluded.turn_seq,
+             tool_call_id=excluded.tool_call_id,
+             title=excluded.title,
+             source_text=excluded.source_text,
+             source_updated_at_ms=excluded.source_updated_at_ms,
+             chunking_version=excluded.chunking_version,
+             embedding_model=excluded.embedding_model,
+             embedding_state='pending',
+             last_indexed_at_ms=NULL,
+             last_error=NULL",
+        params![
+            document_id,
+            doc.source_kind,
+            doc.source_id,
+            doc.project_dir,
+            doc.session_id,
+            doc.turn_seq.map(|v| v as i64),
+            doc.tool_call_id,
+            doc.title,
+            doc.source_text,
+            doc.source_updated_at_ms,
+            UNIFIED_SEARCH_CHUNKING_VERSION,
+            DEFAULT_SEMANTIC_MODEL,
+        ],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+#[cfg(feature = "semantic-memory")]
+fn pending_document_to_input(pending: &PendingUnifiedSearchDocument) -> UnifiedSearchDocumentInput {
+    UnifiedSearchDocumentInput {
+        source_kind: pending.source_kind.clone(),
+        source_id: pending.source_id.clone(),
+        project_dir: pending.project_dir.clone(),
+        session_id: pending.session_id.clone(),
+        turn_seq: pending.turn_seq,
+        tool_call_id: pending.tool_call_id.clone(),
+        title: pending.title.clone(),
+        source_text: pending.source_text.clone(),
+        source_updated_at_ms: pending.source_updated_at_ms,
+    }
+}
+
+#[cfg(feature = "semantic-memory")]
+fn list_pending_unified_search_documents(
+    conn: &Connection,
+    project_dir: &str,
+    source_kind: &str,
+    limit: u32,
+) -> Result<Vec<PendingUnifiedSearchDocument>> {
+    let mut stmt = conn.prepare(
+        "SELECT document_id, source_kind, source_id, project_dir, session_id, turn_seq, tool_call_id, title, source_text, source_updated_at_ms
+         FROM unified_search_documents
+         WHERE project_dir = ?1 AND source_kind = ?2 AND embedding_state = 'pending'
+         ORDER BY (last_error IS NOT NULL) ASC, source_updated_at_ms DESC
+         LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(params![project_dir, source_kind, limit as i64], |row| {
+        Ok(PendingUnifiedSearchDocument {
+            source_kind: row.get(1)?,
+            source_id: row.get(2)?,
+            project_dir: row.get(3)?,
+            session_id: row.get(4)?,
+            turn_seq: row.get::<_, Option<i64>>(5)?.map(|v| v as u32),
+            tool_call_id: row.get(6)?,
+            title: row.get(7)?,
+            source_text: row.get(8)?,
+            source_updated_at_ms: row.get(9)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+#[cfg(feature = "semantic-memory")]
+fn mark_unified_search_document_failed(
+    conn: &Connection,
+    source_kind: &str,
+    source_id: &str,
+    project_dir: &str,
+    error: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE unified_search_documents
+         SET embedding_state = 'failed',
+             last_error = ?4
+         WHERE source_kind = ?1 AND source_id = ?2 AND project_dir = ?3",
+        params![source_kind, source_id, project_dir, error],
+    )?;
+    Ok(())
+}
+
+#[cfg(feature = "semantic-memory")]
+fn index_pending_unified_search_document(conn: &Connection, pending: &PendingUnifiedSearchDocument) -> Result<()> {
+    let doc = pending_document_to_input(pending);
+    match index_unified_search_document(conn, &doc) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let error_text = error.to_string();
+            let _ = mark_unified_search_document_failed(
+                conn,
+                &pending.source_kind,
+                &pending.source_id,
+                &pending.project_dir,
+                &error_text,
+            );
+            Err(error)
+        }
+    }
+}
+
+#[cfg(feature = "semantic-memory")]
 fn index_unified_search_document(conn: &Connection, doc: &UnifiedSearchDocumentInput) -> Result<()> {
     let now_ms = now_unix_ms();
-    let document_id = Uuid::new_v4().to_string();
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT document_id FROM unified_search_documents WHERE source_kind = ?1 AND source_id = ?2 AND project_dir = ?3",
+            params![doc.source_kind, doc.source_id, doc.project_dir],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let document_id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
     let chunks = chunk_text_for_unified_search(&doc.source_text);
     let embeddings = build_text_embeddings(&chunks.iter().map(|chunk| chunk.chunk_text.clone()).collect::<Vec<_>>())?;
     let tx = conn.unchecked_transaction()?;
     tx.execute(
-        "DELETE FROM unified_search_documents WHERE source_kind = ?1 AND source_id = ?2 AND project_dir = ?3",
-        params![doc.source_kind, doc.source_id, doc.project_dir],
+        "DELETE FROM unified_search_chunks WHERE document_id = ?1",
+        params![document_id],
     )?;
     tx.execute(
         "INSERT INTO unified_search_documents (document_id, source_kind, source_id, project_dir, session_id, turn_seq, tool_call_id, title, source_text, source_updated_at_ms, chunking_version, embedding_model, embedding_state, last_indexed_at_ms, last_error)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'ready', ?13, NULL)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'ready', ?13, NULL)
+         ON CONFLICT(document_id) DO UPDATE SET
+             session_id=excluded.session_id,
+             turn_seq=excluded.turn_seq,
+             tool_call_id=excluded.tool_call_id,
+             title=excluded.title,
+             source_text=excluded.source_text,
+             source_updated_at_ms=excluded.source_updated_at_ms,
+             chunking_version=excluded.chunking_version,
+             embedding_model=excluded.embedding_model,
+             embedding_state='ready',
+             last_indexed_at_ms=excluded.last_indexed_at_ms,
+             last_error=NULL",
         params![
             document_id, doc.source_kind, doc.source_id, doc.project_dir, doc.session_id, doc.turn_seq.map(|v| v as i64), doc.tool_call_id, doc.title, doc.source_text, doc.source_updated_at_ms,
             UNIFIED_SEARCH_CHUNKING_VERSION, DEFAULT_SEMANTIC_MODEL, now_ms

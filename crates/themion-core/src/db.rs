@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+use crate::memory::AppendedChatMessageIndexArgs;
 
 const BLOCKED_RETRY_COOLDOWN_MS: i64 = 5 * 60 * 1000;
 
@@ -747,7 +748,31 @@ impl DbHandle {
                 workflow.phase_name,
             ],
         )?;
-        Ok(conn.last_insert_rowid())
+        let message_id = conn.last_insert_rowid();
+        let project_dir: String = conn.query_row(
+            "SELECT project_dir FROM agent_sessions WHERE session_id = ?1",
+            rusqlite::params![session_id.to_string()],
+            |row| row.get(0),
+        )?;
+        let created_at_s: i64 = conn.query_row(
+            "SELECT created_at FROM agent_turns WHERE turn_id = ?1",
+            rusqlite::params![turn_id],
+            |row| row.get(0),
+        )?;
+        drop(conn);
+        let _ = self.memory_store().register_appended_chat_message_for_unified_search(
+            AppendedChatMessageIndexArgs {
+                message_id,
+                session_id: session_id.to_string(),
+                turn_seq: seq,
+                role: msg.role.clone(),
+                content: msg.content.clone(),
+                tool_calls_json,
+                project_dir,
+                created_at_s,
+            },
+        );
+        Ok(message_id)
     }
 
     pub fn record_workflow_transition(

@@ -5,6 +5,7 @@ use crate::runtime_domains::RuntimeDomains;
 use crate::Session;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use themion_core::agent::Agent;
 use themion_core::client::ChatClient;
 use themion_core::client_codex::CodexClient;
@@ -300,13 +301,14 @@ impl AppState {
         let process_started_at = std::time::Instant::now();
         let process_started_at_ms = crate::tui::unix_epoch_now_ms();
 
-        Ok(Self {
+        let background_domain = runtime_domains.background().expect("force-red bg runtime in AppState");
+        let app_state = Self {
             runtime: AppRuntimeState {
                 session: session.clone(),
                 db: db.clone(),
                 project_dir: project_dir.clone(),
                 session_id,
-                background_domain: runtime_domains.background().expect("force-red bg runtime in AppState"),
+                background_domain: background_domain.clone(),
                 core_domain: runtime_domains.core(),
                 startup_project_dir: project_dir.clone(),
                 local_agent_mgmt_tx: tokio::sync::mpsc::unbounded_channel().0,
@@ -355,11 +357,50 @@ impl AppState {
             snapshot_hub,
             #[cfg(feature = "stylos")]
             stylos_config,
-        })
+        };
+        spawn_chat_message_index_worker(
+            background_domain,
+            app_state.snapshot_hub.subscribe(),
+            app_state.runtime.db.clone(),
+            app_state.runtime.project_dir.clone(),
+        );
+        Ok(app_state)
     }
 }
 
 
+
+
+pub(crate) fn snapshot_all_agents_idle(snapshot: &AppSnapshot) -> bool {
+    !snapshot.local_agents.is_empty() && snapshot.local_agents.iter().all(|agent| !agent.busy)
+}
+
+fn spawn_chat_message_index_worker(
+    background_domain: crate::runtime_domains::DomainHandle,
+    mut snapshot_rx: watch::Receiver<AppSnapshot>,
+    db: Arc<DbHandle>,
+    project_dir: PathBuf,
+) {
+    background_domain.spawn(async move {
+        loop {
+            if snapshot_all_agents_idle(&snapshot_rx.borrow()) {
+                let db = db.clone();
+                let project_dir = project_dir.display().to_string();
+                let _ = tokio::task::spawn_blocking(move || {
+                    db.memory_store()
+                        .drain_pending_chat_message_unified_search(&project_dir, 32)
+                })
+                .await;
+            }
+            let changed = tokio::time::timeout(Duration::from_secs(5), snapshot_rx.changed()).await;
+            match changed {
+                Ok(Ok(())) => continue,
+                Ok(Err(_)) => break,
+                Err(_) => continue,
+            }
+        }
+    });
+}
 
 pub(crate) fn finalize_tui_runtime_state(
     runtime: &mut AppRuntimeState,

@@ -57,7 +57,7 @@ Active and recent product requirements documents live in `docs/prd/`. Older impl
 | PRD-042 | [Dirty-Region and Partial TUI Redraws](prd/archive/prd-042-dirty-region-and-partial-tui-redraws.md) | Implemented | v0.26.0 | `themion-cli`, docs |
 | PRD-043 | [Safer and More Bounded File and Shell Tool Parameters](prd/archive/prd-043-safer-and-more-bounded-file-and-shell-tool-parameters.md) | Implemented | v0.27.0 | `themion-core`, docs |
 | PRD-044 | [Fix Multiline Input Newline and Wrapped-Cursor Tracking](prd/archive/prd-044-fix-multiline-input-newline-and-wrapped-cursor-tracking.md) | Implemented | v0.26.1 | `themion-cli`, docs |
-| PRD-045 | [Project-Scoped History Recall and Search Across Sessions](prd/archive/prd-045-project-wide-history-recall-and-search-across-sessions.md) | Implemented | v0.28.0 | `themion-core`, docs |
+| PRD-045 | [Project-Scoped History Recall and Search Across Sessions](prd/archive/prd-045-project-wide-history-recall-and-search-across-sessions.md) | Implemented | v0.28.0 | `themion-core`, `themion-cli`, docs |
 | PRD-046 | [Lightweight Long-Term Memory Knowledge Base with Hashtag-Based Organization](prd/archive/prd-046-lightweight-unified-memory-graph-with-hashtag-based-organization.md) | Implemented | v0.29.1 | `themion-core`, `themion-cli`, docs |
 | PRD-047 | [Prefer `note_slug` in User-Facing Board Note Chat Events](prd/archive/prd-047-prefer-note-slug-in-chat-events.md) | Implemented | v0.29.2 | `themion-cli`, docs |
 | PRD-048 | [Remove Long Navigation Shortcut Hints from the TUI Statusline](prd/archive/prd-048-remove-navigation-shortcut-hints-from-statusline.md) | Implemented | v0.29.3 | `themion-cli`, docs |
@@ -91,7 +91,7 @@ Active and recent product requirements documents live in `docs/prd/`. Older impl
 | PRD-076 | [Temporary Session-Only Profile and Model Switching](prd/prd-076-temporary-session-profile-or-model-switch.md) | Implemented | v0.49.0 | `themion-cli`, `themion-core`, docs |
 | PRD-077 | [Reset Temporary Model Override When Switching Session Profile](prd/prd-077-reset-temporary-model-override-when-switching-session-profile.md) | Implemented | v0.49.1 | `themion-cli`, docs |
 | PRD-078 | [Idle Watchdog for Background Agent Follow-Up and Pending Board-Note Injection](prd/prd-078-idle-watchdog-for-background-agent-follow-up-and-board-note-injection.md) | Implemented | v0.50.0 | `themion-core`, `themion-cli`, docs |
-| PRD-079 | [Codex-Like User-Shell Execution Mode for Shell Tooling](prd/prd-079-codex-like-user-shell-execution-mode.md) | Implemented | v0.51.0 | `themion-core`, `themion-cli`, docs |
+| PRD-079 | [Codex-Like User-Shell Execution Mode for Shell Tooling](prd/prd-079-codex-like-user-shell-execution-mode.md) | Implemented | v0.51.0 | `themion-core`, docs |
 | PRD-080 | [Rename the Primary Agent Identity from `main` to `master`](prd/prd-080-rename-primary-agent-main-to-master.md) | Implemented | v0.52.0 | `themion-core`, `themion-cli`, docs |
 | PRD-081 | [Single-Instance Multi-Agent Team Structure and Agent Membership Tools](prd/prd-081-single-instance-multi-agent-team-structure-and-agent-membership-tools.md) | Implemented | v0.53.0 | `themion-core`, `themion-cli`, docs |
 | PRD-082 | [Multi-Agent TUI Agent-Tagged Transcript and Event Highlighting](prd/prd-082-multi-agent-tui-agent-tagged-transcript.md) | Implemented | v0.54.0 | `themion-cli`, docs |
@@ -108,3 +108,4 @@ Active and recent product requirements documents live in `docs/prd/`. Older impl
 | PRD-093 | [Remove `history_search` and Make `unified_search` the Canonical Search Tool](prd/prd-093-remove-history-search-and-canonicalize-unified-search.md) | Implemented | v0.59.1 | `themion-core`, `themion-cli`, docs |
 | PRD-095 | [Retire the Legacy Memory-Node Embedding Table and Direct Semantic Search Path](prd/prd-095-retire-legacy-memory-node-embeddings.md) | Implemented | v0.60.0 | `themion-core`, `themion-cli`, docs |
 | PRD-094 | [Treat `project_dir="."` as Current Project Scope Fallback in Targeted Project-Scoped Tools](prd/prd-094-dot-project-dir-current-project-compat.md) | Implemented | v0.59.2 | `themion-core`, docs |
+| PRD-096 | [Automatic Append-Only Chat Message Indexing and Idle-Only Background Embedding](prd/prd-096-automatic-chat-message-indexing-pipeline.md) | Draft | >v0.59.2 +minor | `themion-core`, `themion-cli`, docs |
