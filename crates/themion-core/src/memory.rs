@@ -76,21 +76,6 @@ const DEFAULT_SEMANTIC_CANDIDATE_LIMIT: usize = 200;
 const DEFAULT_SEMANTIC_FULL_SCAN_LIMIT: usize = 10_000;
 #[cfg(feature = "semantic-memory")]
 const DEFAULT_SEMANTIC_INDEX_BATCH_SIZE: usize = 64;
-#[cfg(feature = "semantic-memory")]
-const MEMORY_SCHEMA_SEMANTIC: &str = "
-CREATE TABLE IF NOT EXISTS memory_node_embeddings (
-    node_id TEXT PRIMARY KEY REFERENCES memory_nodes(node_id) ON DELETE CASCADE,
-    embedding_model TEXT NOT NULL,
-    embedding_dim INTEGER NOT NULL,
-    embedding_blob BLOB NOT NULL,
-    source_updated_at_ms INTEGER NOT NULL,
-    indexed_at_ms INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_memory_node_embeddings_model_updated
-    ON memory_node_embeddings(embedding_model, source_updated_at_ms DESC);
-
-";
-
 fn now_unix_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -199,9 +184,11 @@ fn migrate_project_dir(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "semantic-memory")]
-fn init_semantic_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(MEMORY_SCHEMA_SEMANTIC)?;
+fn drop_legacy_semantic_memory_tables(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS memory_node_embeddings;
+         DROP TABLE IF EXISTS memory_embedding_queue;",
+    )?;
     Ok(())
 }
 
@@ -212,8 +199,7 @@ pub fn init_schema(conn: &Connection, fts5: bool) -> Result<()> {
         conn.execute_batch(MEMORY_SCHEMA_FTS5)?;
     }
     conn.execute_batch(UNIFIED_SEARCH_SCHEMA)?;
-    #[cfg(feature = "semantic-memory")]
-    init_semantic_schema(conn)?;
+    drop_legacy_semantic_memory_tables(conn)?;
     Ok(())
 }
 

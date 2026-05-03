@@ -586,3 +586,4 @@ This PRD is implementation-ready because it resolves the following concrete deci
 - Supported source kinds are `memory`, `chat_message`, `tool_call`, and `tool_result`.
 - `unified_search` supports `fts`, `semantic`, and `hybrid` modes with one shared result schema, source-aware labels, primary snippets, and bounded supporting snippets.
 - A rebuild/refresh maintenance path is available via `unified_search_rebuild` and the generalized `/unified-search index` slash-command/runtime flow.
+- Project Memory no longer keeps a separate `memory_node_embeddings` semantic storage path; memory-node create/update now refreshes the canonical generalized unified-search index directly.

@@ -106,4 +106,5 @@ Active and recent product requirements documents live in `docs/prd/`. Older impl
 | PRD-091 | [Generalized Multi-Source Chunked Semantic Search](prd/prd-091-generalized-multi-source-chunked-semantic-search.md) | Implemented | v0.59.0 | `themion-core`, `themion-cli`, docs |
 | PRD-092 | [Slash Command for Source-Kind-Scoped Unified-Search Indexing](prd/prd-092-source-kind-scoped-unified-search-index-command.md) | Implemented | v0.59.1 | `themion-cli`, `themion-core`, docs |
 | PRD-093 | [Remove `history_search` and Make `unified_search` the Canonical Search Tool](prd/prd-093-remove-history-search-and-canonicalize-unified-search.md) | Implemented | v0.59.1 | `themion-core`, `themion-cli`, docs |
+| PRD-095 | [Retire the Legacy Memory-Node Embedding Table and Direct Semantic Search Path](prd/prd-095-retire-legacy-memory-node-embeddings.md) | Implemented | v0.60.0 | `themion-core`, `themion-cli`, docs |
 | PRD-094 | [Treat `project_dir="."` as Current Project Scope Fallback in Targeted Project-Scoped Tools](prd/prd-094-dot-project-dir-current-project-compat.md) | Implemented | v0.59.2 | `themion-core`, docs |
