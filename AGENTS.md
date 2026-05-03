@@ -9,6 +9,10 @@ Instructions for coding agents working in this repository.
   - `crates/themion-core`: agent loop, provider clients, tools, SQLite history.
   - `crates/themion-cli`: TUI, config, login flows, app wiring.
 - Docs live in `docs/`.
+- The default persistent SQLite database file is `system.db` under the Themion data directory.
+  - On Linux, the canonical default path is `$XDG_DATA_HOME/themion/system.db`.
+  - If `XDG_DATA_HOME` is unset, this typically resolves to `~/.local/share/themion/system.db`.
+  - Legacy `history.db` in the same directory is migrated to `system.db` when the default database is opened.
 
 ## Folder structure hints
 
@@ -176,7 +180,7 @@ Typical feature checks for `themion-cli`:
 - Keep PRDs centered on product requirements and intended behavior, not only engineering tactics.
 - Write PRDs in terms of what the product must do, not around placeholder example tokens or temporary shorthand unless the literal token is itself the requirement.
 - If discussion includes an example marker or sketch such as `[xxxx]`, verify whether it is the real requirement or only a shorthand for a broader product distinction before baking it into the PRD.
-- When a user correction changes the intent of a PRD, rewrite the PRD around the corrected product requirement instead of merely patching the old framing.
+- If the user correction changes the intent of a PRD, rewrite the PRD around the corrected product requirement instead of merely patching the old framing.
 - When a PRD is phased, preserve the overall product outcome and make phases describe delivery slices beneath it rather than replacing it with "Phase 1" as the effective goal.
 - Treat implemented PRDs as historical specs/contracts, not living design docs.
 - Do not modify an implemented PRD unless the user explicitly instructs it.
