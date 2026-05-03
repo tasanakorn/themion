@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-
+use std::sync::Mutex;
 #[cfg(feature = "stylos")]
+use std::collections::HashMap;
+
 use std::time::Duration;
 
-#[cfg(feature = "stylos")]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use themion_core::agent::{Agent, TurnCancellation};
 use themion_core::client_codex::ApiCallRateLimitReport;
@@ -21,15 +21,12 @@ use uuid::Uuid;
 
 use crate::tui::AppEvent;
 #[cfg(feature = "stylos")]
-use crate::board_runtime::{
-    board_note_id_from_prompt, release_board_note_claim, LocalBoardClaimRegistry,
-    WATCHDOG_IDLE_DELAY_MS_DEFAULT,
-};
+use crate::board_runtime::{board_note_id_from_prompt, release_board_note_claim, LocalBoardClaimRegistry};
 use crate::app_state::{AppRuntimeEvent, AppSnapshot, AppSnapshotAgent, AppSnapshotHub};
-#[cfg(feature = "stylos")]
-use std::collections::HashMap;
 use crate::config::save_profiles;
-use crate::runtime_domains::{DomainHandle, RuntimeDomains};
+use crate::runtime_domains::DomainHandle;
+#[cfg(feature = "stylos")]
+use crate::runtime_domains::RuntimeDomains;
 use crate::Session;
 
 #[cfg(feature = "stylos")]
@@ -43,13 +40,13 @@ pub(crate) type StylosSnapshotProvider = std::sync::Arc<dyn Fn() -> StylosSnapsh
 
 
 #[cfg(feature = "stylos")]
-pub(crate) type IncomingPromptState = HashMap<String, crate::stylos::IncomingPromptRequest>;
+pub(crate) type IncomingPromptState = HashMap<String, crate::local_prompts::IncomingPromptRequest>;
 
 #[cfg(feature = "stylos")]
 pub(crate) fn incoming_prompt_request<'a>(
     incoming_prompts: &'a IncomingPromptState,
     agent_id: &str,
-) -> Option<&'a crate::stylos::IncomingPromptRequest> {
+) -> Option<&'a crate::local_prompts::IncomingPromptRequest> {
     incoming_prompts.get(agent_id)
 }
 
@@ -57,7 +54,7 @@ pub(crate) fn incoming_prompt_request<'a>(
 pub(crate) fn take_incoming_prompt_request(
     incoming_prompts: &mut IncomingPromptState,
     agent_id: &str,
-) -> Option<crate::stylos::IncomingPromptRequest> {
+) -> Option<crate::local_prompts::IncomingPromptRequest> {
     incoming_prompts.remove(agent_id)
 }
 
@@ -65,7 +62,7 @@ pub(crate) fn take_incoming_prompt_request(
 pub(crate) fn set_incoming_prompt_request(
     incoming_prompts: &mut IncomingPromptState,
     agent_id: String,
-    request: Option<crate::stylos::IncomingPromptRequest>,
+    request: Option<crate::local_prompts::IncomingPromptRequest>,
 ) {
     match request {
         Some(request) => {
@@ -178,8 +175,8 @@ pub(crate) fn build_local_agent_tool_invoker(
     })
 }
 
-#[cfg(feature = "stylos")]
 #[derive(Clone, Debug)]
+#[cfg_attr(not(feature = "stylos"), allow(dead_code))]
 pub(crate) struct LocalAgentStatusEntry {
     pub agent_id: String,
     pub label: String,
@@ -191,7 +188,6 @@ pub(crate) struct LocalAgentStatusEntry {
     pub has_active_incoming_prompt: bool,
 }
 
-#[cfg(feature = "stylos")]
 pub(crate) fn local_agent_status_entry(
     agent_id: impl Into<String>,
     label: impl Into<String>,
@@ -562,7 +558,7 @@ pub(crate) fn build_main_agent(
     project_dir: PathBuf,
     local_agent_mgmt_tx: mpsc::UnboundedSender<AppEvent>,
     #[cfg(feature = "stylos")] stylos_tool_bridge: Option<crate::stylos::StylosToolBridge>,
-    #[cfg(feature = "stylos")] local_stylos_instance: Option<&str>,
+    #[cfg(feature = "stylos")] local_instance_id: Option<&str>,
     #[cfg(feature = "stylos")] local_agent_id: &str,
     system_inspection: Option<SystemInspectionResult>,
     api_log_enabled: bool,
@@ -575,7 +571,7 @@ pub(crate) fn build_main_agent(
         #[cfg(feature = "stylos")]
         stylos_tool_bridge,
         #[cfg(feature = "stylos")]
-        local_stylos_instance,
+        local_instance_id,
         #[cfg(feature = "stylos")]
         local_agent_id,
         Some(build_local_agent_tool_invoker(local_agent_mgmt_tx)),
@@ -619,7 +615,7 @@ pub(crate) struct RuntimeCommandContext<'a> {
     #[cfg(feature = "stylos")]
     pub stylos_tool_bridge: Option<crate::stylos::StylosToolBridge>,
     #[cfg(feature = "stylos")]
-    pub local_stylos_instance: Option<&'a str>,
+    pub local_instance_id: Option<&'a str>,
     pub api_log_enabled: bool,
     pub local_agent_mgmt_tx: mpsc::UnboundedSender<AppEvent>,
 }
@@ -642,7 +638,7 @@ pub(crate) fn execute_runtime_command(
                     #[cfg(feature = "stylos")]
                     stylos_tool_bridge: context.stylos_tool_bridge,
                     #[cfg(feature = "stylos")]
-                    local_stylos_instance: context.local_stylos_instance,
+                    local_instance_id: context.local_instance_id,
                     api_log_enabled: context.api_log_enabled,
                     local_agent_mgmt_tx: context.local_agent_mgmt_tx,
                     insert_session: true,
@@ -686,7 +682,7 @@ pub(crate) fn execute_runtime_command(
                 #[cfg(feature = "stylos")]
                 stylos_tool_bridge: context.stylos_tool_bridge,
                 #[cfg(feature = "stylos")]
-                local_stylos_instance: context.local_stylos_instance,
+                local_instance_id: context.local_instance_id,
                 api_log_enabled: context.api_log_enabled,
                 local_agent_mgmt_tx: context.local_agent_mgmt_tx,
                 insert_session: true,
@@ -714,7 +710,7 @@ pub(crate) fn execute_runtime_command(
                     #[cfg(feature = "stylos")]
                     stylos_tool_bridge: context.stylos_tool_bridge,
                     #[cfg(feature = "stylos")]
-                    local_stylos_instance: context.local_stylos_instance,
+                    local_instance_id: context.local_instance_id,
                     api_log_enabled: context.api_log_enabled,
                     local_agent_mgmt_tx: context.local_agent_mgmt_tx,
                     insert_session: true,
@@ -820,7 +816,7 @@ pub(crate) fn execute_runtime_command(
                     #[cfg(feature = "stylos")]
                     stylos_tool_bridge: context.stylos_tool_bridge,
                     #[cfg(feature = "stylos")]
-                    local_stylos_instance: context.local_stylos_instance,
+                    local_instance_id: context.local_instance_id,
                     api_log_enabled: context.api_log_enabled,
                     local_agent_mgmt_tx: context.local_agent_mgmt_tx,
                     insert_session: true,
@@ -1285,7 +1281,7 @@ pub(crate) struct AgentReplacementParams<'a> {
     #[cfg(feature = "stylos")]
     pub stylos_tool_bridge: Option<crate::stylos::StylosToolBridge>,
     #[cfg(feature = "stylos")]
-    pub local_stylos_instance: Option<&'a str>,
+    pub local_instance_id: Option<&'a str>,
     pub api_log_enabled: bool,
     pub insert_session: bool,
 }
@@ -1303,7 +1299,7 @@ pub(crate) fn build_replacement_main_agent(
         #[cfg(feature = "stylos")]
         params.stylos_tool_bridge,
         #[cfg(feature = "stylos")]
-        params.local_stylos_instance,
+        params.local_instance_id,
         #[cfg(feature = "stylos")]
         "master",
         None,
@@ -1316,6 +1312,7 @@ pub(crate) fn build_replacement_main_agent(
     }
     Ok((new_agent, new_session_id))
 }
+
 
 fn unix_epoch_now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -1351,6 +1348,26 @@ pub(crate) fn build_local_agent_roster(
     agents
         .iter()
         .map(|handle| roster_entry(handle.agent_id.clone(), handle.roles.clone()))
+        .collect()
+}
+
+pub(crate) fn build_local_agent_status_entries_local(
+    agents: &[crate::tui::AgentHandle],
+) -> Vec<LocalAgentStatusEntry> {
+    agents
+        .iter()
+        .map(|handle| {
+            local_agent_status_entry(
+                handle.agent_id.clone(),
+                handle.label.clone(),
+                handle.roles.clone(),
+                handle.session_id.to_string(),
+                handle.agent.as_ref().map(|agent| agent.workflow_state().clone()),
+                handle.agent.as_ref().map(|agent| agent.project_dir.clone()),
+                handle.busy,
+                false,
+            )
+        })
         .collect()
 }
 
@@ -1406,7 +1423,7 @@ pub(crate) struct LocalAgentRuntimeContext<'a> {
     #[cfg(feature = "stylos")]
     pub stylos_tool_bridge: Option<crate::stylos::StylosToolBridge>,
     #[cfg(feature = "stylos")]
-    pub local_stylos_instance: Option<&'a str>,
+    pub local_instance_id: Option<&'a str>,
     pub local_agent_tool_invoker: Option<themion_core::tools::LocalAgentToolInvoker>,
     pub api_log_enabled: bool,
 }
@@ -1522,7 +1539,7 @@ fn create_local_agent(
         #[cfg(feature = "stylos")]
         ctx.stylos_tool_bridge.clone(),
         #[cfg(feature = "stylos")]
-        ctx.local_stylos_instance,
+        ctx.local_instance_id,
         #[cfg(feature = "stylos")]
         &agent_id,
         ctx.local_agent_tool_invoker,
@@ -1636,70 +1653,39 @@ pub(crate) fn publish_stylos_task_failed(
     });
 }
 
-#[cfg(feature = "stylos")]
 #[derive(Default)]
+#[cfg_attr(not(feature = "stylos"), allow(dead_code))]
 pub(crate) struct WatchdogRuntimeState {
-    idle_started_at_ms: AtomicU64,
-    active_incoming_prompt: AtomicBool,
-    pending_watchdog_note: AtomicBool,
+    pending_watchdog_note: Mutex<bool>,
 }
 
-#[cfg(feature = "stylos")]
 impl WatchdogRuntimeState {
+    #[cfg_attr(not(feature = "stylos"), allow(dead_code))]
     pub(crate) fn sync_from_runtime_state(
         &self,
-        agent_busy: bool,
-        has_active_incoming_prompt: bool,
+        _agent_busy: bool,
+        _has_active_incoming_prompt: bool,
         pending_watchdog_note: bool,
     ) {
-        if agent_busy {
-            self.idle_started_at_ms.store(0, Ordering::Relaxed);
-        } else {
-            self.idle_started_at_ms
-                .store(unix_epoch_now_ms(), Ordering::Relaxed);
-        }
-        self.active_incoming_prompt
-            .store(has_active_incoming_prompt, Ordering::Relaxed);
-        self.pending_watchdog_note
-            .store(pending_watchdog_note, Ordering::Relaxed);
+        *self.pending_watchdog_note.lock().expect("watchdog state lock") = pending_watchdog_note;
     }
 
-    fn idle_started_at_ms(&self) -> Option<u64> {
-        let value = self.idle_started_at_ms.load(Ordering::Relaxed);
-        (value != 0).then_some(value)
-    }
-
+    #[cfg_attr(not(feature = "stylos"), allow(dead_code))]
     pub(crate) fn pending_watchdog_note(&self) -> bool {
-        self.pending_watchdog_note.load(Ordering::Relaxed)
-    }
-
-    fn should_trigger_watchdog_note(&self, now_ms: u64, idle_delay_ms: u64) -> bool {
-        if self.active_incoming_prompt.load(Ordering::Relaxed) {
-            return false;
-        }
-        let Some(idle_started_at_ms) = self.idle_started_at_ms() else {
-            return false;
-        };
-        now_ms.saturating_sub(idle_started_at_ms) >= idle_delay_ms
+        *self.pending_watchdog_note.lock().expect("watchdog state lock")
     }
 }
 
-#[cfg(feature = "stylos")]
 pub(crate) fn start_watchdog_task(
     background_domain: &DomainHandle,
     runtime_tx: mpsc::UnboundedSender<AppRuntimeEvent>,
-    runtime_state: Arc<WatchdogRuntimeState>,
+    _runtime_state: Arc<WatchdogRuntimeState>,
 ) {
     background_domain.spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(250));
         loop {
             interval.tick().await;
-            let now_ms = unix_epoch_now_ms();
-            if !runtime_state.should_trigger_watchdog_note(now_ms, WATCHDOG_IDLE_DELAY_MS_DEFAULT)
-            {
-                continue;
-            }
-            if runtime_tx.send(AppRuntimeEvent::WatchdogDispatchLog { agent_id: None, text: String::new() }).is_err() {
+            if runtime_tx.send(AppRuntimeEvent::WatchdogTick).is_err() {
                 break;
             }
         }
@@ -1723,7 +1709,7 @@ pub(crate) enum IncomingPromptDisposition {
         log_agent_id: Option<String>,
         log_text: String,
         prompt: String,
-        request: crate::stylos::IncomingPromptRequest,
+        request: crate::local_prompts::IncomingPromptRequest,
         pending_watchdog_note: bool,
     },
 }
@@ -1732,7 +1718,7 @@ pub(crate) enum IncomingPromptDisposition {
 pub(crate) fn resolve_incoming_prompt_disposition(
     agents: &[LocalAgentStatusEntry],
     board_claims: &Arc<LocalBoardClaimRegistry>,
-    request: crate::stylos::IncomingPromptRequest,
+    request: crate::local_prompts::IncomingPromptRequest,
 ) -> IncomingPromptDisposition {
     let target = request
         .agent_id
@@ -1800,7 +1786,7 @@ pub(crate) fn resolve_incoming_prompt_disposition(
         prompt: request.prompt.clone(),
         pending_watchdog_note: matches!(
             request.source,
-            crate::stylos::IncomingPromptSource::WatchdogBoardNote
+            crate::local_prompts::IncomingPromptSource::WatchdogBoardNote
         ),
         request,
     }
@@ -1845,7 +1831,7 @@ pub(crate) enum SubmitTargetResolution {
 #[cfg(feature = "stylos")]
 pub(crate) fn resolve_submit_target(
     agents: &[LocalAgentStatusEntry],
-    active_request: Option<&crate::stylos::IncomingPromptRequest>,
+    active_request: Option<&crate::local_prompts::IncomingPromptRequest>,
 ) -> SubmitTargetResolution {
     let interactive_index = agents
         .iter()
@@ -1901,7 +1887,7 @@ pub(crate) fn resolve_submit_target(
 pub(crate) struct IncomingPromptApplyPlan {
     pub accepted_agent_index: usize,
     pub accepted_prompt: String,
-    pub accepted_request: crate::stylos::IncomingPromptRequest,
+    pub accepted_request: crate::local_prompts::IncomingPromptRequest,
     pub pending_watchdog_note: bool,
 }
 
@@ -1943,7 +1929,7 @@ pub(crate) fn set_active_incoming_prompt(
     incoming_prompts: &mut IncomingPromptState,
     watchdog_state: &Arc<WatchdogRuntimeState>,
     agent_index: usize,
-    request: Option<crate::stylos::IncomingPromptRequest>,
+    request: Option<crate::local_prompts::IncomingPromptRequest>,
     _pending_watchdog_note: bool,
 ) {
     let agent_id = agents
@@ -1971,7 +1957,7 @@ pub(crate) fn continue_current_note_follow_up(
     incoming_prompts: &mut IncomingPromptState,
     watchdog_state: &Arc<WatchdogRuntimeState>,
     agent_index: usize,
-    request: crate::stylos::IncomingPromptRequest,
+    request: crate::local_prompts::IncomingPromptRequest,
 ) {
     let pending_watchdog_note = watchdog_state.pending_watchdog_note();
     set_active_incoming_prompt(
@@ -1990,7 +1976,7 @@ pub(crate) fn apply_active_incoming_prompt(
     incoming_prompts: &mut IncomingPromptState,
     watchdog_state: &Arc<WatchdogRuntimeState>,
     agent_index: usize,
-    request: crate::stylos::IncomingPromptRequest,
+    request: crate::local_prompts::IncomingPromptRequest,
     pending_watchdog_note: bool,
 ) {
     set_active_incoming_prompt(
@@ -2031,7 +2017,7 @@ pub(crate) struct IncomingPromptOutcome {
     pub task_failure: Option<String>,
     pub accepted_agent_index: Option<usize>,
     pub accepted_prompt: Option<String>,
-    pub accepted_request: Option<crate::stylos::IncomingPromptRequest>,
+    pub accepted_request: Option<crate::local_prompts::IncomingPromptRequest>,
     pub pending_watchdog_note: bool,
 }
 
@@ -2039,7 +2025,7 @@ pub(crate) struct IncomingPromptOutcome {
 pub(crate) fn plan_incoming_prompt(
     agents: &[LocalAgentStatusEntry],
     board_claims: &Arc<LocalBoardClaimRegistry>,
-    request: crate::stylos::IncomingPromptRequest,
+    request: crate::local_prompts::IncomingPromptRequest,
 ) -> IncomingPromptOutcome {
     match resolve_incoming_prompt_disposition(agents, board_claims, request) {
         IncomingPromptDisposition::MissingTarget {
@@ -2095,7 +2081,7 @@ pub(crate) enum CompletedNoteFollowUpEmission {
 
 #[cfg(feature = "stylos")]
 pub(crate) struct CompletedNoteFollowUpApplyPlan {
-    pub continue_request: Option<crate::stylos::IncomingPromptRequest>,
+    pub continue_request: Option<crate::local_prompts::IncomingPromptRequest>,
     pub continue_prompt: Option<String>,
     pub emission: Option<CompletedNoteFollowUpEmission>,
 }
@@ -2138,7 +2124,7 @@ pub(crate) fn completed_note_follow_up_apply_plan(
 pub(crate) enum CompletedNoteFollowUpPlan {
     None,
     ContinueCurrentNote {
-        request: crate::stylos::IncomingPromptRequest,
+        request: crate::local_prompts::IncomingPromptRequest,
         prompt: String,
     },
     EmitDoneMentionLog {
@@ -2152,7 +2138,7 @@ pub(crate) enum CompletedNoteFollowUpPlan {
 #[cfg(feature = "stylos")]
 pub(crate) fn plan_completed_note_follow_up(
     db: &Arc<DbHandle>,
-    remote: &crate::stylos::IncomingPromptRequest,
+    remote: &crate::local_prompts::IncomingPromptRequest,
 ) -> CompletedNoteFollowUpPlan {
     match crate::board_runtime::resolve_completed_note_follow_up(db, remote) {
         crate::board_runtime::BoardTurnFollowUp::None => CompletedNoteFollowUpPlan::None,
@@ -2168,7 +2154,6 @@ pub(crate) fn plan_completed_note_follow_up(
     }
 }
 
-#[cfg(feature = "stylos")]
 fn stylos_note_header_value<'a>(prompt: &'a str, key: &str) -> Option<&'a str> {
     let prefix = format!("{key}=");
     prompt
@@ -2178,7 +2163,6 @@ fn stylos_note_header_value<'a>(prompt: &'a str, key: &str) -> Option<&'a str> {
         .find_map(|part| part.strip_prefix(&prefix))
 }
 
-#[cfg(feature = "stylos")]
 pub(crate) fn stylos_note_display_identifier(prompt: &str) -> String {
     if let Some(note_slug) = stylos_note_header_value(prompt, "note_slug") {
         format!("note_slug={note_slug}")

@@ -1,14 +1,17 @@
-#![cfg(feature = "stylos")]
-
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 
-use themion_core::db::{BoardNote, DbHandle, NoteColumn, NoteKind};
+use themion_core::db::BoardNote;
+use themion_core::db::{DbHandle, NoteColumn, NoteKind};
 
 use crate::app_state::{create_done_mention_locally, DoneMentionRequest};
-use crate::stylos::{build_board_note_prompt, IncomingPromptRequest, IncomingPromptSource};
+use crate::local_prompts::build_board_note_prompt;
+use crate::local_prompts::IncomingPromptRequest;
+use crate::local_prompts::IncomingPromptSource;
 
 pub const WATCHDOG_IDLE_DELAY_MS_DEFAULT: u64 = 2_000;
+pub const WATCHDOG_NO_PENDING_COOLDOWN_MS_DEFAULT: u64 = 1_000;
 
 #[derive(Default)]
 pub struct LocalBoardClaimRegistry {
@@ -28,6 +31,7 @@ impl LocalBoardClaimRegistry {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(feature = "stylos"), allow(dead_code))]
 pub enum BoardTurnFollowUp {
     None,
     ContinueCurrentNote {
@@ -87,6 +91,30 @@ fn build_injection_request(note: &BoardNote, trigger: IncomingPromptSource) -> I
     }
 }
 
+
+fn candidate_local_instances(local_instance: &str) -> Vec<String> {
+    let mut out = vec![local_instance.to_string()];
+    if let Some((base, pid)) = local_instance.rsplit_once(':') {
+        if !pid.is_empty() {
+            let sibling = if base == "local" {
+                std::env::var_os("HOSTNAME")
+                    .and_then(|v| v.into_string().ok())
+                    .map(|hostname| hostname.trim().to_string())
+                    .filter(|hostname| !hostname.is_empty())
+                    .map(|hostname| format!("{hostname}:{pid}"))
+            } else {
+                Some(format!("local:{pid}"))
+            };
+            if let Some(sibling) = sibling {
+                if sibling != local_instance {
+                    out.push(sibling);
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn resolve_pending_board_note_injection(
     db: &Arc<DbHandle>,
     local_claims: &Arc<LocalBoardClaimRegistry>,
@@ -94,13 +122,16 @@ pub fn resolve_pending_board_note_injection(
     target_agent_id: &str,
     trigger: IncomingPromptSource,
 ) -> Option<IncomingPromptRequest> {
-    let Ok(Some(note)) = db.next_board_note_for_injection(local_instance, target_agent_id) else {
-        return None;
-    };
-    if !local_claims.try_claim(&note.note_id) {
-        return None;
+    for candidate_instance in candidate_local_instances(local_instance) {
+        let Ok(Some(note)) = db.next_board_note_for_injection(&candidate_instance, target_agent_id) else {
+            continue;
+        };
+        if !local_claims.try_claim(&note.note_id) {
+            continue;
+        }
+        return Some(build_injection_request(&note, trigger));
     }
-    Some(build_injection_request(&note, trigger))
+    None
 }
 
 pub fn release_board_note_claim(local_claims: &Arc<LocalBoardClaimRegistry>, note_id: &str) {
@@ -119,6 +150,7 @@ pub fn board_note_id_from_prompt(prompt: &str) -> Option<&str> {
         .find_map(|part| part.strip_prefix("note_id="))
 }
 
+#[cfg_attr(not(feature = "stylos"), allow(dead_code))]
 pub fn resolve_completed_note_follow_up(
     db: &Arc<DbHandle>,
     remote: &IncomingPromptRequest,

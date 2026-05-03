@@ -1,11 +1,12 @@
 mod app_runtime;
 mod app_state;
 mod auth_store;
-#[cfg(feature = "stylos")]
 mod board_runtime;
 mod chat_composer;
 mod config;
+mod instance_id;
 mod headless_runner;
+mod local_prompts;
 mod login_codex;
 mod paste_burst;
 mod runtime_domains;

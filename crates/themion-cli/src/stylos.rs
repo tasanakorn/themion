@@ -36,7 +36,6 @@ const TASK_RETENTION: Duration = Duration::from_secs(30 * 60);
 const MAX_WAIT_TIMEOUT_MS: u64 = 60_000;
 const DISCOVERY_QUERY_TIMEOUT_MS: u64 = 1_500;
 const TALK_POLL_INTERVAL_MS: u64 = 300;
-const NOTE_PREFIX: &str = "type=stylos_note";
 
 const PRIMARY_AGENT_ID: &str = "master";
 const PRIMARY_AGENT_ID_COMPAT_ALIAS: &str = "main";
@@ -150,25 +149,7 @@ pub struct StylosCmdRequest {
     pub prompt: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IncomingPromptSource {
-    RemoteStylos,
-    WatchdogBoardNote,
-}
-
-#[derive(Clone, Debug)]
-pub struct IncomingPromptRequest {
-    pub prompt: String,
-    pub source: IncomingPromptSource,
-    pub agent_id: Option<String>,
-    pub task_id: Option<String>,
-    #[allow(dead_code)]
-    pub request_id: Option<String>,
-    pub from: Option<String>,
-    pub from_agent_id: Option<String>,
-    pub to: Option<String>,
-    pub to_agent_id: Option<String>,
-}
+use crate::local_prompts::{IncomingPromptRequest, IncomingPromptSource};
 
 
 #[derive(Default)]
@@ -1018,11 +999,11 @@ async fn start_inner(
     network_domain: DomainHandle,
     shared_status_hub: Option<SharedStylosStatusHub>,
 ) -> Result<StylosHandle, String> {
-    let key_instance = derive_local_instance_id();
+    let key_instance = crate::instance_id::derive_local_instance_id();
     let identity_instance = key_instance
         .split_once(':')
         .map(|(hostname, _)| hostname.to_string())
-        .unwrap_or_else(|| "themion".to_string());
+        .unwrap_or_else(|| "local".to_string());
     let realm = settings.realm();
     let mode = settings.mode();
 
@@ -2001,41 +1982,6 @@ async fn reply_cbor<T: Serialize>(
         .await
 }
 
-pub fn derive_local_instance_id() -> String {
-    let hostname = derive_hostname().unwrap_or_else(|| "themion".to_string());
-    let process_id = std::process::id();
-    format!("{hostname}:{process_id}")
-}
-
-fn derive_hostname() -> Option<String> {
-    let hostname = hostname::get().ok()?.to_string_lossy().to_lowercase();
-    let mapped: String = hostname
-        .chars()
-        .map(|c| {
-            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let trimmed = mapped.trim_matches('-').to_string();
-    let capped: String = trimmed.chars().take(32).collect();
-    if capped.is_empty() || !is_valid_segment(&capped) {
-        None
-    } else {
-        Some(capped)
-    }
-}
-
-fn is_valid_segment(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit() => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
 
 fn render_instance_identifier(instance: Option<&str>) -> String {
     instance
@@ -2043,57 +1989,6 @@ fn render_instance_identifier(instance: Option<&str>) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or("external")
         .to_string()
-}
-
-pub fn build_board_note_prompt(
-    note_id: &str,
-    note_slug: &str,
-    note_kind: NoteKind,
-    origin_note_id: Option<&str>,
-    sender: Option<&str>,
-    sender_agent_id: Option<&str>,
-    target: &str,
-    local_agent_id: &str,
-    column: NoteColumn,
-    body: &str,
-    source: IncomingPromptSource,
-) -> String {
-    let note_purpose = match note_kind {
-        NoteKind::WorkRequest => match column {
-            NoteColumn::Blocked => "This is a durable delegated work note that currently starts in blocked because its first useful action is to wait or reassess later. Treat it as deferred board work, not ready backlog. Reassess whether the waiting condition has changed. If it is still waiting, keep it in blocked and update result text with the current blocker when useful. If it becomes actionable, move it back to todo before resuming normal work. Never use Stylos talk in response to this note. Board workflow only.",
-            _ => "This is a durable delegated work note. Prefer progressing or completing the requested work through the board workflow. Move the note from todo to in_progress as soon as you begin meaningful work when possible. If you finish the task, update the note result text with the concrete outcome and move it to done before ending the turn. If meaningful progress started and then must wait, move the note to blocked instead of leaving it in ready backlog. Never use Stylos talk in response to this note. Board workflow only.",
-        },
-        NoteKind::DoneMention => "This is an informational completion mention for prior delegated work. Incoming notes still enter the board in todo and must be actively handled; do not assume storage state means the note is already resolved. Treat this as a durable done notification, not as a fresh request to repeat the same task. Decide whether any concrete action remains based on the note context. If no further action is actually needed, move the note to done in this turn. If follow-up is still required, keep working it through the board workflow until the remaining action is complete. Do not create an automatic done echo in response. Do not send an acknowledgment, summary-only reply, or any other no-op follow-up unless the note clearly requires a concrete next action or correction.",
-    };
-    let instruction = match source {
-        IncomingPromptSource::RemoteStylos => None,
-        IncomingPromptSource::WatchdogBoardNote => {
-            Some("I found that you have a pending note to handle. Below is that note.".to_string())
-        }
-    };
-    match instruction {
-        Some(instruction) => format!(
-            "{NOTE_PREFIX} note_id={note_id} note_slug={note_slug} note_kind={} origin_note_id={} from={} from_agent_id={} to={target} to_agent_id={local_agent_id} column={}\n\n{}\n\n{}\n\nNote body:\n{}",
-            note_kind.as_str(),
-            origin_note_id.unwrap_or("-"),
-            sender.unwrap_or("unknown"),
-            sender_agent_id.unwrap_or("unknown"),
-            column.as_str(),
-            instruction,
-            note_purpose,
-            body
-        ),
-        None => format!(
-            "{NOTE_PREFIX} note_id={note_id} note_slug={note_slug} note_kind={} origin_note_id={} from={} from_agent_id={} to={target} to_agent_id={local_agent_id} column={}\n\n{}\n\nNote body:\n{}",
-            note_kind.as_str(),
-            origin_note_id.unwrap_or("-"),
-            sender.unwrap_or("unknown"),
-            sender_agent_id.unwrap_or("unknown"),
-            column.as_str(),
-            note_purpose,
-            body
-        ),
-    }
 }
 
 fn build_peer_message_prompt(
@@ -2280,7 +2175,7 @@ mod tests {
 
     #[test]
     fn note_prompt_mentions_note_identity_and_body() {
-        let prompt = build_board_note_prompt(
+        let prompt = crate::local_prompts::build_board_note_prompt(
             "123e4567-e89b-12d3-a456-426614174000",
             "fix-tests-123e4567",
             NoteKind::WorkRequest,

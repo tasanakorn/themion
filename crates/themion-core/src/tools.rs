@@ -451,39 +451,62 @@ fn resolve_board_target(
     #[cfg(feature = "stylos")] local_instance_id: Option<&str>,
     #[cfg(feature = "stylos")] local_agent_id: Option<&str>,
 ) -> Result<(String, String)> {
-    if requested_to_instance != SELF_TARGET_KEYWORD && requested_to_agent_id != SELF_TARGET_KEYWORD
-    {
-        return Ok((
-            requested_to_instance.to_string(),
-            requested_to_agent_id.to_string(),
-        ));
+    #[cfg(feature = "stylos")]
+    let resolved_local_instance = local_instance_id
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("local:{}", std::process::id()));
+
+    #[cfg(not(feature = "stylos"))]
+    let resolved_local_instance = format!("local:{}", std::process::id());
+
+    let to_instance = match requested_to_instance {
+        SELF_TARGET_KEYWORD | "local" => resolved_local_instance,
+        other => other.to_string(),
+    };
+
+    #[cfg(feature = "stylos")]
+    let to_agent_id = if requested_to_agent_id == SELF_TARGET_KEYWORD {
+        local_agent_id
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("SELF requires known local agent id"))?
+            .to_string()
+    } else {
+        requested_to_agent_id.to_string()
+    };
+
+    #[cfg(not(feature = "stylos"))]
+    let to_agent_id = if requested_to_agent_id == SELF_TARGET_KEYWORD {
+        "master".to_string()
+    } else {
+        requested_to_agent_id.to_string()
+    };
+
+    Ok((to_instance, to_agent_id))
+}
+
+fn resolve_note_source_instance(
+    requested_from_instance: Option<&str>,
+    #[cfg(feature = "stylos")] local_instance_id: Option<&str>,
+) -> Option<String> {
+    let requested = requested_from_instance?.trim();
+    if requested.is_empty() {
+        return None;
     }
 
     #[cfg(feature = "stylos")]
-    {
-        let to_instance = if requested_to_instance == SELF_TARGET_KEYWORD {
-            local_instance_id
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("SELF requires known local instance id"))?
-                .to_string()
-        } else {
-            requested_to_instance.to_string()
-        };
-        let to_agent_id = if requested_to_agent_id == SELF_TARGET_KEYWORD {
-            local_agent_id
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("SELF requires known local agent id"))?
-                .to_string()
-        } else {
-            requested_to_agent_id.to_string()
-        };
-        return Ok((to_instance, to_agent_id));
-    }
+    let resolved_local_instance = local_instance_id
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("local:{}", std::process::id()));
 
     #[cfg(not(feature = "stylos"))]
-    {
-        anyhow::bail!("SELF target keyword is unavailable without stylos support");
-    }
+    let resolved_local_instance = format!("local:{}", std::process::id());
+
+    Some(match requested {
+        SELF_TARGET_KEYWORD | "local" => resolved_local_instance,
+        other => other.to_string(),
+    })
 }
 
 fn resolve_memory_project_dir(args: &Value, ctx: &ToolCtx) -> String {
@@ -775,12 +798,12 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "board_create_note",
-                "description": "Create a durable board note. Use SELF for the current local instance or agent.",
+                "description": "Create a durable board note. For ordinary self-notes, prefer the magic local target to_instance=local and to_agent_id=master. SELF is also accepted when local identity resolution is available.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "to_instance": { "type": "string", "description": "Target instance id or SELF." },
-                        "to_agent_id": { "type": "string", "description": "Target agent id or SELF." },
+                        "to_instance": { "type": "string", "description": "Target instance id. Prefer local for ordinary self-notes; SELF is also accepted when supported." },
+                        "to_agent_id": { "type": "string", "description": "Target agent id. Prefer master for ordinary self-notes; SELF is also accepted when supported." },
                         "body": { "type": "string" },
                         "note_kind": { "type": "string", "enum": ["work_request", "done_mention"], "description": "Kind. Default: work_request." },
                         "origin_note_id": { "type": "string", "description": "Original note id for done mentions." },
@@ -1182,7 +1205,11 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 note_kind,
                 column,
                 origin_note_id: args["origin_note_id"].as_str().map(str::to_string),
-                from_instance: args["from_instance"].as_str().map(str::to_string),
+                from_instance: resolve_note_source_instance(
+                    args["from_instance"].as_str(),
+                    #[cfg(feature = "stylos")]
+                    ctx.local_instance_id.as_deref(),
+                ),
                 from_agent_id: args["from_agent_id"].as_str().map(str::to_string),
                 to_instance,
                 to_agent_id,

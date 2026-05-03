@@ -293,6 +293,7 @@ const MAX_HISTORY_REPLAY_AGE: usize = 7;
 const MEMORY_KB_GUIDANCE: &str = "Project Memory guidance: memory_* tools are for intentional durable Project Memory knowledge that should outlive the current session, not routine transcript logging or disposable task tracking. Project Memory stores durable knowledge for the current project by default. Use project_dir=\"[GLOBAL]\" only for Global Knowledge: reusable cross-project facts, preferences, conventions, provider/tool behavior, or troubleshooting patterns. Global Knowledge is an explicitly selected context inside Project Memory, not a separate system. When unsure, keep knowledge project-local and promote later only when cross-project usefulness is clear. Prefer knowledge-base shaped entries: concepts, components, files, tasks, decisions, facts, observations, troubleshooting records, and typed links between them. Use node_type values such as concept, component, file, task, decision, fact, observation, troubleshooting, or person. Use node_type=memory only for genuinely narrative long-term capture when a more specific knowledge-base type is not yet known. Add hashtags for retrieval, and link related nodes when the relationship is useful. Keep ordinary conversation history in session history and coordination work in board notes rather than duplicating it into Project Memory.";
 
 const TOOL_START_BOARD_NOTE_DISPLAY_TOOLS: &[&str] = &[
+    "board_create_note",
     "board_read_note",
     "board_move_note",
     "board_update_note_result",
@@ -308,6 +309,21 @@ fn build_tool_start_display_arguments_json(
     }
     let mut args: Value = serde_json::from_str(arguments_json).ok()?;
     let args_obj = args.as_object_mut()?;
+
+    if tool_name == "board_create_note" {
+        if let Some(to_instance) = args_obj.get_mut("to_instance") {
+            if to_instance.as_str() == Some("SELF") {
+                *to_instance = Value::String("local".to_string());
+            }
+        }
+        if let Some(to_agent_id) = args_obj.get_mut("to_agent_id") {
+            if to_agent_id.as_str() == Some("SELF") {
+                *to_agent_id = Value::String("master".to_string());
+            }
+        }
+        return serde_json::to_string(&args).ok();
+    }
+
     let needs_note_slug = args_obj
         .get("note_slug")
         .and_then(Value::as_str)
@@ -627,14 +643,14 @@ impl Agent {
 
         #[cfg(feature = "stylos")]
         let board_guidance_text = {
-            let self_instance = self.local_instance_id.as_deref().unwrap_or("unknown");
+            let self_instance = self.local_instance_id.as_deref().unwrap_or("local");
             let self_agent_id = self.local_agent_id.as_deref().unwrap_or("master");
             format!(
-                "Board guidance: simple direct Q&A without tools usually should not create a self-note. If the task needs tools, edits, validation, or durable follow-up tracking, consider creating a durable board note for yourself to help keep track of the work. Your exact self-note target in this session is to_instance={self_instance} to_agent_id={self_agent_id}. For self-notes, you may also call board_create_note with the exact magic keyword SELF for both to_instance and to_agent_id, and the runtime will replace SELF with those exact values. Do not invent placeholders or guesses other than the exact SELF keyword. Multi-agent collaboration guidance: prefer durable board notes over stylos_request_talk when delegating asynchronous or non-urgent work to another agent. Treat stylos_request_talk as an interrupting realtime path for urgent coordination or brief clarification. When you receive a done-mention note, treat it as an informational completion notification rather than a fresh work request."
+                "Board guidance: simple direct Q&A without tools usually should not create a self-note. If the task needs tools, edits, validation, or durable follow-up tracking, consider creating a durable board note for yourself to help keep track of the work. For self-notes, prefer the magic local target to_instance=local to_agent_id={self_agent_id}. In this session, the exact current self target is to_instance={self_instance} to_agent_id={self_agent_id}. Use local for ordinary self-notes unless you specifically need the exact instance id. Multi-agent collaboration guidance: prefer durable board notes over stylos_request_talk when delegating asynchronous or non-urgent work to another agent. Treat stylos_request_talk as an interrupting realtime path for urgent coordination or brief clarification. When you receive a done-mention note, treat it as an informational completion notification rather than a fresh work request."
             )
         };
         #[cfg(not(feature = "stylos"))]
-        let board_guidance_text = "Board guidance: simple direct Q&A without tools usually should not create a self-note. If the task needs tools, edits, validation, or durable follow-up tracking, consider creating a durable board note for yourself to help keep track of the work. For self-notes in this session, use your local board context rather than inventing remote identifiers. Multi-agent collaboration guidance: prefer durable board notes over stylos_request_talk when delegating asynchronous or non-urgent work to another agent. Treat stylos_request_talk as an interrupting realtime path for urgent coordination or brief clarification. When you receive a done-mention note, treat it as an informational completion notification rather than a fresh work request.".to_string();
+        let board_guidance_text = "Board guidance: simple direct Q&A without tools usually should not create a self-note. If the task needs tools, edits, validation, or durable follow-up tracking, consider creating a durable board note for yourself to help keep track of the work. For self-notes, prefer the magic local target to_instance=local to_agent_id=master. Do not invent remote identifiers for local-only board work. Multi-agent collaboration guidance: prefer durable board notes over stylos_request_talk when delegating asynchronous or non-urgent work to another agent. Treat stylos_request_talk as an interrupting realtime path for urgent coordination or brief clarification. When you receive a done-mention note, treat it as an informational completion notification rather than a fresh work request.".to_string();
         let board_guidance = vec![Message {
             role: "system".to_string(),
             content: Some(board_guidance_text),

@@ -254,7 +254,6 @@ pub async fn run(mut app_runtime: AppState) -> anyhow::Result<()> {
     let runtime_observer_publisher = AppRuntimeObserverPublisher::new(snapshot_publisher);
     start_snapshot_watch_loop(&runtime_domains, &snapshot_hub, &ctx.app_tx);
 
-    #[cfg(feature = "stylos")]
     crate::app_state::start_tui_watchdog_loop(&app_runtime, ctx.runtime_tx.clone());
 
     crate::app_state::finalize_tui_runtime_state(

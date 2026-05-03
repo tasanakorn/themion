@@ -929,6 +929,10 @@ impl DbHandle {
             updated_at_ms: now_ms,
             injected_at_ms: None,
         };
+        warn_if_unexpected_board_note_instance(&note.to_instance, "to_instance", &note.note_id);
+        if let Some(from_instance) = note.from_instance.as_deref() {
+            warn_if_unexpected_board_note_instance(from_instance, "from_instance", &note.note_id);
+        }
         conn.execute(
             "INSERT INTO board_notes (
                 note_id, note_slug, note_kind, origin_note_id, completion_notified_at_ms,
@@ -1307,6 +1311,29 @@ impl NoteInjectionState {
             "injected" => Some(Self::Injected),
             _ => None,
         }
+    }
+}
+
+fn warn_if_unexpected_board_note_instance(instance: &str, field_name: &str, note_id: &str) {
+    if instance.is_empty() {
+        eprintln!(
+            "warning: board note {} created with empty {}",
+            note_id, field_name
+        );
+        return;
+    }
+    if instance == "local" {
+        eprintln!(
+            "warning: board note {} created with legacy {}=local; expected concrete instance id like <hostname>:<pid>",
+            note_id, field_name
+        );
+        return;
+    }
+    if !instance.contains(':') {
+        eprintln!(
+            "warning: board note {} created with unexpected {} format {:?}; expected <hostname>:<pid>",
+            note_id, field_name, instance
+        );
     }
 }
 

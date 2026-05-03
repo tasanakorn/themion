@@ -48,6 +48,8 @@ When adding code:
 - Keep file IO, config loading, TUI event handling, and user-facing flows in `themion-cli`.
 - Treat the TUI as a strict human input/output surface only. `tui.rs` and `tui_runner.rs` should only collect human input, translate that input into runtime/app-state intents, observe runtime/app-state outputs, and render those outputs back to the human. They must not own or interpret runtime orchestration, agent-management policy, watchdog behavior, Stylos coordination, board routing, incoming-prompt admission, or other non-visual system decisions.
 - Stylos transport, watchdog behavior, agent roster publication, board routing, agent discovery, incoming-prompt handling, and other multi-agent runtime logic are not TUI responsibilities. Investigate and implement those behaviors in CLI runtime/orchestrator modules first, and touch `tui.rs` only for display/input wiring that is strictly required.
+- Treat Stylos as a lower-layer facility/foundation/transport adapter that the runtime can opt into or out of, not as the owner of core local runtime features.
+- Core local features such as watchdog scheduling, board notes, durable note workflow, and local incoming-prompt handling should not disappear just because the `stylos` feature is disabled. Feature gating may change transport-specific behavior, identity format, publication/discovery paths, or remote coordination capabilities, but it should not remove the whole local feature unless the product requirement explicitly says so.
 - When debugging local-agent visibility or board-targeting issues, do not assume `tui.rs` is the right fix location just because the app has a terminal UI; verify the runtime ownership path and prefer runtime-owned state/publication code.
 - Preserve the `ChatBackend` abstraction when adding or changing model providers.
 - Do not collapse provider-specific behavior into ad hoc conditionals when a backend-specific module already exists.
@@ -67,6 +69,7 @@ When adding code:
 - `TUI` and `HEADLESS` are surfaces. They should send human or external intents/commands and render or report observed runtime state. They must not become the canonical owner of agent roster, workflow, watchdog policy, board-routing policy, incoming-prompt admission, or Stylos-published status.
 - `HUB / APP_STATE` is the runtime owner. It should own agent registry state, session/runtime metadata, workflow state, watchdog/board/stylos coordination state, admission/scheduling decisions, and the status snapshot that other layers consume.
 - `AGENT CORE` and `STYLOS` are lower-layer services/adapters used by the hub. Stylos should query or publish hub-owned state rather than asking TUI-owned state for the truth.
+- Do not make hub-owned runtime behavior depend wholesale on Stylos compile-time availability unless the behavior is inherently transport-specific. Prefer keeping one runtime-owned feature path and varying only the Stylos-backed portions such as remote transport, discovery, or external publication.
 - Avoid cross-layer ownership leaks such as TUI-owned agent rosters, TUI-assembled Stylos status snapshots, direct Stylos-to-TUI dependencies, or TUI-side runtime decision trees. Treat these as architecture violations to fix, not acceptable end states.
 - When introducing a new runtime behavior, decide first which layer owns the state and which layers only observe or project it.
 - If a behavior can be described as “the system decided”, that decision belongs outside TUI. The TUI may display the decision or forward a human request that influences it, but should not be the layer that makes it.
@@ -112,7 +115,7 @@ When adding code:
 - Preserve streaming behavior and tool-call handling when editing client code.
 - Be careful with async trait/object boundaries; do not introduce unnecessary lifetime complexity.
 - This workspace uses feature flags; when editing feature-gated code, ensure both default builds and relevant opt-in feature builds still compile.
-- When validation is needed after code changes, check the narrowest useful target first, then also run an `--all-features` build for each touched crate before considering the task done.
+- When validation is needed after code changes, check the narrowest useful target first, then also run the relevant non-`--all-features` build(s) for the touched crate so default or specifically targeted feature combinations are verified, and finally run an `--all-features` build for each touched crate before considering the task done.
 - Do not reference feature-gated modules, types, or helpers from always-on code paths unless the reference is guarded consistently.
 
 ## Tools and file edits
@@ -141,7 +144,7 @@ Typical checks:
 - `cargo test -p themion-cli`
 
 If you changed only one crate, prefer checking that crate first.
-Before considering the task complete, also run `cargo check --all-features` for each touched crate, even if the primary change was not feature-gated.
+Before considering the task complete, also run the relevant non-`--all-features` build(s) for each touched crate, including the default feature set when applicable, and then run `cargo check --all-features` for each touched crate, even if the primary change was not feature-gated.
 If you changed feature-gated code or code that references feature-gated modules, also run the relevant feature-on and feature-off build checks for the affected crate.
 Typical feature checks for `themion-cli`:
 

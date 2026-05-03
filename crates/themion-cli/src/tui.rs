@@ -49,7 +49,6 @@ pub(crate) enum NonAgentSource {
     Board,
     Stylos,
     Runtime,
-    Watchdog,
 }
 
 impl NonAgentSource {
@@ -58,7 +57,6 @@ impl NonAgentSource {
             Self::Board => "BOARD",
             Self::Stylos => "STYLOS",
             Self::Runtime => "RUNTIME",
-            Self::Watchdog => "WATCHDOG",
         }
     }
 
@@ -67,7 +65,6 @@ impl NonAgentSource {
             Self::Board => Color::Yellow,
             Self::Stylos => Color::Cyan,
             Self::Runtime => Color::Magenta,
-            Self::Watchdog => Color::LightRed,
         }
     }
 }
