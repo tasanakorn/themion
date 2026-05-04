@@ -1,0 +1,22 @@
+[package]
+name = "themion-web"
+version = "0.61.1"
+edition = "2021"
+
+[[bin]]
+name = "themion-web"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tokio.workspace = true
+rusqlite.workspace = true
+axum = { version = "0.8", features = ["ws", "json"] }
+leptos = { version = "0.8", default-features = false, features = ["ssr"] }
+portable-pty = "0.9"
+dirs = "5"
+base64.workspace = true
+futures-util = "0.3"

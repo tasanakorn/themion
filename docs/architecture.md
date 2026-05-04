@@ -14,6 +14,9 @@ For a focused walkthrough of the harness/runtime itself, including system prompt
   - look here first for file IO, TUI event handling, app/session orchestration, and local profile/auth flows
   - optional Stylos support lives here behind the `stylos` cargo feature; when that feature is compiled, Stylos starts by default unless config overrides disable it
   - the CLI runtime owns process-local agent descriptors such as `agent_id`, `label`, and `roles`, while each core `Agent` continues to own its own session/workflow state
+- `crates/themion-web/`
+  - independent local web surface and separate `themion-web` binary for read-only Phase 1 monitoring plus browser PTY access
+  - consumes only already-existing external interfaces in Phase 1: the active SQLite database plus config/auth files, without becoming a runtime owner
 - `docs/`
   - project docs and behavior notes; keep this aligned with real behavior when flows or semantics change
 

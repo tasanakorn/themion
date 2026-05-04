@@ -2,6 +2,7 @@
 members = [
     "crates/themion-core",
     "crates/themion-cli",
+    "crates/themion-web",
 ]
 resolver = "2"
 

@@ -5,6 +5,7 @@
 
 - [architecture.md](architecture.md) — workspace structure, core design philosophy, component map, process/thread model, harness loop, context windowing, streaming, tools, persistent history, TUI behavior, and Stylos multi-agent status shape.
 - [engine-runtime.md](engine-runtime.md) — detailed walkthrough of prompt inputs, `AGENTS.md` injection, context building, tool-calling flow, workflow runtime behavior, SQLite session storage, and the boundary between CLI-local agent roles and core harness state.
+- [`../crates/themion-web/README.md`](../crates/themion-web/README.md) — local web binary scope, bind behavior, and pinned bundled terminal assets for `themion-web`.
 - [prd-self-note-guidance.md](prd-self-note-guidance.md) — focused guidance on when to create self-notes and how to avoid noisy board-note behavior.
 
 ## PRDs
@@ -13,6 +14,7 @@ Active and recent product requirements documents live in `docs/prd/`. Older impl
 
 | ID      | Title                                                                                                       | Status        | Version | Scope                                    |
 | ------- | ----------------------------------------------------------------------------------------------------------- | ------------- | ------- | ---------------------------------------- |
+| PRD-101 | [Self-Contained Web Server Crate for Themion Web Interface](prd/prd-101-self-contained-web-server-crate-for-themion-web-interface.md) | In progress | >v0.61.1 +minor | new web crate, docs |
 | PRD-100 | [Improve Quota-Limit Error Detection and Reset Reporting](prd/prd-100-improve-quota-limit-error-reset-reporting.md) | Implemented | v0.61.1 | `themion-core`, `themion-cli`, docs |
 | PRD-099 | [Build Metadata Injection and Stylos Version Reporting](prd/prd-099-build-metadata-and-stylos-version-reporting.md) | Implemented | v0.61.0 | `themion-core`, `themion-cli`, docs |
 | PRD-098 | [Normalize Session/Profile Command Surface](prd/prd-098-normalize-session-profile-command-surface.md) | Implemented | v0.60.2 | `themion-cli`, docs |
