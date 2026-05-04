@@ -919,10 +919,12 @@ pub(crate) fn handle_runtime_command(
             }
         }
         crate::app_runtime::RuntimeCommand::SessionProfileUse { .. }
-        | crate::app_runtime::RuntimeCommand::SessionModelUse { .. }
-        | crate::app_runtime::RuntimeCommand::SessionReset
+        | crate::app_runtime::RuntimeCommand::SessionProfileSet { .. }
+        | crate::app_runtime::RuntimeCommand::SessionProfileReset
         | crate::app_runtime::RuntimeCommand::ConfigProfileUse { .. }
         | crate::app_runtime::RuntimeCommand::ConfigProfileCreate { .. }
+        | crate::app_runtime::RuntimeCommand::ConfigProfileClone { .. }
+        | crate::app_runtime::RuntimeCommand::ConfigProfileDelete { .. }
         | crate::app_runtime::RuntimeCommand::ConfigProfileSet { .. }
         | crate::app_runtime::RuntimeCommand::SetApiLogEnabled { .. }
         | crate::app_runtime::RuntimeCommand::ClearContext => {

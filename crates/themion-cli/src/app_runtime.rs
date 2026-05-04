@@ -595,10 +595,12 @@ pub(crate) enum RuntimeCommand {
         source_kind: Option<String>,
     },
     SessionProfileUse { name: String },
-    SessionModelUse { model: String },
-    SessionReset,
+    SessionProfileSet { key: String, value: String },
+    SessionProfileReset,
     ConfigProfileUse { name: String },
     ConfigProfileCreate { name: String },
+    ConfigProfileClone { source: String, dest: String },
+    ConfigProfileDelete { name: String },
     ConfigProfileSet { key: String, value: String },
     SetApiLogEnabled { enabled: bool },
     ClearContext,
@@ -682,8 +684,14 @@ pub(crate) fn execute_runtime_command(
                 )])
             }
         }
-        RuntimeCommand::SessionModelUse { model } => {
-            context.session.set_temporary_model_override(&model);
+        RuntimeCommand::SessionProfileSet { key, value } => {
+            if key != "model" {
+                return RuntimeCommandOutcome::Lines(vec![format!(
+                    "unknown session key '{}'.  valid: model",
+                    key
+                )]);
+            }
+            context.session.set_temporary_model_override(&value);
             match build_replacement_main_agent(AgentReplacementParams {
                 session: context.session,
                 project_dir: context.project_dir,
@@ -710,7 +718,7 @@ pub(crate) fn execute_runtime_command(
                 )]),
             }
         }
-        RuntimeCommand::SessionReset => {
+        RuntimeCommand::SessionProfileReset => {
             if context.session.clear_temporary_overrides() {
                 match build_replacement_main_agent(AgentReplacementParams {
                     session: context.session,
@@ -760,6 +768,59 @@ pub(crate) fn execute_runtime_command(
                 lines.push(format!("warning: {}", e));
             }
             lines.push(format!("profile '{}' created and saved", name));
+            RuntimeCommandOutcome::Lines(lines)
+        }
+        RuntimeCommand::ConfigProfileClone { source, dest } => {
+            if context.session.profiles.contains_key(&dest) {
+                return RuntimeCommandOutcome::Lines(vec![format!(
+                    "profile '{}' already exists",
+                    dest
+                )]);
+            }
+            let Some(profile) = context.session.profiles.get(&source).cloned() else {
+                let mut names: Vec<String> = context.session.profiles.keys().cloned().collect();
+                names.sort();
+                return RuntimeCommandOutcome::Lines(vec![format!(
+                    "unknown profile '{}'.  available: {}",
+                    source,
+                    names.join(", ")
+                )]);
+            };
+            context.session.profiles.insert(dest.clone(), profile);
+            let mut lines = Vec::new();
+            if let Err(e) = save_profiles(&context.session.configured_profile, &context.session.profiles) {
+                lines.push(format!("warning: {}", e));
+            }
+            lines.push(format!("profile '{}' cloned to '{}' and saved", source, dest));
+            RuntimeCommandOutcome::Lines(lines)
+        }
+        RuntimeCommand::ConfigProfileDelete { name } => {
+            if name == "default" {
+                return RuntimeCommandOutcome::Lines(vec![
+                    "cannot delete the default profile".to_string(),
+                ]);
+            }
+            if name == context.session.active_profile {
+                return RuntimeCommandOutcome::Lines(vec![format!(
+                    "cannot delete the current active profile '{}'",
+                    name
+                )]);
+            }
+            if !context.session.profiles.contains_key(&name) {
+                let mut names: Vec<String> = context.session.profiles.keys().cloned().collect();
+                names.sort();
+                return RuntimeCommandOutcome::Lines(vec![format!(
+                    "unknown profile '{}'.  available: {}",
+                    name,
+                    names.join(", ")
+                )]);
+            }
+            context.session.profiles.remove(&name);
+            let mut lines = Vec::new();
+            if let Err(e) = save_profiles(&context.session.configured_profile, &context.session.profiles) {
+                lines.push(format!("warning: {}", e));
+            }
+            lines.push(format!("profile '{}' deleted", name));
             RuntimeCommandOutcome::Lines(lines)
         }
         RuntimeCommand::ConfigProfileSet { key, value } => {

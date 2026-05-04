@@ -8,7 +8,7 @@
 
 ## Implementation status
 
-Landed in `v0.49.0` as a session-scoped runtime override feature for the TUI. The shipped behavior adds `/session profile use`, `/session model use`, `/session show`, and `/session reset`, keeps persistent `/config` save semantics unchanged, rebuilds the interactive agent from the effective session-only state, and makes temporary overrides explicit in command output without rewriting config files.
+Landed in `v0.49.0` as a session-scoped runtime override feature for the TUI. The shipped behavior originally added `/session profile use`, `/session model use`, `/session show`, and `/session reset`, kept persistent `/config` save semantics unchanged, rebuilt the interactive agent from the effective session-only state, and made temporary overrides explicit in command output without rewriting config files. Later PRD-098 normalized the public command surface to `/session profile show`, `/session profile use`, `/session profile set model=<value>`, and `/session profile reset` while preserving the same session-only semantics.
 
 ## Summary
 

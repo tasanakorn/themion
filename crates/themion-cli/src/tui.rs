@@ -25,6 +25,65 @@ use themion_core::{
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
+fn help_lines() -> Vec<String> {
+    vec![
+        "commands:".to_string(),
+        "  /help                                show implemented slash commands".to_string(),
+        "  /config                              show current saved settings".to_string(),
+        "  /config profile [list]               list profiles".to_string(),
+        "  /config profile show                 show active saved profile".to_string(),
+        "  /config profile create <name>        create from current settings".to_string(),
+        "  /config profile clone <source> <dest> clone a saved profile".to_string(),
+        "  /config profile delete <name>        delete a saved profile (not active/default)".to_string(),
+        "  /config profile use <name>           switch profile and save to config".to_string(),
+        "  /config profile set provider=<value> set provider on the active saved profile".to_string(),
+        "  /config profile set model=<value>    set model on the active saved profile".to_string(),
+        "  /config profile set endpoint=<value> set endpoint on the active saved profile".to_string(),
+        "  /config profile set api_key=<value>  set api_key on the active saved profile".to_string(),
+        "  /session profile show                show configured vs effective session runtime state".to_string(),
+        "  /session profile use <name>          temporarily switch profile for this session only".to_string(),
+        "  /session profile set model=<value>   temporarily override model for this session only".to_string(),
+        "  /session profile reset               clear temporary session-only overrides".to_string(),
+        "  /login codex [profile]               log in for the default or named profile".to_string(),
+        "  /debug runtime                       show Themion process/thread/task activity".to_string(),
+        "  /debug api-log enable                enable per-round API call logging for this session".to_string(),
+        "  /debug api-log disable               disable per-round API call logging for this session".to_string(),
+        "  /context                             show prompt-budget and history replay breakdown".to_string(),
+        "  /clear                               clear chat history before this point from future context".to_string(),
+        "  /unified-search index                refresh generalized unified-search indexes".to_string(),
+        "  /unified-search index full           rebuild generalized unified-search indexes".to_string(),
+        "  /exit                                quit".to_string(),
+        "  /quit                                quit".to_string(),
+    ]
+}
+
+fn config_help_lines() -> Vec<String> {
+    vec![
+        "commands:".to_string(),
+        "  /config                              show current saved settings".to_string(),
+        "  /config profile [list]               list profiles".to_string(),
+        "  /config profile show                 show active saved profile".to_string(),
+        "  /config profile create <name>        create from current settings".to_string(),
+        "  /config profile clone <source> <dest> clone a saved profile".to_string(),
+        "  /config profile delete <name>        delete a saved profile (not active/default)".to_string(),
+        "  /config profile use <name>           switch profile and save to config".to_string(),
+        "  /config profile set provider=<value> set provider on the active saved profile".to_string(),
+        "  /config profile set model=<value>    set model on the active saved profile".to_string(),
+        "  /config profile set endpoint=<value> set endpoint on the active saved profile".to_string(),
+        "  /config profile set api_key=<value>  set api_key on the active saved profile".to_string(),
+    ]
+}
+
+fn session_help_lines() -> Vec<String> {
+    vec![
+        "commands:".to_string(),
+        "  /session profile show                show configured vs effective session runtime state".to_string(),
+        "  /session profile use <name>          temporarily switch profile for this session only".to_string(),
+        "  /session profile set model=<value>   temporarily override model for this session only".to_string(),
+        "  /session profile reset               clear temporary session-only overrides".to_string(),
+    ]
+}
+
 pub(crate) enum AppEvent {
     Key(event::KeyEvent),
     Mouse(event::MouseEvent),
@@ -1144,17 +1203,20 @@ impl App {
             return out;
         }
 
+        if input == "/help" {
+            return help_lines();
+        }
+
         if input == "/config" {
             return crate::app_state::session_config_lines(&self.runtime.session);
         }
 
-        if input == "/session show" {
-            return crate::app_state::session_show_lines(&self.runtime.session);
-        }
-
         if let Some(rest) = input.strip_prefix("/session ") {
-            let parts: Vec<&str> = rest.splitn(3, ' ').collect();
+            let parts: Vec<&str> = rest.splitn(4, ' ').collect();
             match parts.as_slice() {
+                ["profile", "show"] => {
+                    out.extend(crate::app_state::session_show_lines(&self.runtime.session));
+                }
                 ["profile", "use", name] => {
                     app_tx
                         .send(AppEvent::RuntimeCommand(RuntimeCommand::SessionProfileUse {
@@ -1162,34 +1224,42 @@ impl App {
                         }))
                         .ok();
                 }
-                ["model", "use", model] => {
+                ["profile", "set", kv] => {
+                    if let Some((key, val)) = kv.split_once('=') {
+                        app_tx
+                            .send(AppEvent::RuntimeCommand(RuntimeCommand::SessionProfileSet {
+                                key: key.to_string(),
+                                value: val.to_string(),
+                            }))
+                            .ok();
+                    } else {
+                        out.push("usage: /session profile set model=<value>".to_string());
+                    }
+                }
+                ["profile", "reset"] => {
                     app_tx
-                        .send(AppEvent::RuntimeCommand(RuntimeCommand::SessionModelUse {
-                            model: (*model).to_string(),
-                        }))
+                        .send(AppEvent::RuntimeCommand(RuntimeCommand::SessionProfileReset))
                         .ok();
+                }
+                ["show"] => {
+                    out.push("/session show was removed; use /session profile show".to_string());
                 }
                 ["reset"] => {
-                    app_tx
-                        .send(AppEvent::RuntimeCommand(RuntimeCommand::SessionReset))
-                        .ok();
+                    out.push("/session reset was removed; use /session profile reset".to_string());
                 }
-                _ => {
-                    out.push("commands:".to_string());
-                    out.push("  /session show                 show configured vs effective session runtime state".to_string());
-                    out.push("  /session profile use <name>   temporarily switch profile for this session only".to_string());
-                    out.push("  /session model use <model>    temporarily override model for this session only".to_string());
-                    out.push(
-                        "  /session reset                clear temporary session-only overrides"
-                            .to_string(),
-                    );
+                ["model", "use", model] => {
+                    out.push(format!(
+                        "/session model use {} was removed; use /session profile set model={}",
+                        model, model
+                    ));
                 }
+                _ => out.extend(session_help_lines()),
             }
             return out;
         }
 
         if let Some(rest) = input.strip_prefix("/config ") {
-            let parts: Vec<&str> = rest.splitn(3, ' ').collect();
+            let parts: Vec<&str> = rest.splitn(4, ' ').collect();
             match parts.as_slice() {
                 ["profile"] | ["profile", "list"] => {
                     out.extend(crate::app_state::config_profile_list_lines(&self.runtime.session));
@@ -1200,6 +1270,21 @@ impl App {
                 ["profile", "create", name] => {
                     app_tx
                         .send(AppEvent::RuntimeCommand(RuntimeCommand::ConfigProfileCreate {
+                            name: (*name).to_string(),
+                        }))
+                        .ok();
+                }
+                ["profile", "clone", source, dest] => {
+                    app_tx
+                        .send(AppEvent::RuntimeCommand(RuntimeCommand::ConfigProfileClone {
+                            source: (*source).to_string(),
+                            dest: (*dest).to_string(),
+                        }))
+                        .ok();
+                }
+                ["profile", "delete", name] => {
+                    app_tx
+                        .send(AppEvent::RuntimeCommand(RuntimeCommand::ConfigProfileDelete {
                             name: (*name).to_string(),
                         }))
                         .ok();
@@ -1220,41 +1305,16 @@ impl App {
                             }))
                             .ok();
                     } else {
-                        out.push("usage: /config profile set key=value".to_string());
+                        out.push("usage: /config profile set provider=<value>|model=<value>|endpoint=<value>|api_key=<value>".to_string());
                     }
                 }
-                _ => {
-                    out.push("commands:".to_string());
-                    out.push("  /debug runtime                   show Themion process/thread/task activity".to_string());
-                    out.push("  /context                         show prompt-budget and history replay breakdown".to_string());
-                    out.push("  /debug api-log enable            enable per-round API call logging for this session".to_string());
-                    out.push("  /debug api-log disable           disable per-round API call logging for this session".to_string());
-                    out.push("  /unified-search index [kind]    refresh generalized unified-search indexes for this project or one kind".to_string());
-                    out.push("  /unified-search index full [kind] rebuild generalized unified-search indexes for this project or one kind".to_string());
-                    out.push(
-                        "  /config                          show current settings".to_string(),
-                    );
-                    out.push("  /config profile [list]           list profiles".to_string());
-                    out.push("  /config profile show             show active profile".to_string());
-                    out.push(
-                        "  /config profile create <name>    create from current settings"
-                            .to_string(),
-                    );
-                    out.push(
-                        "  /config profile use <name>       switch profile and save to config"
-                            .to_string(),
-                    );
-                    out.push(
-                        "  /config profile set key=value    set provider/model/endpoint/api_key"
-                            .to_string(),
-                    );
-                }
+                _ => out.extend(config_help_lines()),
             }
             return out;
         }
 
         out.push(format!(
-            "unknown command '{}'.  try /context, /config, /session show, /debug runtime, /debug api-log enable, or /unified-search index [kind]",
+            "unknown command '{}'.  try /help",
             input
         ));
         out

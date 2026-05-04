@@ -8,7 +8,7 @@
 
 ## Implementation status
 
-Landed in `v0.49.1` as a focused refinement to PRD-076 session-only switching semantics. The shipped behavior clears any active temporary session model override when `/session profile use <name>` succeeds, rebuilds the interactive agent from the selected profile's configured model, and makes the reset explicit in command feedback while keeping later explicit `/session model use <model>` overrides available.
+Landed in `v0.49.1` as a focused refinement to PRD-076 session-only switching semantics. The shipped behavior clears any active temporary session model override when `/session profile use <name>` succeeds, rebuilds the interactive agent from the selected profile's configured model, and makes the reset explicit in command feedback while keeping later explicit temporary model overrides available. Later PRD-098 normalized the user-facing model override command from `/session model use <model>` to `/session profile set model=<value>` without changing that reset behavior.
 
 ## Summary
 
