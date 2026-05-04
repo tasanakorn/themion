@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use chrono::{Local, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fmt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -67,6 +68,60 @@ pub struct ApiCallRateLimitReport {
     pub snapshots: Vec<ExtractedRateLimitSnapshot>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderQuotaError {
+    pub error_type: Option<String>,
+    pub message: Option<String>,
+    pub plan_type: Option<String>,
+    pub resets_at: Option<i64>,
+    pub resets_in_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderApiError {
+    pub provider: String,
+    pub http_status: u16,
+    pub raw_body: String,
+    pub quota: Option<ProviderQuotaError>,
+}
+
+impl fmt::Display for ProviderApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(quota) = &self.quota {
+            let provider = display_provider_name(&self.provider);
+            let mut attrs = vec![format!("status={}", self.http_status)];
+            if let Some(error_type) = quota.error_type.as_deref() {
+                attrs.push(format!("type={error_type}"));
+            }
+            if let Some(plan_type) = quota.plan_type.as_deref() {
+                attrs.push(format!("plan={plan_type}"));
+            }
+
+            write!(f, "{provider} quota limit reached ({})", attrs.join(", "))?;
+
+            if let Some(message) = quota.message.as_deref() {
+                write!(f, ": {message}")?;
+            }
+
+            if let Some(reset_sentence) = format_quota_reset_sentence(quota) {
+                write!(f, ". {reset_sentence}")?;
+            }
+
+            return Ok(());
+        }
+
+        write!(
+            f,
+            "{} API error {}: {}",
+            display_provider_name(&self.provider),
+            self.http_status,
+            self.raw_body
+        )
+    }
+}
+
+impl std::error::Error for ProviderApiError {}
+
 pub struct CodexClient {
     http: reqwest::Client,
     base_url: String,
@@ -87,6 +142,21 @@ struct CodexModelInfo {
     display_name: Option<String>,
     context_window: Option<u64>,
     max_context_window: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexErrorEnvelope {
+    error: Option<CodexErrorBody>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexErrorBody {
+    #[serde(rename = "type")]
+    error_type: Option<String>,
+    message: Option<String>,
+    plan_type: Option<String>,
+    resets_at: Option<i64>,
+    resets_in_seconds: Option<i64>,
 }
 
 fn build_responses_api_body(model: &str, messages: &[Message], tools: &Value) -> Value {
@@ -529,13 +599,85 @@ fn percent_left(used_percent: f64) -> f64 {
 
 fn format_reset_time(resets_at: i64) -> Option<String> {
     let dt = Local.timestamp_opt(resets_at, 0).single()?;
-    Some(dt.format("%H:%M on %-d %b").to_string())
+    Some(dt.format("%Y-%m-%d %H:%M local").to_string())
 }
 
 fn format_limit_display(percent_left: f64, resets_at: Option<i64>) -> String {
     match resets_at.and_then(format_reset_time) {
         Some(when) => format!("{percent_left:.0}% left (resets {when})"),
         None => format!("{percent_left:.0}% left"),
+    }
+}
+
+fn format_compact_duration(total_seconds: i64) -> Option<String> {
+    if total_seconds < 0 {
+        return None;
+    }
+    let days = total_seconds / 86_400;
+    let hours = (total_seconds % 86_400) / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    let seconds = total_seconds % 60;
+
+    if days > 0 {
+        Some(format!("{days}d {hours:02}h"))
+    } else if hours > 0 {
+        Some(format!("{hours}h {minutes:02}m"))
+    } else if minutes > 0 {
+        Some(format!("{minutes}m {seconds:02}s"))
+    } else {
+        Some(format!("{seconds}s"))
+    }
+}
+
+fn format_quota_reset_sentence(quota: &ProviderQuotaError) -> Option<String> {
+    match (
+        quota.resets_at.and_then(format_reset_time),
+        quota.resets_in_seconds.and_then(format_compact_duration),
+    ) {
+        (Some(at), Some(relative)) => Some(format!("Resets at {at} (in {relative})")),
+        (Some(at), None) => Some(format!("Resets at {at}")),
+        (None, Some(relative)) => Some(format!("Resets in {relative}")),
+        (None, None) => None,
+    }
+}
+
+fn display_provider_name(provider: &str) -> &str {
+    match provider {
+        "codex" => "Codex",
+        _ => provider,
+    }
+}
+
+fn parse_codex_quota_error(body: &str) -> Option<ProviderQuotaError> {
+    let envelope: CodexErrorEnvelope = serde_json::from_str(body).ok()?;
+    let error = envelope.error?;
+    if error.error_type.is_none()
+        && error.message.is_none()
+        && error.plan_type.is_none()
+        && error.resets_at.is_none()
+        && error.resets_in_seconds.is_none()
+    {
+        return None;
+    }
+
+    Some(ProviderQuotaError {
+        error_type: error.error_type,
+        message: error.message,
+        plan_type: error.plan_type,
+        resets_at: error.resets_at,
+        resets_in_seconds: error.resets_in_seconds,
+    })
+}
+
+fn build_codex_api_error(status: reqwest::StatusCode, body: String) -> ProviderApiError {
+    let quota = (status.as_u16() == 429)
+        .then(|| parse_codex_quota_error(&body))
+        .flatten();
+    ProviderApiError {
+        provider: "codex".to_string(),
+        http_status: status.as_u16(),
+        raw_body: body,
+        quota,
     }
 }
 
@@ -775,7 +917,7 @@ impl ChatBackend for CodexClient {
             if response_status.as_u16() == 429 {
                 let _ = parse_active_rate_limit_from_headers(&response_headers);
             }
-            return Err(anyhow!("Codex API error {response_status}: {text}"));
+            return Err(build_codex_api_error(response_status, text).into());
         }
 
         let mut buf: Vec<u8> = Vec::new();

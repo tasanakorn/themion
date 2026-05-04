@@ -202,10 +202,12 @@ Themion can also derive limit snapshots from streamed data or from non-success r
 Current integration behavior:
 
 - non-success `/models` responses return an error with status and body text
-- non-success `/responses` responses return an error with status and body text
+- non-success `/responses` responses return an error with status and body text, and known structured quota-limit bodies are reformatted into a clearer surfaced message
 - `429` responses may still carry useful rate-limit headers and should be parsed when available
+- known structured Codex quota bodies may also provide `type`, `message`, `plan_type`, `resets_at`, and `resets_in_seconds`
+- `resets_at` and `resets_in_seconds` in the current Codex quota body shape are interpreted as seconds
 - token refresh failures return an error with upstream status and body text
-- malformed or missing optional metadata fields are tolerated by using `None`
+- malformed or missing optional metadata fields are tolerated by using `None`, with fallback to generic raw error text when structured quota parsing does not match
 
 ## Non-goals for the integration layer
 

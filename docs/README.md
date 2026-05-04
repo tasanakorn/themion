@@ -13,6 +13,7 @@ Active and recent product requirements documents live in `docs/prd/`. Older impl
 
 | ID      | Title                                                                                                       | Status        | Version | Scope                                    |
 | ------- | ----------------------------------------------------------------------------------------------------------- | ------------- | ------- | ---------------------------------------- |
+| PRD-100 | [Improve Quota-Limit Error Detection and Reset Reporting](prd/prd-100-improve-quota-limit-error-reset-reporting.md) | Implemented | v0.61.1 | `themion-core`, `themion-cli`, docs |
 | PRD-099 | [Build Metadata Injection and Stylos Version Reporting](prd/prd-099-build-metadata-and-stylos-version-reporting.md) | Implemented | v0.61.0 | `themion-core`, `themion-cli`, docs |
 | PRD-098 | [Normalize Session/Profile Command Surface](prd/prd-098-normalize-session-profile-command-surface.md) | Implemented | v0.60.2 | `themion-cli`, docs |
 | PRD-097 | [Patch the Retired Memory-Node Embedding Runtime Mismatch](prd/prd-097-patch-retired-memory-node-embedding-runtime-mismatch.md) | Implemented | v0.60.1 | `themion-core`, `themion-cli`, docs |
