@@ -78,7 +78,7 @@ Each core `Agent` also receives a CLI-provided local role context derived from i
 
 `themion-cli` now owns explicit Tokio runtime construction through a CLI-local runtime topology helper.
 
-Current phase-1 runtime domains:
+Current runtime domains:
 
 - `tui` — one-worker multi-thread runtime for TUI event intake, tick scheduling, frame scheduling, and TUI-side bridge tasks
 - `core` — multi-thread runtime for startup coordination, print-mode execution, and core harness orchestration paths
@@ -87,9 +87,9 @@ Current phase-1 runtime domains:
 
 Mode differences:
 
-- TUI mode constructs `tui`, `core`, `network`, and `background` and runs through a shared CLI app-runtime plus `tui_runner`
-- explicit `--headless` mode constructs the reduced non-TUI runtime set currently needed by that path, which is `core` and `network`, runs through the same shared CLI app-runtime plus `headless_runner`, and emits structured NDJSON lifecycle logs on stdout
-- non-interactive prompt-argument mode also reuses that shared CLI app-runtime, but remains a one-shot stdout/stderr execution path rather than the long-running headless NDJSON-log mode
+- TUI mode constructs `tui`, `core`, `network`, and `background` and runs through a shared CLI app-state/runtime plus `tui_runner`
+- explicit `--headless` mode constructs the reduced non-TUI runtime set currently needed by that path, which is `core` and `network`, runs through the same shared CLI app-state/runtime plus `headless_runner`, and emits structured NDJSON lifecycle logs on stdout
+- non-interactive prompt-argument mode also reuses that shared CLI app-state/runtime, but remains a one-shot stdout/stderr execution path rather than the long-running headless NDJSON-log mode
 
 This preserves the single-process architecture while making runtime ownership explicit in startup code. In the current implementation, the `tui` domain remains a Tokio multi-thread runtime configured with one worker thread, while `core`, `network`, and `background` remain multi-thread runtimes. The full thread model is slightly broader than the domain list alone: TUI mode also uses one dedicated terminal-input OS thread for Crossterm polling, and `themion-core` uses `spawn_blocking` for DB-sensitive work.
 
@@ -105,7 +105,7 @@ themion process
 │        ├─ non-interactive prompt mode → headless_runner::run_non_interactive(...)
 │        ├─ --headless mode            → headless_runner::run(...)
 │        └─ TUI mode                   → tui_runner::run(...)
-├─ shared CLI app runtime
+├─ shared CLI app-state/runtime ownership (application state, not a Tokio executor)
 │  └─ crates/themion-cli/src/app_state.rs
 │     ├─ resolves project_dir
 │     ├─ opens DbHandle
@@ -130,9 +130,11 @@ themion process
 │     ├─ Stylos query handlers
 │     ├─ Stylos command subscriber
 │     └─ Stylos bridge tasks into the local app flow
-├─ Tokio runtime domain: background   (multi-thread, reserved in phase 1)
+├─ Tokio runtime domain: background   (multi-thread)
 │  └─ Tokio tasks
-│     └─ lower-priority maintenance work
+│     ├─ lower-priority maintenance work
+│     ├─ pending chat-message unified-search embedding
+│     └─ semantic reindex / indexing follow-up work
 └─ supporting worker threads
    └─ spawn_blocking worker threads for DB-sensitive work in themion-core
 ```
@@ -254,7 +256,7 @@ Current lifecycle behavior:
 
 - `tasks/request` allocates a stable `task_id` and inserts a `queued` entry
 - when the bridged local turn actually begins, the registry updates that task to `running`
-- when the turn finishes, the TUI stores the last observed assistant text as the terminal result and marks the task `completed`
+- when the turn finishes, the CLI-local Stylos task registry records the terminal assistant result and marks the task `completed`; the TUI only observes and renders the outcome when present
 - if the request cannot be delivered or arrives while the selected local execution path is already busy, the registry marks the task `failed` with a machine-readable reason such as `agent_busy`
 - `tasks/status` reads the current registry entry without blocking
 - `tasks/result` can wait for a terminal state up to a bounded timeout, then returns either the finished result or the current non-terminal state with `timed_out = true`

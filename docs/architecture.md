@@ -1,8 +1,5 @@
 # Architecture
 
-> [!WARNING]
-> The current checked-out workspace no longer matches the detailed `themion-cli` TUI/runtime architecture described below. During a destructive force-removal pass requested by the user, `crates/themion-cli/src/tui.rs` and `crates/themion-cli/src/app_runtime.rs` were intentionally stripped by broad marker- and intent-based deletion without preserving syntax, behavior, or buildability. Treat the TUI/runtime portions of this document as historical design intent until those files are reconstructed.
-
 Themion is a Rust AI agent with a Ratatui TUI, streaming token output, persistent SQLite history, and a tool-calling loop compatible with multiple OpenAI-style backends.
 
 For a focused walkthrough of the harness/runtime itself, including system prompt handling, `AGENTS.md` injection, context building, tool execution, and session storage, see [engine-runtime.md](engine-runtime.md).
@@ -25,7 +22,7 @@ This separation is intentional: reusable harness/runtime and provider behavior b
 ## Design Philosophy
 
 - **No framework dependencies** — the harness loop, HTTP client, tool dispatch, and TUI are all hand-rolled.
-- **Stateful conversation, context-windowed** — `Agent` owns the full in-memory history but sends only the last N turns to the API. Older turns persist in SQLite and are reachable via tools.
+- **Stateful conversation, budget-windowed** — `Agent` owns the full in-memory history, while prompt assembly replays recent history through the current budget-aware policy. Older turns persist in SQLite and are reachable via tools.
 - **OpenAI-style tool calling** — tools are described as JSON function schemas; compatible providers can invoke them and return structured tool calls.
 - **Project Memory knowledge base** — distilled reusable project knowledge is stored as SQLite-backed graph nodes and edges, with hashtags as the lightweight organization layer; the explicit `[GLOBAL]` context is Global Knowledge for reusable cross-project facts.
 - **Event-driven TUI** — `Agent` emits `AgentEvent` variants over an `mpsc` channel; the TUI renders each event as it arrives, giving streaming token display without blocking the input loop.
@@ -44,22 +41,22 @@ This separation is intentional: reusable harness/runtime and provider behavior b
 
 ```text
 main.rs
-  └─ loads Config, parses mode/args, and builds shared CLI app runtime
-       ├─ non-interactive prompt args ──► headless_runner::run_non_interactive(app_runtime, prompt)
-       ├─ --headless               ──► headless_runner::run(app_runtime)
-       └─ TUI mode                 ──► tui_runner::run(app_runtime)
+  └─ loads Config, parses mode/args, constructs Tokio runtime domains, and builds shared AppState
+       ├─ non-interactive prompt args ──► headless_runner::run_non_interactive(app_state, prompt)
+       ├─ --headless               ──► headless_runner::run(app_state)
+       └─ TUI mode                 ──► tui_runner::run(app_state)
 
 AppState  (app_state.rs)
   ├─ resolves project_dir and opens DbHandle
   ├─ inserts agent_sessions row and builds Session
-  ├─ owns shared CLI-local runtime/bootstrap state
+  ├─ owns shared CLI-local runtime/bootstrap state, agent roster, and runtime snapshots
   └─ builds core Agent instances for TUI, headless, and non-interactive runners
 
-tui::run  (tui.rs)
-  ├─ opens DbHandle at $XDG_DATA_HOME/themion/system.db
-  ├─ generates session_id (UUID v4), inserts agent_sessions row
-  ├─ builds App { agents: Vec<AgentHandle>, db, project_dir, session_tokens, … }
-  └─ event loop: keyboard / mouse / AgentEvent / AgentReady / Tick (150 ms)
+tui.rs / tui_runner.rs
+  ├─ terminal-mode setup, cleanup, keyboard/mouse/paste intake, and redraw scheduling
+  ├─ forwards human input as runtime/app-state intents
+  ├─ observes runtime/app-state snapshots and transcript events
+  └─ renders terminal presentation without owning DB/session bootstrap or runtime policy
 
 Agent  (agent.rs)
   ├─ owns: Vec<Message> (full in-memory history)
@@ -119,7 +116,7 @@ themion process
 │        ├─ non-interactive prompt mode → headless_runner::run_non_interactive(...)
 │        ├─ --headless mode            → headless_runner::run(...)
 │        └─ TUI mode                   → tui_runner::run(...)
-├─ shared CLI app runtime
+├─ shared CLI app-state/runtime ownership (application state, not a Tokio executor)
 │  └─ crates/themion-cli/src/app_state.rs
 │     ├─ resolves project_dir
 │     ├─ opens DbHandle
@@ -144,9 +141,11 @@ themion process
 │     ├─ Stylos query handlers
 │     ├─ Stylos command subscriber
 │     └─ Stylos bridge tasks into the local app flow
-├─ Tokio runtime domain: background   (multi-thread, reserved in phase 1)
+├─ Tokio runtime domain: background   (multi-thread)
 │  └─ Tokio tasks
-│     └─ lower-priority maintenance work
+│     ├─ lower-priority maintenance work
+│     ├─ pending chat-message unified-search embedding
+│     └─ semantic reindex / indexing follow-up work
 └─ supporting worker threads
    └─ spawn_blocking worker threads for DB-sensitive work in themion-core
 ```
@@ -183,7 +182,7 @@ For debugging, the practical thread model is now:
 - explicit Tokio runtime domains owned by `themion-cli`
 - one one-worker multi-thread TUI runtime in TUI mode
 - separate multi-thread core and network runtimes
-- a reserved background runtime domain for lower-priority work
+- a background runtime domain for lower-priority maintenance, pending chat-message embedding, and semantic reindex work
 - one dedicated terminal-input OS thread for Crossterm polling in TUI mode
 - `spawn_blocking` worker usage in `themion-core` for DB-sensitive work
 - multiple async tasks communicating through unbounded `mpsc` channels
@@ -223,15 +222,15 @@ That makes the TUI architecture event-driven rather than thread-per-subsystem.
 
 When the user submits work, Themion does not create a separate process for the agent. Instead, the current process spawns async work on the Tokio runtime.
 
-In the current code, this usually means:
+For each admitted local agent turn, the runtime starts agent-owned async work rather than blocking the terminal loop. In the common TUI path this means:
 
-- one spawned task runs the agent turn or shell-command work
-- one spawned task forwards resulting events back to the TUI event channel when needed
-- the TUI loop remains responsive because it consumes summarized events rather than blocking on provider IO directly
+- a spawned task runs the selected agent turn or shell-command work
+- a relay path forwards resulting events back to runtime/app-state and, when presentation is needed, to the TUI event channel
+- the TUI loop remains responsive because it consumes summarized events and snapshots rather than blocking on provider IO directly
 
 So the user-visible app behaves like one interactive process coordinating background async tasks, not like several child worker processes.
 
-Themion now supports overlapping local turns across multiple local agents within one process. The CLI/TUI runtime still owns the local roster and event fan-in, but turn admission is now per-agent rather than gated by one app-global active-turn lock. Process-level busy summaries remain aggregate observability fields, while targeted execution availability is determined from each local agent handle individually.
+Themion now supports overlapping local turns across multiple local agents within one process. The CLI app-state/runtime layer owns the local roster and event fan-in, but turn admission is now per-agent rather than gated by one app-global active-turn lock. Process-level busy summaries remain aggregate observability fields, while targeted execution availability is determined from each local agent handle individually.
 
 ### Stylos-enabled background tasks
 
@@ -242,7 +241,7 @@ Current examples include:
 - a status publisher task with a 5-second interval
 - a queryable-serving task that waits on multiple Stylos query surfaces
 - a command subscriber task that receives remote prompt requests
-- TUI-side bridge tasks that forward Stylos command, prompt, and event channels into the main app loop
+- runtime/app-state bridge tasks that forward Stylos command, prompt, and event channels into the local app flow, with TUI receiving only renderable outcomes
 
 These are still process-local async tasks. Stylos does not introduce a separate Themion worker process for this runtime shape.
 
@@ -273,7 +272,11 @@ Each call to `run_loop(user_input)`:
 
 ## Context Windowing
 
-Prompt replay is now budget-aware rather than purely fixed by `Agent.window_turns`. The current implementation still keeps `window_turns` as a compatibility field, but replay in `themion-core` now preserves the active turn first, never replays turns older than `T-7`, downgrades `T-1` through `T-5` into pure-message form when `T0` alone exceeds the normal 170K target, and omits older allowed turns once replay within that `T-7` band would exceed the 250K ceiling. Durable history remains stored in SQLite even when replay is reduced. On each LLM round:
+Prompt replay is budget-aware rather than purely fixed by `Agent.window_turns`. The current implementation keeps `window_turns` as a compatibility field, but `themion-core` now prefers tokenizer-backed local token estimation through `tiktoken-rs` when the active model resolves through an exact upstream model mapping, falls back through a short explicit trusted tokenizer mapping for selected known aliases, and finally degrades to the rough `chars / 4` estimator when no tokenizer path is trusted.
+
+The replay policy keeps the active turn (`T0`) as the highest-priority replay unit, never replays turns older than `T-7`, degrades `T-1` through `T-5` into assistant-style pure-message replay when `T0` alone exceeds the normal 170K target, and omits prior allowed turns when `T0` alone exceeds the 250K spike ceiling or when older-turn inclusion within the `T-7` band would exceed that ceiling. Durable history remains stored in SQLite even when replay is reduced.
+
+On each LLM round, prompt assembly uses this broad order:
 
 ```text
 [system_prompt]
@@ -281,10 +284,10 @@ Prompt replay is now budget-aware rather than purely fixed by `Agent.window_turn
 [predefined Codex CLI web-search instruction]
 [injected contextual instructions such as AGENTS.md, when available]
 [workflow context + phase instructions]
-[recall hint — only when turn_boundaries.len() > window_turns]
-[messages from turn (current − window_turns) … now]
+[recall hint, when older session history is omitted]
+[budget-aware replay of recent conversation history]
 ```
 
-The recall hint is a synthetic `role="system"` message that reminds the model that omitted `session_id` stays in the current session and `session_id="*"` explicitly widens recall or search to all sessions in the current project.
+The recall hint is a synthetic `role="system"` message that reminds the model that omitted `session_id` stays in the current session and `session_id="*"` explicitly widens recall or search to all sessions in the current project. The full `messages` Vec is never trimmed; the in-memory copy remains complete while only the prompt-visible replay is reduced.
 
-The full `messages` Vec is never trimmed — the in-memory copy is always complete. Windowing on
+For the most detailed and current prompt-budget behavior, see [engine-runtime.md](engine-runtime.md).
