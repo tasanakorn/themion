@@ -206,6 +206,95 @@ async fn memory_project_dir_defaults_and_global_selector_partition_results() {
     assert_eq!(global_results["results"][0]["source_id"], global_node["node_id"]);
 }
 
+#[cfg(feature = "semantic-memory")]
+#[tokio::test]
+async fn memory_create_node_succeeds_without_legacy_embedding_table() {
+    let db = DbHandle::open_in_memory().unwrap();
+    let ctx = test_ctx(db.clone());
+
+    let node = call_json(
+        &ctx,
+        "memory_create_node",
+        json!({
+            "node_type": "observation",
+            "title": "Create without legacy table",
+            "content": "Project Memory writes should not depend on retired embedding storage.",
+            "hashtags": ["semantic-memory", "regression"]
+        }),
+    )
+    .await;
+
+    assert_eq!(node["entity"], "memory_node");
+    assert_eq!(node["operation"], "create");
+
+    let results = call_json(
+        &ctx,
+        "unified_search",
+        json!({
+            "query": "retired embedding storage",
+            "source_kinds": ["memory"],
+            "mode": "fts",
+            "limit": 10
+        }),
+    )
+    .await;
+    assert!(results["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["source_id"] == node["node_id"]));
+}
+
+#[cfg(feature = "semantic-memory")]
+#[tokio::test]
+async fn memory_update_node_succeeds_without_legacy_embedding_table() {
+    let db = DbHandle::open_in_memory().unwrap();
+    let ctx = test_ctx(db.clone());
+
+    let created = call_json(
+        &ctx,
+        "memory_create_node",
+        json!({
+            "title": "Update without legacy table",
+            "content": "original",
+            "hashtags": ["semantic-memory", "regression"]
+        }),
+    )
+    .await;
+
+    let updated = call_json(
+        &ctx,
+        "memory_update_node",
+        json!({
+            "node_id": created["node_id"],
+            "content": "updated content without legacy table",
+            "hashtags": ["semantic-memory", "updated"]
+        }),
+    )
+    .await;
+
+    assert_eq!(updated["entity"], "memory_node");
+    assert_eq!(updated["operation"], "update");
+
+    let results = call_json(
+        &ctx,
+        "unified_search",
+        json!({
+            "query": "updated content without legacy table",
+            "source_kinds": ["memory"],
+            "mode": "fts",
+            "limit": 10
+        }),
+    )
+    .await;
+    assert!(results["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["source_id"] == created["node_id"]));
+}
+
+
 #[tokio::test]
 async fn project_dir_dot_matches_current_project_for_targeted_tools() {
     let db = DbHandle::open_in_memory().unwrap();

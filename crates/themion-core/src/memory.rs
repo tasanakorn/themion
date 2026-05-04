@@ -70,12 +70,6 @@ CREATE INDEX IF NOT EXISTS idx_unified_search_chunks_document
 
 #[cfg(feature = "semantic-memory")]
 const DEFAULT_SEMANTIC_MODEL: &str = "bge-micro-v2";
-#[cfg(feature = "semantic-memory")]
-const DEFAULT_SEMANTIC_CANDIDATE_LIMIT: usize = 200;
-#[cfg(feature = "semantic-memory")]
-const DEFAULT_SEMANTIC_FULL_SCAN_LIMIT: usize = 10_000;
-#[cfg(feature = "semantic-memory")]
-const DEFAULT_SEMANTIC_INDEX_BATCH_SIZE: usize = 64;
 fn now_unix_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -573,7 +567,7 @@ impl<'a> MemoryStore<'a> {
         )?;
         replace_hashtags(&conn, &node_id, &hashtags)?;
         #[cfg(feature = "semantic-memory")]
-        write_node_embedding_now(&conn, &node_id, &title, args.content.as_deref(), now_ms)?;
+        register_memory_node_for_unified_search(&conn, &node_id, &project_dir, &title, args.content.as_deref(), now_ms)?;
         drop(conn);
         self.get_node(&node_id)?
             .ok_or_else(|| anyhow::anyhow!("memory node insert failed"))
@@ -582,14 +576,14 @@ impl<'a> MemoryStore<'a> {
     pub fn update_node(&self, node_id: &str, args: UpdateNodeArgs) -> Result<Option<MemoryNode>> {
         let now_ms = now_unix_ms();
         let conn = self.conn.lock().unwrap();
-        let existing: Option<(String, String, Option<String>, Option<String>)> = conn
+        let existing: Option<(String, String, String, Option<String>, Option<String>)> = conn
             .query_row(
-                "SELECT node_type, title, content, metadata_json FROM memory_nodes WHERE node_id = ?1",
+                "SELECT project_dir, node_type, title, content, metadata_json FROM memory_nodes WHERE node_id = ?1",
                 params![node_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .optional()?;
-        let Some((old_type, old_title, old_content, old_metadata)) = existing else {
+        let Some((project_dir, old_type, old_title, old_content, old_metadata)) = existing else {
             return Ok(None);
         };
         let node_type = match args.node_type {
@@ -613,7 +607,7 @@ impl<'a> MemoryStore<'a> {
             replace_hashtags(&conn, node_id, &hashtags)?;
         }
         #[cfg(feature = "semantic-memory")]
-        write_node_embedding_now(&conn, node_id, &title, content.as_deref(), now_ms)?;
+        register_memory_node_for_unified_search(&conn, node_id, &project_dir, &title, content.as_deref(), now_ms)?;
         drop(conn);
         self.get_node(node_id)
     }
@@ -691,23 +685,13 @@ impl<'a> MemoryStore<'a> {
     pub fn search_nodes(&self, args: SearchNodesArgs) -> Result<MemorySearchResponse> {
         match args.mode {
             UnifiedSearchMode::Fts => self.search_nodes_fts(args),
-            UnifiedSearchMode::Semantic | UnifiedSearchMode::Hybrid => {
-                #[cfg(feature = "semantic-memory")]
-                {
-                    self.search_nodes_semantic(args)
-                }
-                #[cfg(not(feature = "semantic-memory"))]
-                {
-                    let _ = args;
-                    Ok(MemorySearchResponse {
-                        mode: UnifiedSearchMode::Semantic,
-                        degraded: true,
-                        degradation_reason: Some("semantic retrieval unavailable: themion was built without the semantic-memory feature".to_string()),
-                        pending_index_count: 0,
-                        nodes: Vec::new(),
-                    })
-                }
-            }
+            UnifiedSearchMode::Semantic | UnifiedSearchMode::Hybrid => Ok(MemorySearchResponse {
+                mode: args.mode,
+                degraded: true,
+                degradation_reason: Some("direct semantic Project Memory search is retired; use unified_search for semantic or hybrid retrieval".to_string()),
+                pending_index_count: 0,
+                nodes: Vec::new(),
+            }),
         }
     }
 
@@ -821,152 +805,24 @@ impl<'a> MemoryStore<'a> {
 
     #[cfg(feature = "semantic-memory")]
     pub fn index_pending_embeddings(&self, force_full: bool) -> Result<MemoryIndexReport> {
-        let model_tag = DEFAULT_SEMANTIC_MODEL.to_string();
-        let now_ms = now_unix_ms();
-        let conn = self.conn.lock().unwrap();
-
-        let queued_before = 0;
-        let candidates = pending_embedding_candidates(&conn, force_full)?;
-        let scanned_candidates = candidates.len() as u32;
-
-        let found = candidates
-            .iter()
-            .map(|candidate| MemoryIndexNodeReport {
-                node_id: candidate.node_id.clone(),
-                title: candidate.title.clone(),
-                reason: candidate.status.reason().to_string(),
-            })
-            .collect::<Vec<_>>();
-
-        let mut to_regenerate = Vec::new();
-        let mut skipped = Vec::new();
-        for candidate in candidates {
-            if candidate.status.needs_regeneration() {
-                to_regenerate.push(candidate);
-            } else {
-                skipped.push(MemoryIndexNodeReport {
-                    node_id: candidate.node_id.clone(),
-                    title: candidate.title.clone(),
-                    reason: candidate.status.reason().to_string(),
-                });
-            }
-        }
-
-        let mut indexed = Vec::new();
-        let failures = Vec::new();
-        let mut indexed_nodes = 0u32;
-
-        if !to_regenerate.is_empty() {
-            for chunk in to_regenerate.chunks(DEFAULT_SEMANTIC_INDEX_BATCH_SIZE) {
-                let texts = chunk
-                    .iter()
-                    .map(PendingEmbeddingCandidate::embedding_input)
-                    .collect::<Vec<_>>();
-                let embeddings = build_text_embeddings(&texts)?;
-                if embeddings.len() != chunk.len() {
-                    anyhow::bail!(
-                        "semantic embedding count mismatch: got {} vectors for {} nodes",
-                        embeddings.len(),
-                        chunk.len()
-                    );
-                }
-
-                let tx = conn.unchecked_transaction()?;
-                for (candidate, embedding) in chunk.iter().zip(embeddings.iter()) {
-                    write_embedding_row(&tx, candidate, embedding, &model_tag, now_ms)?;
-                    indexed.push(MemoryIndexNodeReport {
-                        node_id: candidate.node_id.clone(),
-                        title: candidate.title.clone(),
-                        reason: candidate.status.reason().to_string(),
-                    });
-                    indexed_nodes += 1;
-                }
-                tx.commit()?;
-            }
-            if force_full {
-                let tx = conn.unchecked_transaction()?;
-                remove_stale_embeddings_without_nodes(&tx)?;
-                tx.commit()?;
-            }
-        } else if force_full {
-            let tx = conn.unchecked_transaction()?;
-            remove_stale_embeddings_without_nodes(&tx)?;
-            tx.commit()?;
-        }
-
-        let removed_stale_embeddings = 0;
-        let remaining_pending = 0;
-
+        let report = self.rebuild_unified_search_index(None, Some("memory"), force_full)?;
         Ok(MemoryIndexReport {
-            mode: "semantic-memory-index".to_string(),
-            requested_full: force_full,
-            queued_before,
-            scanned_candidates,
-            indexed_nodes,
-            skipped_nodes: skipped.len() as u32,
-            removed_stale_embeddings,
-            remaining_pending,
-            failed_nodes: failures.len() as u32,
-            found,
-            indexed,
-            skipped,
-            failures,
-            model_tag,
+            mode: report.mode,
+            requested_full: report.requested_full,
+            queued_before: report.queued_before,
+            scanned_candidates: report.queued_before,
+            indexed_nodes: report.indexed_documents,
+            skipped_nodes: report.skipped_documents,
+            removed_stale_embeddings: report.removed_documents,
+            remaining_pending: report.remaining_pending,
+            failed_nodes: report.failed_documents,
+            found: Vec::new(),
+            indexed: Vec::new(),
+            skipped: Vec::new(),
+            failures: Vec::new(),
+            model_tag: DEFAULT_SEMANTIC_MODEL.to_string(),
         })
     }
-
-    #[cfg(feature = "semantic-memory")]
-    fn search_nodes_semantic(&self, args: SearchNodesArgs) -> Result<MemorySearchResponse> {
-        let query = args
-            .query
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("semantic search requires a non-empty query"))?
-            .to_string();
-        let conn = self.conn.lock().unwrap();
-        let pending_index_count = 0;
-        let candidate_limit = args.limit.max(1).min(MAX_SEARCH_LIMIT) as usize;
-        let candidates = semantic_candidates_for_query(
-            &conn,
-            &args,
-            DEFAULT_SEMANTIC_CANDIDATE_LIMIT.max(candidate_limit),
-        )?;
-        if candidates.is_empty() {
-            return Ok(MemorySearchResponse {
-                mode: UnifiedSearchMode::Semantic,
-                degraded: false,
-                degradation_reason: None,
-                pending_index_count,
-                nodes: Vec::new(),
-            });
-        }
-        let query_embedding = build_text_embeddings(&[query])?;
-        let query_vector = query_embedding.into_iter().next().ok_or_else(|| {
-            anyhow::anyhow!("semantic query embedding generation returned no vector")
-        })?;
-        let mut scored = Vec::new();
-        for (node, blob) in candidates {
-            if let Some(embedding) = decode_embedding_blob(&blob)? {
-                let score = cosine_similarity(&query_vector, &embedding);
-                scored.push((score, node));
-            }
-        }
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
-        let nodes = scored
-            .into_iter()
-            .take(candidate_limit)
-            .map(|(_, node)| node)
-            .collect();
-        Ok(MemorySearchResponse {
-            mode: UnifiedSearchMode::Semantic,
-            degraded: false,
-            degradation_reason: None,
-            pending_index_count,
-            nodes,
-        })
-    }
-
 
     #[cfg(feature = "semantic-memory")]
     pub fn register_appended_chat_message_for_unified_search(
@@ -1561,182 +1417,26 @@ impl OpenGraphArgs {
 }
 
 #[cfg(feature = "semantic-memory")]
-#[derive(Debug, Clone)]
-struct PendingEmbeddingCandidate {
-    node_id: String,
-    title: String,
-    content: Option<String>,
-    updated_at_ms: i64,
-    status: PendingEmbeddingStatus,
-}
-
-#[cfg(feature = "semantic-memory")]
-impl PendingEmbeddingCandidate {
-    fn embedding_input(&self) -> String {
-        embedding_input_from_parts(&self.title, self.content.as_deref())
-    }
-}
-
-#[cfg(feature = "semantic-memory")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PendingEmbeddingStatus {
-    Missing,
-    Stale,
-    Current,
-}
-
-#[cfg(feature = "semantic-memory")]
-impl PendingEmbeddingStatus {
-    fn needs_regeneration(self) -> bool {
-        matches!(self, Self::Missing | Self::Stale)
-    }
-
-    fn reason(self) -> &'static str {
-        match self {
-            Self::Missing => "missing_embedding",
-            Self::Stale => "stale_embedding",
-            Self::Current => "current",
-        }
-    }
-}
-
-#[cfg(feature = "semantic-memory")]
-fn write_node_embedding_now(
+fn register_memory_node_for_unified_search(
     conn: &Connection,
     node_id: &str,
+    project_dir: &str,
     title: &str,
     content: Option<&str>,
     source_updated_at_ms: i64,
 ) -> Result<()> {
-    let text = embedding_input_from_parts(title, content);
-    let embeddings = build_text_embeddings(&[text])?;
-    let embedding = embeddings
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("semantic embedding generation returned no vector"))?;
-    write_embedding_values(
-        conn,
-        node_id,
-        &embedding,
+    let doc = UnifiedSearchDocumentInput {
+        source_kind: "memory".to_string(),
+        source_id: node_id.to_string(),
+        project_dir: project_dir.to_string(),
+        session_id: None,
+        turn_seq: None,
+        tool_call_id: None,
+        title: title.to_string(),
+        source_text: embedding_input_from_parts(title, content),
         source_updated_at_ms,
-        now_unix_ms(),
-    )
-}
-
-#[cfg(feature = "semantic-memory")]
-fn pending_embedding_candidates(
-    conn: &Connection,
-    force_full: bool,
-) -> Result<Vec<PendingEmbeddingCandidate>> {
-    let scan_limit = if force_full {
-        DEFAULT_SEMANTIC_FULL_SCAN_LIMIT
-    } else {
-        DEFAULT_SEMANTIC_CANDIDATE_LIMIT
-    } as i64;
-    let mut stmt = conn.prepare(
-        "SELECT n.node_id, n.title, n.content, n.updated_at_ms,
-                e.embedding_model, e.source_updated_at_ms
-         FROM memory_nodes n
-         LEFT JOIN memory_node_embeddings e ON e.node_id = n.node_id
-         ORDER BY n.updated_at_ms DESC
-         LIMIT ?1",
-    )?;
-    let rows = stmt.query_map(params![scan_limit], |row| {
-        let existing_model: Option<String> = row.get(4)?;
-        let existing_source_updated_at_ms: Option<i64> = row.get(5)?;
-        let updated_at_ms: i64 = row.get(3)?;
-        let status = if existing_model.is_none() || existing_source_updated_at_ms.is_none() {
-            PendingEmbeddingStatus::Missing
-        } else if existing_model.as_deref() != Some(DEFAULT_SEMANTIC_MODEL)
-            || existing_source_updated_at_ms.unwrap_or_default() < updated_at_ms
-        {
-            PendingEmbeddingStatus::Stale
-        } else {
-            PendingEmbeddingStatus::Current
-        };
-        Ok(PendingEmbeddingCandidate {
-            node_id: row.get(0)?,
-            title: row.get(1)?,
-            content: row.get(2)?,
-            updated_at_ms,
-            status,
-        })
-    })?;
-    let mut out = Vec::new();
-    for row in rows {
-        let candidate = row?;
-        if force_full || candidate.status != PendingEmbeddingStatus::Current {
-            out.push(candidate);
-        }
-    }
-    Ok(out)
-}
-
-#[cfg(feature = "semantic-memory")]
-fn write_embedding_row(
-    conn: &Connection,
-    candidate: &PendingEmbeddingCandidate,
-    embedding: &[f32],
-    model_tag: &str,
-    indexed_at_ms: i64,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO memory_node_embeddings (node_id, embedding_model, embedding_dim, embedding_blob, source_updated_at_ms, indexed_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(node_id) DO UPDATE SET
-           embedding_model = excluded.embedding_model,
-           embedding_dim = excluded.embedding_dim,
-           embedding_blob = excluded.embedding_blob,
-           source_updated_at_ms = excluded.source_updated_at_ms,
-           indexed_at_ms = excluded.indexed_at_ms",
-        params![
-            candidate.node_id,
-            model_tag,
-            embedding.len() as i64,
-            encode_embedding_blob(embedding),
-            candidate.updated_at_ms,
-            indexed_at_ms,
-        ],
-    )?;
-    Ok(())
-}
-
-#[cfg(feature = "semantic-memory")]
-fn write_embedding_values(
-    conn: &Connection,
-    node_id: &str,
-    embedding: &[f32],
-    source_updated_at_ms: i64,
-    indexed_at_ms: i64,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO memory_node_embeddings (node_id, embedding_model, embedding_dim, embedding_blob, source_updated_at_ms, indexed_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(node_id) DO UPDATE SET
-           embedding_model = excluded.embedding_model,
-           embedding_dim = excluded.embedding_dim,
-           embedding_blob = excluded.embedding_blob,
-           source_updated_at_ms = excluded.source_updated_at_ms,
-           indexed_at_ms = excluded.indexed_at_ms",
-        params![
-            node_id,
-            DEFAULT_SEMANTIC_MODEL,
-            embedding.len() as i64,
-            encode_embedding_blob(embedding),
-            source_updated_at_ms,
-            indexed_at_ms,
-        ],
-    )?;
-    Ok(())
-}
-
-#[cfg(feature = "semantic-memory")]
-fn remove_stale_embeddings_without_nodes(conn: &Connection) -> Result<()> {
-    conn.execute(
-        "DELETE FROM memory_node_embeddings WHERE node_id NOT IN (SELECT node_id FROM memory_nodes)",
-        [],
-    )?;
-    Ok(())
+    };
+    upsert_unified_search_document_pending(conn, &doc)
 }
 
 #[cfg(feature = "semantic-memory")]
@@ -1750,98 +1450,6 @@ fn embedding_input_from_parts(title: &str, content: Option<&str>) -> String {
         ),
         None => title.to_string(),
     }
-}
-
-#[cfg(feature = "semantic-memory")]
-fn semantic_candidates_for_query(
-    conn: &Connection,
-    args: &SearchNodesArgs,
-    limit: usize,
-) -> Result<Vec<(MemoryNode, Vec<u8>)>> {
-    let mut sql = "SELECT n.node_id, n.project_dir, n.node_type, n.title, n.content, n.metadata_json, n.created_at_ms, n.updated_at_ms, e.embedding_blob
-         FROM memory_nodes n
-         JOIN memory_node_embeddings e ON e.node_id = n.node_id
-         WHERE e.embedding_model = ?"
-        .to_string();
-    let mut params_vec: Vec<Box<dyn ToSql>> = vec![Box::new(DEFAULT_SEMANTIC_MODEL.to_string())];
-    let project_dir = normalize_project_dir(&args.project_dir)?;
-    sql.push_str(" AND n.project_dir = ?");
-    params_vec.push(Box::new(project_dir));
-    if let Some(node_type) = args.node_type.as_ref().filter(|v| !v.trim().is_empty()) {
-        sql.push_str(" AND n.node_type = ?");
-        params_vec.push(Box::new(normalize_required_label(node_type, "node_type")?));
-    }
-    if let Some(relation_type) = args.relation_type.as_ref().filter(|v| !v.trim().is_empty()) {
-        let relation_type = normalize_required_label(relation_type, "relation_type")?;
-        sql.push_str(
-            " AND EXISTS (SELECT 1 FROM memory_edges e2
-                   WHERE (e2.from_node_id = n.node_id OR e2.to_node_id = n.node_id)
-                     AND e2.relation_type = ?",
-        );
-        params_vec.push(Box::new(relation_type));
-        if let Some(linked) = args
-            .linked_node_id
-            .as_ref()
-            .filter(|v| !v.trim().is_empty())
-        {
-            sql.push_str(" AND (e2.from_node_id = ? OR e2.to_node_id = ?)");
-            params_vec.push(Box::new(linked.clone()));
-            params_vec.push(Box::new(linked.clone()));
-        }
-        sql.push(')');
-    } else if let Some(linked) = args
-        .linked_node_id
-        .as_ref()
-        .filter(|v| !v.trim().is_empty())
-    {
-        sql.push_str(
-            " AND EXISTS (SELECT 1 FROM memory_edges e2
-                   WHERE (e2.from_node_id = n.node_id AND e2.to_node_id = ?)
-                      OR (e2.to_node_id = n.node_id AND e2.from_node_id = ?))",
-        );
-        params_vec.push(Box::new(linked.clone()));
-        params_vec.push(Box::new(linked.clone()));
-    }
-    match args.hashtag_match {
-        HashtagMatch::All => {
-            for hashtag in &args.hashtags {
-                sql.push_str(" AND EXISTS (SELECT 1 FROM memory_node_hashtags h WHERE h.node_id = n.node_id AND h.hashtag = ?)");
-                params_vec.push(Box::new(hashtag.clone()));
-            }
-        }
-        HashtagMatch::Any if !args.hashtags.is_empty() => {
-            sql.push_str(
-                " AND n.node_id IN (SELECT node_id FROM memory_node_hashtags WHERE hashtag IN (",
-            );
-            for idx in 0..args.hashtags.len() {
-                if idx > 0 {
-                    sql.push_str(", ");
-                }
-                sql.push('?');
-                params_vec.push(Box::new(args.hashtags[idx].clone()));
-            }
-            sql.push_str("))");
-        }
-        HashtagMatch::Any => {}
-    }
-    sql.push_str(" ORDER BY n.updated_at_ms DESC LIMIT ?");
-    params_vec.push(Box::new(limit as i64));
-    let params_ref: Vec<&dyn ToSql> = params_vec
-        .iter()
-        .map(|v| v.as_ref() as &dyn ToSql)
-        .collect();
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params_ref.as_slice(), |row| {
-        Ok((
-            map_node_row_with_conn(conn, row)?,
-            row.get::<_, Vec<u8>>(8)?,
-        ))
-    })?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row?);
-    }
-    Ok(out)
 }
 
 #[cfg(feature = "semantic-memory")]

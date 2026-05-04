@@ -106,6 +106,7 @@ Active and recent product requirements documents live in `docs/prd/`. Older impl
 | PRD-091 | [Generalized Multi-Source Chunked Semantic Search](prd/prd-091-generalized-multi-source-chunked-semantic-search.md) | Implemented | v0.59.0 | `themion-core`, `themion-cli`, docs |
 | PRD-092 | [Slash Command for Source-Kind-Scoped Unified-Search Indexing](prd/prd-092-source-kind-scoped-unified-search-index-command.md) | Implemented | v0.59.1 | `themion-cli`, `themion-core`, docs |
 | PRD-093 | [Remove `history_search` and Make `unified_search` the Canonical Search Tool](prd/prd-093-remove-history-search-and-canonicalize-unified-search.md) | Implemented | v0.59.1 | `themion-core`, `themion-cli`, docs |
+| PRD-097 | [Patch the Retired Memory-Node Embedding Runtime Mismatch](prd/prd-097-patch-retired-memory-node-embedding-runtime-mismatch.md) | Implemented | v0.60.1 | `themion-core`, `themion-cli`, docs |
+| PRD-096 | [Automatic Append-Only Chat Message Indexing and Idle-Only Background Embedding](prd/prd-096-automatic-chat-message-indexing-pipeline.md) | Draft | >v0.59.2 +minor | `themion-core`, `themion-cli`, docs |
 | PRD-095 | [Retire the Legacy Memory-Node Embedding Table and Direct Semantic Search Path](prd/prd-095-retire-legacy-memory-node-embeddings.md) | Implemented | v0.60.0 | `themion-core`, `themion-cli`, docs |
 | PRD-094 | [Treat `project_dir="."` as Current Project Scope Fallback in Targeted Project-Scoped Tools](prd/prd-094-dot-project-dir-current-project-compat.md) | Implemented | v0.59.2 | `themion-core`, docs |
-| PRD-096 | [Automatic Append-Only Chat Message Indexing and Idle-Only Background Embedding](prd/prd-096-automatic-chat-message-indexing-pipeline.md) | Draft | >v0.59.2 +minor | `themion-core`, `themion-cli`, docs |

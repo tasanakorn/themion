@@ -1,6 +1,6 @@
 [package]
 name = "themion-cli"
-version = "0.59.2"
+version = "0.60.1"
 edition = "2021"
 
 [[bin]]
