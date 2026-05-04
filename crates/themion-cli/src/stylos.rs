@@ -135,6 +135,9 @@ pub struct StylosAgentStatusSnapshot {
     pub provider: String,
     pub model: String,
     pub active_profile: String,
+    pub app_version: String,
+    pub app_version_hash: String,
+    pub app_version_dirty: bool,
     pub rate_limits: Option<ApiCallRateLimitReport>,
 }
 

@@ -30,6 +30,25 @@ const EFFECTIVE_PROMPT_BUDGET_TOKENS: usize = 170_000;
 const EFFECTIVE_PROMPT_SPIKE_TOKENS: usize = 250_000;
 const RECENT_PRIOR_TURN_BAND: usize = 5;
 
+#[derive(Clone, Debug, Default)]
+pub struct BuildIdentity {
+    pub app_version: String,
+    pub app_version_hash: String,
+    pub app_version_dirty: bool,
+}
+
+impl BuildIdentity {
+    fn prompt_context_line(&self) -> String {
+        format!(
+            "Build identity: app_version={} app_version_hash={} app_version_dirty={}",
+            self.app_version,
+            self.app_version_hash,
+            if self.app_version_dirty { "true" } else { "false" }
+        )
+    }
+}
+
+
 #[derive(Clone)]
 struct TokenEstimateContext {
     estimate_mode: EstimateMode,
@@ -417,7 +436,9 @@ pub struct Agent {
     local_agent_tool_invoker: Option<crate::tools::LocalAgentToolInvoker>,
     system_inspection: Option<crate::tools::SystemInspectionResult>,
     api_log_enabled: bool,
+    build_identity: Option<BuildIdentity>,
 }
+
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ApiRoundLogArtifact {
@@ -467,6 +488,7 @@ impl Agent {
             local_agent_tool_invoker: None,
             system_inspection: None,
             api_log_enabled: false,
+            build_identity: None,
         }
     }
 
@@ -532,6 +554,7 @@ impl Agent {
             local_agent_tool_invoker: None,
             system_inspection: None,
             api_log_enabled: false,
+            build_identity: None,
         }
     }
 
@@ -555,6 +578,10 @@ impl Agent {
 
     pub fn set_api_log_enabled(&mut self, enabled: bool) {
         self.api_log_enabled = enabled;
+    }
+
+    pub fn set_build_identity(&mut self, build_identity: Option<BuildIdentity>) {
+        self.build_identity = build_identity;
     }
 
     fn build_api_round_log_artifact(
@@ -789,6 +816,24 @@ impl Agent {
             extra_text: None,
             tool_estimate: None,
         });
+
+        if let Some(build_identity) = self.build_identity.as_ref() {
+            let build_identity_message = vec![Message {
+                role: "system".to_string(),
+                content: Some(build_identity.prompt_context_line()),
+                tool_calls: None,
+                tool_call_id: None,
+            }];
+            sections.push(PromptSectionReport {
+                kind: PromptSectionKind::RuntimeContext,
+                label: "runtime build identity".to_string(),
+                chars: estimate_messages_chars(&build_identity_message),
+                tokens_estimate: token_ctx.estimate_messages(&build_identity_message),
+                messages: build_identity_message,
+                extra_text: None,
+                tool_estimate: None,
+            });
+        }
 
         if let Some(agents_md_message) = agents_md::build_agents_md_message(&self.project_dir) {
             let agents_md = vec![Message {
@@ -1045,7 +1090,19 @@ impl Agent {
 
     fn current_turn_meta(&self) -> crate::db::TurnMeta {
         crate::db::TurnMeta {
-            app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            app_version: self
+                .build_identity
+                .as_ref()
+                .map(|identity| identity.app_version.clone())
+                .or_else(|| Some(env!("CARGO_PKG_VERSION").to_string())),
+            app_version_hash: self
+                .build_identity
+                .as_ref()
+                .map(|identity| identity.app_version_hash.clone()),
+            app_version_dirty: self
+                .build_identity
+                .as_ref()
+                .map(|identity| identity.app_version_dirty),
             profile: self.active_profile.clone(),
             provider: self.provider.clone(),
             model: Some(self.model.clone()),

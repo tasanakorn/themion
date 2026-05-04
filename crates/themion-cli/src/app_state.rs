@@ -1005,6 +1005,9 @@ pub(crate) fn publish_runtime_snapshot(app: &mut App) {
             provider: &app.runtime.session.provider,
             model: &app.runtime.session.model,
             active_profile: &app.runtime.session.active_profile,
+            app_version: crate::build_info::APP_VERSION,
+            app_version_hash: crate::build_info::APP_VERSION_HASH,
+            app_version_dirty: crate::build_info::app_version_dirty(),
             rate_limits: app.runtime.status_rate_limits.as_ref(),
             idle_since: app.runtime.idle_since,
             idle_status_changed_at: app.runtime.idle_status_changed_at,
@@ -1928,6 +1931,11 @@ pub fn build_agent(
         project_dir,
         db,
     );
+    agent.set_build_identity(Some(themion_core::agent::BuildIdentity {
+        app_version: crate::build_info::APP_VERSION.to_string(),
+        app_version_hash: crate::build_info::APP_VERSION_HASH.to_string(),
+        app_version_dirty: crate::build_info::app_version_dirty(),
+    }));
     agent.set_api_log_enabled(api_log_enabled);
     agent.set_system_inspection(system_inspection);
     agent.set_local_agent_tool_invoker(local_agent_tool_invoker);

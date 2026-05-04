@@ -816,8 +816,10 @@ impl App {
             Entry::Assistant {
                 agent_id: None,
                 text: format!(
-                    "version: {}  |  profile: {}  |  model: {}",
-                    env!("CARGO_PKG_VERSION"),
+                    "version: {}  |  hash: {}  |  dirty: {}  |  profile: {}  |  model: {}",
+                    crate::build_info::APP_VERSION,
+                    crate::build_info::APP_VERSION_HASH,
+                    if crate::build_info::app_version_dirty() { "true" } else { "false" },
                     runtime.session.active_profile,
                     runtime.session.model
                 ),

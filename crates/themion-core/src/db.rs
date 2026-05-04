@@ -13,6 +13,10 @@ pub struct TurnMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_version_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_version_dirty: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
@@ -23,6 +27,8 @@ pub struct TurnMeta {
 impl TurnMeta {
     pub fn to_json(&self) -> Result<Option<String>> {
         if self.app_version.is_none()
+            && self.app_version_hash.is_none()
+            && self.app_version_dirty.is_none()
             && self.profile.is_none()
             && self.provider.is_none()
             && self.model.is_none()

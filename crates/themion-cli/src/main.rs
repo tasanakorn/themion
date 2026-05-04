@@ -2,6 +2,7 @@ mod app_runtime;
 mod app_state;
 mod auth_store;
 mod board_runtime;
+mod build_info;
 mod chat_composer;
 mod config;
 mod instance_id;
@@ -159,8 +160,10 @@ fn main() -> anyhow::Result<()> {
         .cloned()
         .unwrap_or_else(|| "themion".to_string());
     let args: Vec<String> = raw_args.into_iter().skip(1).collect();
+    let startup_banner = crate::build_info::BuildIdentity::current().startup_banner_text();
 
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        println!("{startup_banner}");
         print_usage(&program_name);
         return Ok(());
     }
@@ -192,6 +195,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     if command_mode {
+        println!("{startup_banner}");
         if headless_mode {
             anyhow::bail!("--command cannot be combined with --headless");
         }
@@ -232,6 +236,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     if headless_mode {
+        println!("{startup_banner}");
         if !remaining_args.is_empty() {
             anyhow::bail!("--headless does not accept prompt arguments; use prompt args for non-interactive mode");
         }
@@ -241,6 +246,7 @@ fn main() -> anyhow::Result<()> {
             .core()
             .block_on(headless_runner::run(app_runtime))
     } else if !remaining_args.is_empty() {
+        println!("{startup_banner}");
         let app_runtime = AppState::for_headless(cfg, project_dir_override)?;
         let runtime_domains = app_runtime.runtime_domains.clone();
         runtime_domains

@@ -40,6 +40,7 @@ pub enum PromptSectionKind {
     BoardGuidance,
     MemoryGuidance,
     CodexCliWebSearch,
+    RuntimeContext,
     AgentsMd,
     WorkflowContext,
     ToolDefinitions,
