@@ -3,7 +3,8 @@ pub mod components;
 use anyhow::{anyhow, bail, Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::http::header::CONTENT_TYPE;
+use axum::body::Body;
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::HeaderValue;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
@@ -27,6 +28,7 @@ const APP_CSS: &str = include_str!("../style/app.css");
 const APP_JS: &str = include_str!("../style/app.js");
 const XTERM_CSS: &str = include_str!("../vendor/xterm/xterm.min.css");
 const XTERM_JS: &str = include_str!("../vendor/xterm/xterm.min.js");
+const JETBRAINS_MONO_NERD_FONT: &[u8] = include_bytes!("../assets/fonts/JetBrainsMonoNerdFont-Regular.ttf");
 const TERMINAL_ROUTE: &str = "/api/terminal/ws";
 const TERMINAL_SCROLLBACK_LIMIT_BYTES: usize = 262_144;
 const DEFAULT_TERMINAL_COLS: u16 = 120;
@@ -183,6 +185,7 @@ async fn run_web_server(addr: SocketAddr, app_state: AppState) -> Result<()> {
         .route("/", get(index))
         .route("/assets/xterm.css", get(xterm_css))
         .route("/assets/xterm.js", get(xterm_js))
+        .route("/assets/fonts/JetBrainsMonoNerdFont-Regular.ttf", get(jetbrains_mono_nerd_font))
         .route(TERMINAL_ROUTE, get(terminal_ws))
         .with_state(app_state);
 
@@ -499,11 +502,36 @@ async fn xterm_js() -> impl IntoResponse {
     asset_response(XTERM_JS, "application/javascript; charset=utf-8")
 }
 
+async fn jetbrains_mono_nerd_font() -> impl IntoResponse {
+    binary_asset_response(
+        JETBRAINS_MONO_NERD_FONT,
+        "font/ttf",
+        Some("public, max-age=31536000, immutable"),
+    )
+}
+
 fn asset_response(body: &'static str, content_type: &'static str) -> Response {
     let mut response = Response::new(body.into());
     response
         .headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response
+}
+
+fn binary_asset_response(
+    body: &'static [u8],
+    content_type: &'static str,
+    cache_control: Option<&'static str>,
+) -> Response {
+    let mut response = Response::new(Body::from(body.to_vec()));
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    if let Some(cache_control) = cache_control {
+        response
+            .headers_mut()
+            .insert(CACHE_CONTROL, HeaderValue::from_static(cache_control));
+    }
     response
 }
 

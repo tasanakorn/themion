@@ -1,3 +1,11 @@
+@font-face {
+  font-family: "JetBrains Mono Nerd Font";
+  src: url("/assets/fonts/JetBrainsMonoNerdFont-Regular.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
 :root {
   color-scheme: dark;
   --background: #0f141a;
@@ -10,7 +18,7 @@
   --accent-2: #334155;
   --shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
   --radius: 0.35rem;
-  --font-mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, monospace;
+  --font-mono: "JetBrains Mono Nerd Font", "JetBrains Mono", "SFMono-Regular", ui-monospace, monospace;
 }
 
 * {

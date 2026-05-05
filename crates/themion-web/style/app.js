@@ -82,8 +82,8 @@ function makeTerminal() {
     rows: DEFAULT_TERMINAL_ROWS,
     convertEol: true,
     cursorBlink: true,
-    fontFamily: 'JetBrains Mono, SFMono-Regular, ui-monospace, monospace',
-    fontSize: 13,
+    fontFamily: 'JetBrains Mono Nerd Font, JetBrains Mono, SFMono-Regular, ui-monospace, monospace',
+    fontSize: 14,
     theme: {
       background: '#0b1016',
       foreground: '#f3f6fb',
