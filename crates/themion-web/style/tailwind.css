@@ -1,0 +1,81 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@theme {
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --color-background: oklch(0.145 0 0);
+  --color-foreground: oklch(0.985 0 0);
+  --color-card: oklch(0.205 0 0);
+  --color-card-foreground: oklch(0.985 0 0);
+  --color-primary: oklch(0.922 0 0);
+  --color-primary-foreground: oklch(0.205 0 0);
+  --color-secondary: oklch(0.269 0 0);
+  --color-secondary-foreground: oklch(0.985 0 0);
+  --color-muted: oklch(0.269 0 0);
+  --color-muted-foreground: oklch(0.708 0 0);
+  --color-accent: oklch(0.269 0 0);
+  --color-accent-foreground: oklch(0.985 0 0);
+  --color-border: oklch(1 0 0 / 10%);
+  --color-input: oklch(1 0 0 / 15%);
+  --color-ring: oklch(0.556 0 0);
+  --radius: 0.75rem;
+  --shadow-xs: 0 1px 2px rgba(0,0,0,.15);
+}
+
+@layer base {
+  * { @apply border-border; }
+  html { color-scheme: dark; }
+  body {
+    @apply bg-background text-foreground font-mono;
+    margin: 0;
+    min-height: 100vh;
+  }
+}
+
+@layer components {
+  .ide-shell {
+    display: grid;
+    min-height: 100vh;
+    grid-template-rows: 3.75rem minmax(0, 1fr);
+    gap: 0.75rem;
+    padding: 0.75rem;
+  }
+
+  .ide-workbench {
+    display: grid;
+    min-height: 0;
+    gap: 0.75rem;
+    grid-template-columns: 3.5rem 17rem minmax(0, 1fr);
+  }
+
+  .ide-panel-stack {
+    display: grid;
+    min-height: 0;
+    gap: 0.75rem;
+    grid-template-rows: 2.75rem minmax(0, 1fr) 10rem;
+  }
+
+  .ide-surface {
+    @apply bg-card text-card-foreground rounded-xl border shadow-sm;
+    min-height: 0;
+  }
+
+  .ide-editor {
+    min-height: 0;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .ide-code {
+    margin: 0;
+    white-space: pre-wrap;
+    font-size: 0.875rem;
+    line-height: 1.6;
+    color: rgb(203 213 225);
+  }
+
+  .ide-dock-log {
+    font-size: 0.75rem;
+    color: rgb(148 163 184);
+  }
+}

@@ -1681,6 +1681,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "icons"
+version = "0.18.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b7b382b52bbad4f3d61b1f974a7a9b059fcf26e2885ece0c879db50fcd8861"
+dependencies = [
+ "leptos",
+ "strum 0.28.0",
+ "tw_merge",
+]
+
+[[package]]
 name = "icu_collections"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2151,6 +2162,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "leptos_router"
+version = "0.8.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c15158449162e099e2273442f7fd9b924f5cefd935d52af5755ec62aa819fa52"
+dependencies = [
+ "any_spawner",
+ "either_of",
+ "futures",
+ "gloo-net",
+ "js-sys",
+ "leptos",
+ "leptos_router_macro",
+ "or_poisoned",
+ "percent-encoding",
+ "reactive_graph",
+ "rustc_version",
+ "send_wrapper",
+ "tachys",
+ "thiserror 2.0.18",
+ "url",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
+name = "leptos_router_macro"
+version = "0.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "409c0bd99f986c3cfa1a4db2443c835bc602ded1a12784e22ecb28c3ed5a2ae2"
+dependencies = [
+ "proc-macro-error2",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "leptos_server"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2168,6 +2216,17 @@ dependencies = [
  "serde_json",
  "server_fn",
  "tachys",
+]
+
+[[package]]
+name = "leptos_ui"
+version = "0.3.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e265d90234373acd8e7428dea8be306225e4da092a16b3807b9beb5775d0711"
+dependencies = [
+ "leptos",
+ "paste",
+ "tw_merge",
 ]
 
 [[package]]
@@ -3216,7 +3275,7 @@ dependencies = [
  "itertools 0.13.0",
  "lru",
  "paste",
- "strum",
+ "strum 0.26.3",
  "unicode-segmentation",
  "unicode-truncate",
  "unicode-width 0.2.0",
@@ -4304,7 +4363,16 @@ version = "0.26.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fec0f0aef304996cf250b31b5a10dee7980c85da9d759361292b8bca5a18f06"
 dependencies = [
- "strum_macros",
+ "strum_macros 0.26.4",
+]
+
+[[package]]
+name = "strum"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
+dependencies = [
+ "strum_macros 0.28.0",
 ]
 
 [[package]]
@@ -4317,6 +4385,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rustversion",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab85eea0270ee17587ed4156089e10b9e6880ee688791d45a905f5b1ca36f664"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
  "syn 2.0.117",
 ]
 
@@ -4474,20 +4554,20 @@ dependencies = [
 
 [[package]]
 name = "themion-web"
-version = "0.61.1"
+version = "0.61.0"
 dependencies = [
  "anyhow",
  "axum",
- "base64 0.22.1",
- "dirs 5.0.1",
  "futures-util",
+ "icons",
  "leptos",
+ "leptos_router",
+ "leptos_ui",
  "portable-pty",
- "rusqlite",
  "serde",
  "serde_json",
  "tokio",
- "toml 0.8.23",
+ "tw_merge",
 ]
 
 [[package]]
@@ -5006,6 +5086,28 @@ dependencies = [
  "rand 0.9.4",
  "sha1",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "tw_merge"
+version = "0.1.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19b094572cbc1a5c8d82590da2aea5acfe671924ac221fc205a7276f0755f6fa"
+dependencies = [
+ "nom",
+ "tw_merge_variants",
+]
+
+[[package]]
+name = "tw_merge_variants"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b327b173cd2de4acb747f00df1de1a4096cbb4d4a5708d522bba9e0f556e1dae"
+dependencies = [
+ "darling 0.20.11",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

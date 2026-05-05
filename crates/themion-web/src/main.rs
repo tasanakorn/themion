@@ -1,80 +1,132 @@
-use anyhow::{Context, Result};
+pub mod components;
+
+use anyhow::{anyhow, bail, Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::http::header::CONTENT_TYPE;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
-use axum::{Json, Router};
-use base64::Engine as _;
+use axum::Router;
+use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use leptos::prelude::*;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use rusqlite::Connection;
-use serde::Serialize;
+use serde::Deserialize;
 use std::env;
-use std::fs;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::thread;
+use tokio::runtime::{Builder, Runtime};
+use tokio::sync::{mpsc as tokio_mpsc, oneshot};
+use std::sync::{mpsc, Arc};
+
+const APP_CSS: &str = include_str!("../style/app.css");
+const APP_JS: &str = include_str!("../style/app.js");
+const XTERM_CSS: &str = include_str!("../vendor/xterm/xterm.min.css");
+const XTERM_JS: &str = include_str!("../vendor/xterm/xterm.min.js");
+const TERMINAL_ROUTE: &str = "/api/terminal/ws";
 
 #[derive(Clone)]
 struct AppState {
-    paths: RuntimePaths,
+    terminal_service: TerminalService,
 }
 
-#[derive(Clone, Serialize)]
-struct RuntimePaths {
-    data_dir: Option<String>,
-    config_dir: Option<String>,
-    db_path: Option<String>,
-    config_path: Option<String>,
-    auth_dir: Option<String>,
-    legacy_auth_path: Option<String>,
+#[derive(Clone)]
+struct TerminalService {
+    request_tx: mpsc::Sender<TerminalRequest>,
 }
 
-#[derive(Serialize)]
-struct MonitoringResponse {
-    db_path: Option<String>,
-    config_path: Option<String>,
-    active_profile: Option<String>,
-    provider: Option<String>,
-    model: Option<String>,
-    session_count: Option<i64>,
-    project_memory_nodes: Option<i64>,
-    note: &'static str,
+enum TerminalRequest {
+    CreateSession {
+        response_tx: oneshot::Sender<Result<TerminalSessionHandle>>,
+    },
 }
 
-#[derive(Serialize)]
-struct FileInfoResponse {
-    label: &'static str,
-    path: Option<String>,
-    exists: bool,
-    readable: bool,
-    content_base64: Option<String>,
-    error: Option<String>,
+#[derive(Clone)]
+struct TerminalSessionHandle {
+    input_tx: tokio_mpsc::UnboundedSender<Vec<u8>>,
+    output_rx: Arc<tokio::sync::Mutex<tokio_mpsc::UnboundedReceiver<Vec<u8>>>>,
+    resize_tx: tokio_mpsc::UnboundedSender<TerminalResize>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+#[derive(Clone, Copy)]
+struct TerminalResize {
+    cols: u16,
+    rows: u16,
+}
+
+struct TerminalManager {
+    shell: String,
+    cwd: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ClientTerminalMessage {
+    Input { data: String },
+    Resize { cols: u16, rows: u16 },
+}
+
+fn main() -> Result<()> {
     let bind = env::var("THEMION_WEB_BIND").unwrap_or_else(|_| "0.0.0.0:8787".to_string());
     let addr: SocketAddr = bind
         .parse()
         .with_context(|| format!("invalid THEMION_WEB_BIND '{}'", bind))?;
-    let state = AppState {
-        paths: discover_runtime_paths(),
-    };
 
+    let (background_ready_tx, background_ready_rx) = oneshot::channel();
+    let background_thread = spawn_background_service_runtime(background_ready_tx)?;
+    let terminal_service = background_ready_rx
+        .blocking_recv()
+        .context("background service runtime exited before startup completed")??;
+
+    let app_state = AppState { terminal_service };
+    let web_runtime = build_web_runtime()?;
+    let web_result = web_runtime.block_on(run_web_server(addr, app_state));
+
+    drop(web_runtime);
+    background_thread
+        .join()
+        .map_err(|_| anyhow!("background service runtime thread panicked"))??;
+
+    web_result
+}
+
+fn spawn_background_service_runtime(
+    ready_tx: oneshot::Sender<Result<TerminalService>>,
+) -> Result<thread::JoinHandle<Result<()>>> {
+    thread::Builder::new()
+        .name("themion-web-background".to_string())
+        .spawn(move || {
+            let runtime = build_background_runtime()?;
+            runtime.block_on(run_background_services(ready_tx))
+        })
+        .context("failed to spawn background service runtime thread")
+}
+
+fn build_web_runtime() -> Result<Runtime> {
+    Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("themion-web")
+        .build()
+        .context("failed to build web runtime")
+}
+
+fn build_background_runtime() -> Result<Runtime> {
+    Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("themion-web-background")
+        .build()
+        .context("failed to build background service runtime")
+}
+
+async fn run_web_server(addr: SocketAddr, app_state: AppState) -> Result<()> {
     let app = Router::new()
         .route("/", get(index))
-        .route("/api/monitor", get(api_monitor))
-        .route("/api/files/config", get(api_config_file))
-        .route("/api/files/auth-legacy", get(api_auth_legacy_file))
-        .route("/api/files/auth-dir", get(api_auth_dir_listing))
-        .route("/api/files/database", get(api_database_file_info))
-        .route("/api/terminal", get(ws_terminal))
-        .route("/assets/xterm.min.js", get(xterm_js))
-        .route("/assets/xterm.min.css", get(xterm_css))
-        .with_state(state);
+        .route("/assets/xterm.css", get(xterm_css))
+        .route("/assets/xterm.js", get(xterm_js))
+        .route(TERMINAL_ROUTE, get(terminal_ws))
+        .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("themion-web listening on http://{}", listener.local_addr()?);
@@ -82,507 +134,353 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+async fn run_background_services(
+    ready_tx: oneshot::Sender<Result<TerminalService>>,
+) -> Result<()> {
+    let manager = Arc::new(TerminalManager::new()?);
+    let (request_tx, request_rx) = mpsc::channel::<TerminalRequest>();
+    let service = TerminalService { request_tx };
+    let _ = ready_tx.send(Ok(service));
+    process_terminal_requests(manager, request_rx).await
+}
+
+async fn process_terminal_requests(
+    manager: Arc<TerminalManager>,
+    request_rx: mpsc::Receiver<TerminalRequest>,
+) -> Result<()> {
+    while let Ok(request) = request_rx.recv() {
+        match request {
+            TerminalRequest::CreateSession { response_tx } => {
+                let result = manager.create_session();
+                let _ = response_tx.send(result);
+            }
+        }
+    }
+
+    bail!("terminal service request channel closed")
+}
+
+impl TerminalManager {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            shell: resolve_shell(),
+            cwd: env::current_dir()
+                .ok()
+                .and_then(|path| path.to_str().map(|value| value.to_string())),
+        })
+    }
+
+    fn create_session(&self) -> Result<TerminalSessionHandle> {
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: 30,
+                cols: 120,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("failed to open pty")?;
+
+        let mut cmd = CommandBuilder::new(&self.shell);
+        if let Some(cwd) = self.cwd.as_deref() {
+            cmd.cwd(cwd);
+        }
+
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .with_context(|| format!("failed to spawn shell '{}'", self.shell))?;
+        drop(child);
+
+        let writer = pair.master.take_writer().context("failed to get pty writer")?;
+        let reader = pair.master.try_clone_reader().context("failed to clone pty reader")?;
+        let resizer = pair.master;
+
+        let (input_tx, input_rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        let (output_tx, output_rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        let (resize_tx, resize_rx) = tokio_mpsc::unbounded_channel::<TerminalResize>();
+
+        spawn_terminal_input_loop(writer, input_rx);
+        spawn_terminal_output_loop(reader, output_tx);
+        spawn_terminal_resize_loop(resizer, resize_rx);
+
+        Ok(TerminalSessionHandle {
+            input_tx,
+            output_rx: Arc::new(tokio::sync::Mutex::new(output_rx)),
+            resize_tx,
+        })
+    }
+}
+
+fn spawn_terminal_input_loop(
+    mut writer: Box<dyn Write + Send>,
+    mut input_rx: tokio_mpsc::UnboundedReceiver<Vec<u8>>,
+) {
+    tokio::task::spawn_blocking(move || {
+        while let Some(bytes) = input_rx.blocking_recv() {
+            if writer.write_all(&bytes).is_err() {
+                break;
+            }
+            if writer.flush().is_err() {
+                break;
+            }
+        }
+    });
+}
+
+fn spawn_terminal_output_loop(
+    mut reader: Box<dyn Read + Send>,
+    output_tx: tokio_mpsc::UnboundedSender<Vec<u8>>,
+) {
+    tokio::task::spawn_blocking(move || {
+        let mut buf = vec![0_u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(count) => {
+                    if output_tx.send(buf[..count].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+fn spawn_terminal_resize_loop(
+    master: Box<dyn portable_pty::MasterPty + Send>,
+    mut resize_rx: tokio_mpsc::UnboundedReceiver<TerminalResize>,
+) {
+    tokio::spawn(async move {
+        while let Some(resize) = resize_rx.recv().await {
+            let _ = master.resize(PtySize {
+                rows: resize.rows,
+                cols: resize.cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
+        }
+    });
+}
+
+fn resolve_shell() -> String {
+    env::var("SHELL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "/bin/sh".to_string())
+}
+
 async fn index() -> Html<String> {
     Html(render_app_shell())
 }
 
-async fn api_monitor(State(state): State<AppState>) -> Json<MonitoringResponse> {
-    Json(build_monitoring_response(&state.paths))
-}
-
-async fn api_config_file(State(state): State<AppState>) -> Json<FileInfoResponse> {
-    Json(read_file_info("config", state.paths.config_path.as_deref().map(Path::new)))
-}
-
-async fn api_auth_legacy_file(State(state): State<AppState>) -> Json<FileInfoResponse> {
-    Json(read_file_info(
-        "legacy-auth",
-        state.paths.legacy_auth_path.as_deref().map(Path::new),
-    ))
-}
-
-async fn api_auth_dir_listing(State(state): State<AppState>) -> Json<Vec<FileInfoResponse>> {
-    let Some(path) = state.paths.auth_dir.as_deref().map(Path::new) else {
-        return Json(vec![]);
-    };
-    let mut out = Vec::new();
-    match fs::read_dir(path) {
-        Ok(entries) => {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.is_file() {
-                    out.push(read_file_info("profile-auth", Some(&p)));
-                }
-            }
-        }
-        Err(err) => out.push(FileInfoResponse {
-            label: "auth-dir",
-            path: Some(path.display().to_string()),
-            exists: path.exists(),
-            readable: false,
-            content_base64: None,
-            error: Some(err.to_string()),
-        }),
-    }
-    Json(out)
-}
-
-async fn api_database_file_info(State(state): State<AppState>) -> Json<FileInfoResponse> {
-    Json(read_file_info("database", state.paths.db_path.as_deref().map(Path::new)))
-}
-
-async fn ws_terminal(ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(handle_terminal_socket)
+async fn xterm_css() -> impl IntoResponse {
+    asset_response(XTERM_CSS, "text/css; charset=utf-8")
 }
 
 async fn xterm_js() -> impl IntoResponse {
-    (
-        [("content-type", "application/javascript; charset=utf-8")],
-        include_str!("../vendor/xterm/xterm.min.js"),
-    )
+    asset_response(XTERM_JS, "application/javascript; charset=utf-8")
 }
 
-async fn xterm_css() -> impl IntoResponse {
-    (
-        [("content-type", "text/css; charset=utf-8")],
-        include_str!("../vendor/xterm/xterm.min.css"),
-    )
+fn asset_response(body: &'static str, content_type: &'static str) -> Response {
+    let mut response = Response::new(body.into());
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static(content_type),
+    );
+    response
 }
 
-async fn handle_terminal_socket(socket: WebSocket) {
-    let _ = terminal_session(socket).await;
+async fn terminal_ws(
+    ws: WebSocketUpgrade,
+    State(app_state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let session = app_state
+        .terminal_service
+        .create_session()
+        .await
+        .map_err(internal_error)?;
+
+    Ok(ws.on_upgrade(move |socket| async move {
+        if let Err(error) = handle_terminal_socket(socket, session).await {
+            eprintln!("terminal websocket ended with error: {error:#}");
+        }
+    }))
 }
 
-async fn terminal_session(socket: WebSocket) -> Result<()> {
-    let pty_system = native_pty_system();
-    let pair = pty_system.openpty(PtySize {
-        rows: 24,
-        cols: 80,
-        pixel_width: 0,
-        pixel_height: 0,
-    })?;
-    let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    let cmd = CommandBuilder::new(shell);
-    let mut child = pair.slave.spawn_command(cmd)?;
-    drop(pair.slave);
-
-    let reader = pair.master.try_clone_reader()?;
-    let writer = pair.master.take_writer()?;
-    let writer = Arc::new(Mutex::new(writer));
-    let pair_master = Arc::new(Mutex::new(pair.master));
-
-    let (mut sender, mut receiver) = socket.split();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-
-    let reader_task = tokio::task::spawn_blocking(move || -> Result<()> {
-        let mut reader = reader;
-        let mut buf = [0u8; 4096];
-        loop {
-            let n = reader.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            if tx.send(String::from_utf8_lossy(&buf[..n]).to_string()).is_err() {
-                break;
-            }
-        }
-        Ok(())
-    });
-
-    let send_task = tokio::spawn(async move {
-        while let Some(chunk) = rx.recv().await {
-            if sender.send(Message::Text(chunk.into())).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    while let Some(Ok(msg)) = receiver.next().await {
-        match msg {
-            Message::Text(text) => {
-                if let Some(rest) = text.strip_prefix("RESIZE ") {
-                    let parts: Vec<_> = rest.split_whitespace().collect();
-                    if parts.len() == 2 {
-                        if let (Ok(cols), Ok(rows)) = (parts[0].parse::<u16>(), parts[1].parse::<u16>()) {
-                            let lock = pair_master.lock().expect("pty mutex poisoned");
-                            let _ = lock.resize(PtySize {
-                                rows,
-                                cols,
-                                pixel_width: 0,
-                                pixel_height: 0,
-                            });
-                        }
-                    }
-                } else {
-                    let mut lock = writer.lock().expect("writer mutex poisoned");
-                    let _ = lock.write_all(text.as_bytes());
-                    let _ = lock.flush();
-                }
-            }
-            Message::Binary(bytes) => {
-                let mut lock = writer.lock().expect("writer mutex poisoned");
-                let _ = lock.write_all(&bytes);
-                let _ = lock.flush();
-            }
-            Message::Close(_) => break,
-            _ => {}
-        }
+impl TerminalService {
+    async fn create_session(&self) -> Result<TerminalSessionHandle> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.request_tx
+            .send(TerminalRequest::CreateSession { response_tx })
+            .map_err(|_| anyhow!("terminal service unavailable"))?;
+        response_rx
+            .await
+            .context("terminal service dropped session response")?
     }
+}
 
-    send_task.abort();
-    let _ = child.kill();
-    let _ = child.wait();
-    let _ = reader_task.await;
+async fn handle_terminal_socket(socket: WebSocket, session: TerminalSessionHandle) -> Result<()> {
+    let (sender, receiver) = socket.split();
+    let output_rx = Arc::clone(&session.output_rx);
+
+    let send_task = tokio::spawn(stream_terminal_output(sender, output_rx));
+    let receive_task = tokio::spawn(process_terminal_input(receiver, session.clone()));
+
+    let send_result = send_task.await.context("terminal send task join failed")?;
+    let receive_result = receive_task
+        .await
+        .context("terminal receive task join failed")?;
+
+    send_result?;
+    receive_result?;
     Ok(())
 }
 
-fn discover_runtime_paths() -> RuntimePaths {
-    let data_dir = dirs::data_dir().map(|d| d.join("themion"));
-    let config_dir = dirs::config_dir().map(|d| d.join("themion"));
-    RuntimePaths {
-        data_dir: data_dir.as_ref().map(display),
-        config_dir: config_dir.as_ref().map(display),
-        db_path: data_dir
-            .as_ref()
-            .map(|d| d.join("system.db"))
-            .as_ref()
-            .map(display),
-        config_path: config_dir
-            .as_ref()
-            .map(|d| d.join("config.toml"))
-            .as_ref()
-            .map(display),
-        auth_dir: config_dir.as_ref().map(|d| d.join("auth")).as_ref().map(display),
-        legacy_auth_path: config_dir
-            .as_ref()
-            .map(|d| d.join("auth.json"))
-            .as_ref()
-            .map(display),
+async fn stream_terminal_output(
+    mut sender: SplitSink<WebSocket, Message>,
+    output_rx: Arc<tokio::sync::Mutex<tokio_mpsc::UnboundedReceiver<Vec<u8>>>>,
+) -> Result<()> {
+    let mut output_rx = output_rx.lock().await;
+    while let Some(bytes) = output_rx.recv().await {
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        sender.send(Message::Text(text.into())).await?;
     }
+    Ok(())
 }
 
-fn display(path: &PathBuf) -> String {
-    path.display().to_string()
-}
-
-fn build_monitoring_response(paths: &RuntimePaths) -> MonitoringResponse {
-    let mut active_profile = None;
-    let mut provider = None;
-    let mut model = None;
-    if let Some(config_path) = paths.config_path.as_deref() {
-        if let Ok(raw) = fs::read_to_string(config_path) {
-            if let Ok(value) = raw.parse::<toml::Value>() {
-                active_profile = value
-                    .get("primary_llm_profile")
-                    .and_then(|v| v.as_str())
-                    .map(ToOwned::to_owned);
-                if let Some(profile_name) = active_profile.as_deref() {
-                    if let Some(profile) = value.get("profile").and_then(|p| p.get(profile_name)) {
-                        provider = profile
-                            .get("provider")
-                            .and_then(|v| v.as_str())
-                            .map(ToOwned::to_owned);
-                        model = profile
-                            .get("model")
-                            .and_then(|v| v.as_str())
-                            .map(ToOwned::to_owned);
-                    }
+async fn process_terminal_input(
+    mut receiver: SplitStream<WebSocket>,
+    session: TerminalSessionHandle,
+) -> Result<()> {
+    while let Some(message) = receiver.next().await {
+        match message? {
+            Message::Text(text) => match serde_json::from_str::<ClientTerminalMessage>(&text) {
+                Ok(ClientTerminalMessage::Input { data }) => {
+                    session
+                        .input_tx
+                        .send(data.into_bytes())
+                        .map_err(|_| anyhow!("terminal input channel closed"))?;
                 }
+                Ok(ClientTerminalMessage::Resize { cols, rows }) => {
+                    session
+                        .resize_tx
+                        .send(TerminalResize { cols, rows })
+                        .map_err(|_| anyhow!("terminal resize channel closed"))?;
+                }
+                Err(error) => {
+                    return Err(anyhow!("invalid terminal websocket payload: {error}"));
+                }
+            },
+            Message::Binary(bytes) => {
+                session
+                    .input_tx
+                    .send(bytes.to_vec())
+                    .map_err(|_| anyhow!("terminal input channel closed"))?;
             }
+            Message::Close(_) => break,
+            Message::Ping(_) | Message::Pong(_) => {}
         }
     }
 
-    let mut session_count = None;
-    let mut project_memory_nodes = None;
-    if let Some(db_path) = paths.db_path.as_deref() {
-        if let Ok(conn) = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
-            session_count = scalar_query(&conn, "SELECT COUNT(*) FROM agent_sessions");
-            project_memory_nodes = scalar_query(&conn, "SELECT COUNT(*) FROM memory_nodes");
-        }
-    }
-
-    MonitoringResponse {
-        db_path: paths.db_path.clone(),
-        config_path: paths.config_path.clone(),
-        active_profile,
-        provider,
-        model,
-        session_count,
-        project_memory_nodes,
-        note: "Phase 1 monitoring is read-only and derived only from SQLite plus config/auth files.",
-    }
+    Ok(())
 }
 
-fn scalar_query(conn: &Connection, sql: &str) -> Option<i64> {
-    conn.query_row(sql, [], |row| row.get::<_, i64>(0)).ok()
-}
-
-fn read_file_info(label: &'static str, path: Option<&Path>) -> FileInfoResponse {
-    let Some(path) = path else {
-        return FileInfoResponse {
-            label,
-            path: None,
-            exists: false,
-            readable: false,
-            content_base64: None,
-            error: None,
-        };
-    };
-    match fs::read(path) {
-        Ok(bytes) => FileInfoResponse {
-            label,
-            path: Some(path.display().to_string()),
-            exists: true,
-            readable: true,
-            content_base64: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
-            error: None,
-        },
-        Err(err) => FileInfoResponse {
-            label,
-            path: Some(path.display().to_string()),
-            exists: path.exists(),
-            readable: false,
-            content_base64: None,
-            error: Some(err.to_string()),
-        },
-    }
+fn internal_error(error: anyhow::Error) -> (StatusCode, String) {
+    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
 }
 
 fn render_app_shell() -> String {
     let body = view! { <AppShell/> }.to_html();
     format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\" /><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" /><title>Themion Web</title><link rel=\"stylesheet\" href=\"/assets/xterm.min.css\" /><style>{}</style></head><body>{}<script src=\"/assets/xterm.min.js\"></script><script>{}</script></body></html>",
-        APP_CSS, body, APP_JS
+        "<!doctype html><html><head><meta charset=\"utf-8\" /><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" /><title>Themion Web</title><style>{}</style><style>{}</style></head><body>{}<script>{}</script><script>{}</script></body></html>",
+        APP_CSS,
+        XTERM_CSS,
+        body,
+        XTERM_JS,
+        APP_JS,
     )
 }
 
 #[component]
 fn AppShell() -> impl IntoView {
+    use crate::components::ui::card::Card;
+
     view! {
-        <main class="page">
-            <header class="hero">
-                <h1>"Themion Web Phase 1"</h1>
-                <p>
-                    "Read-only monitoring from SQLite + config/auth files, plus browser PTY access through xterm.js using the default shell."
-                </p>
-            </header>
+        <main class="app-shell">
+            <input id="nav-dashboard" class="nav-radio" type="radio" name="sidebar-page" checked/>
+            <input id="nav-example" class="nav-radio" type="radio" name="sidebar-page"/>
+            <input id="nav-agent" class="nav-radio" type="radio" name="sidebar-page"/>
+            <input id="nav-shell" class="nav-radio" type="radio" name="sidebar-page"/>
 
-            <section class="grid">
-                <DataPanel title="Monitoring" element_id="monitor"/>
-                <DataPanel title="Config" element_id="config"/>
-                <DataPanel title="Legacy Auth" element_id="legacy-auth"/>
-                <DataPanel title="Database File" element_id="database"/>
-            </section>
+            <div id="workspace" class="workspace">
+                <aside id="sidebar" class="sidebar">
+                    <Card class="sidebar-card p-0">
+                        <div class="sidebar-head">
+                            <span class="sidebar-title">"Menu"</span>
+                        </div>
+                        <nav class="sidebar-body" aria-label="Sidebar menu">
+                            <label class="sidebar-item" for="nav-dashboard">"Dashboard"</label>
+                            <label class="sidebar-item" for="nav-example">"Example"</label>
+                            <label class="sidebar-item" for="nav-agent">"Agent"</label>
+                            <label class="sidebar-item" for="nav-shell">"Shell"</label>
+                        </nav>
+                    </Card>
+                </aside>
 
-            <section class="panel">
-                <h2>"Profile Auth Files"</h2>
-                <pre id="auth-dir">"loading..."</pre>
-            </section>
+                <section class="main-pane">
+                    <div class="main-topbar">
+                        <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-label="Toggle sidebar" aria-pressed="false">"☰"</button>
+                    </div>
 
-            <section class="panel">
-                <h2>"Terminal"</h2>
-                <p>
-                    "Uses the user default shell from "
-                    <code>"$SHELL"</code>
-                    ", falling back to "
-                    <code>"/bin/sh"</code>
-                    "."
-                </p>
-                <div class="terminal-toolbar">
-                    <button id="term-connect" type="button">"Connect terminal"</button>
-                    <span id="term-status" class="terminal-status">"disconnected"</span>
-                </div>
-                <div id="term" class="term-host"></div>
-            </section>
+                    <section class="page-panel page-dashboard">
+                        <Card class="page-surface">
+                            <div class="empty-page">"Dashboard"</div>
+                        </Card>
+                    </section>
+
+                    <section class="page-panel page-example">
+                        <div class="tabs-row" role="tablist" aria-label="Documents">
+                            <button class="tab-button is-active" type="button" data-tab-target="tab-main" aria-selected="true">"main.rs"</button>
+                            <button class="tab-button" type="button" data-tab-target="tab-lib" aria-selected="false">"lib.rs"</button>
+                            <button class="tab-button" type="button" data-tab-target="tab-notes" aria-selected="false">"notes.md"</button>
+                        </div>
+
+                        <Card class="document-surface p-0">
+                            <div class="doc-panel" data-tab-panel="tab-main">
+                                <pre class="doc-content">"fn main() {\n    println!(\"hello\");\n}"</pre>
+                            </div>
+                            <div class="doc-panel" data-tab-panel="tab-lib" hidden>
+                                <pre class="doc-content">"pub fn ready() -> bool {\n    true\n}"</pre>
+                            </div>
+                            <div class="doc-panel" data-tab-panel="tab-notes" hidden>
+                                <pre class="doc-content">"simple first\n- sidebar is menu\n- tabs are documents"</pre>
+                            </div>
+                        </Card>
+                    </section>
+
+                    <section class="page-panel page-agent">
+                        <Card class="page-surface">
+                            <div class="empty-page">"Agent"</div>
+                        </Card>
+                    </section>
+
+                    <section class="page-panel page-shell">
+                        <Card class="page-surface terminal-page">
+                            <div class="terminal-toolbar">
+                                <div>
+                                    <div class="terminal-title">"Remote Terminal"</div>
+                                    <div class="terminal-subtitle">"PTY runs on isolated background runtime"</div>
+                                </div>
+                                <button id="terminal-reconnect" class="tab-button terminal-action" type="button">"Reconnect"</button>
+                            </div>
+                            <div id="terminal-status" class="terminal-status" data-state="idle">"Terminal idle"</div>
+                            <div id="terminal-root" class="terminal-root"></div>
+                        </Card>
+                    </section>
+                </section>
+            </div>
         </main>
     }
 }
-
-#[component]
-fn DataPanel(title: &'static str, element_id: &'static str) -> impl IntoView {
-    view! {
-        <section class="panel">
-            <h2>{title}</h2>
-            <pre id=element_id>"loading..."</pre>
-        </section>
-    }
-}
-
-const APP_CSS: &str = r#"
-:root {
-  color-scheme: dark;
-}
-body {
-  margin: 0;
-  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
-  background: #0b1020;
-  color: #e5e7eb;
-}
-.page {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 2rem;
-}
-.hero {
-  margin-bottom: 1.5rem;
-}
-.hero h1 {
-  margin: 0 0 0.5rem 0;
-}
-.hero p {
-  margin: 0;
-  color: #cbd5e1;
-}
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 1rem;
-}
-.panel {
-  background: #111827;
-  border: 1px solid #334155;
-  border-radius: 12px;
-  padding: 1rem;
-  margin-bottom: 1rem;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
-}
-.panel h2 {
-  margin-top: 0;
-  font-size: 1rem;
-}
-pre {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  overflow: auto;
-  min-height: 10rem;
-  background: #020617;
-  border-radius: 8px;
-  padding: 0.75rem;
-  border: 1px solid #1e293b;
-}
-code {
-  background: #1e293b;
-  padding: 0.15rem 0.35rem;
-  border-radius: 4px;
-}
-button {
-  background: #2563eb;
-  color: white;
-  border: 0;
-  padding: 0.65rem 0.9rem;
-  border-radius: 8px;
-  font-weight: 600;
-  cursor: pointer;
-}
-button:hover {
-  background: #1d4ed8;
-}
-.terminal-toolbar {
-  margin-bottom: 0.75rem;
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-}
-.terminal-status {
-  color: #93c5fd;
-  font-size: 0.9rem;
-}
-.term-host {
-  min-height: 24rem;
-  background: #000;
-  border-radius: 8px;
-  border: 1px solid #1e293b;
-  padding: 0.35rem;
-}
-"#;
-
-const APP_JS: &str = r#"
-async function loadJson(path, elementId) {
-  const el = document.getElementById(elementId);
-  try {
-    const data = await fetch(path).then((r) => r.json());
-    el.textContent = JSON.stringify(data, null, 2);
-  } catch (err) {
-    el.textContent = `failed to load ${path}: ${err}`;
-  }
-}
-
-loadJson('/api/monitor', 'monitor');
-loadJson('/api/files/config', 'config');
-loadJson('/api/files/auth-legacy', 'legacy-auth');
-loadJson('/api/files/database', 'database');
-loadJson('/api/files/auth-dir', 'auth-dir');
-
-let ws;
-let term;
-let termHost;
-let statusEl;
-
-function updateStatus(text) {
-  if (statusEl) statusEl.textContent = text;
-}
-
-function fitAndResize() {
-  if (!term || !termHost || !ws || ws.readyState !== WebSocket.OPEN) return;
-  const cols = Math.max(40, Math.floor(termHost.clientWidth / 9));
-  const rows = Math.max(12, Math.floor(termHost.clientHeight / 18));
-  try {
-    term.resize(cols, rows);
-  } catch (_) {}
-  ws.send(`RESIZE ${cols} ${rows}`);
-}
-
-function ensureTerminal() {
-  if (term) return term;
-  term = new Terminal({
-    cursorBlink: true,
-    convertEol: true,
-    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-    fontSize: 14,
-    theme: {
-      background: '#000000',
-      foreground: '#86efac'
-    }
-  });
-  term.open(termHost);
-  term.onData((data) => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(data);
-    }
-  });
-  return term;
-}
-
-function connectTerm() {
-  ensureTerminal();
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    term.focus();
-    return;
-  }
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/api/terminal`);
-  updateStatus('connecting');
-  ws.onopen = () => {
-    updateStatus('connected');
-    term.focus();
-    fitAndResize();
-  };
-  ws.onclose = () => {
-    updateStatus('disconnected');
-  };
-  ws.onerror = () => {
-    updateStatus('error');
-  };
-  ws.onmessage = (ev) => {
-    term.write(ev.data);
-  };
-}
-
-window.addEventListener('load', () => {
-  termHost = document.getElementById('term');
-  statusEl = document.getElementById('term-status');
-  document.getElementById('term-connect').addEventListener('click', connectTerm);
-  window.addEventListener('resize', fitAndResize);
-});
-"#;

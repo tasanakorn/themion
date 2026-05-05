@@ -1,22 +1,25 @@
 [package]
 name = "themion-web"
-version = "0.61.1"
+version = "0.61.0"
 edition = "2021"
 
 [[bin]]
 name = "themion-web"
 path = "src/main.rs"
 
+[package.metadata.leptos]
+tailwind-input-file = "style/tailwind.css"
+
 [dependencies]
 anyhow.workspace = true
+axum = { version = "0.8", features = ["http1", "ws"] }
+futures-util = "0.3"
+leptos = { version = "0.8", default-features = false, features = ["ssr"] }
+leptos_router = { version = "0.8", default-features = false, features = ["ssr"] }
+leptos_ui = "0.3.22"
+icons = { version = "0.18.2", features = ["leptos"] }
+portable-pty = "0.9"
 serde.workspace = true
 serde_json.workspace = true
-toml.workspace = true
 tokio.workspace = true
-rusqlite.workspace = true
-axum = { version = "0.8", features = ["ws", "json"] }
-leptos = { version = "0.8", default-features = false, features = ["ssr"] }
-portable-pty = "0.9"
-dirs = "5"
-base64.workspace = true
-futures-util = "0.3"
+tw_merge = { version = "0.1.21", features = ["variant"] }
