@@ -2,6 +2,8 @@ const panels = () => document.querySelectorAll('[data-tab-panel]');
 const tabs = () => document.querySelectorAll('[data-tab-target]');
 const TERMINAL_ENDPOINT = '/api/terminal/ws';
 const STORAGE_KEY = 'themion-web.terminals.v1';
+const DEFAULT_TERMINAL_COLS = 120;
+const DEFAULT_TERMINAL_ROWS = 40;
 
 let terminalManager = null;
 
@@ -42,13 +44,13 @@ function setTerminalStatus(state, message) {
   status.textContent = message;
 }
 
-function measureTerminalSize(root) {
-  const width = root.clientWidth || 960;
-  const height = root.clientHeight || 480;
-  return {
-    cols: Math.max(20, Math.floor(width / 9)),
-    rows: Math.max(8, Math.floor(height / 18)),
+function fitTerminal(session) {
+  if (!terminalManager?.socketOpen || !session) return;
+  const nextSize = {
+    cols: Math.max(20, session.terminal.cols || DEFAULT_TERMINAL_COLS),
+    rows: Math.max(8, session.terminal.rows || DEFAULT_TERMINAL_ROWS),
   };
+  sendSocketMessage({ type: 'resize', terminal_id: session.id, ...nextSize });
 }
 
 function loadTerminalState() {
@@ -76,6 +78,8 @@ function saveTerminalState() {
 
 function makeTerminal() {
   return new window.Terminal({
+    cols: DEFAULT_TERMINAL_COLS,
+    rows: DEFAULT_TERMINAL_ROWS,
     convertEol: true,
     cursorBlink: true,
     fontFamily: 'JetBrains Mono, SFMono-Regular, ui-monospace, monospace',
@@ -151,8 +155,7 @@ function ensureSession(terminal) {
   });
 
   session.resizeObserver = new ResizeObserver(() => {
-    if (!terminalManager?.socketOpen) return;
-    sendSocketMessage({ type: 'resize', terminal_id: session.id, ...measureTerminalSize(session.root) });
+    fitTerminal(session);
   });
   session.resizeObserver.observe(session.root);
 
@@ -185,9 +188,7 @@ function activateSession(sessionId) {
 
   setTerminalStatus(terminalManager.socketOpen ? 'connected' : 'connecting', `${session.label} ${terminalManager.socketOpen ? 'connected' : 'reconnecting'}`);
   session.terminal.focus();
-  if (terminalManager.socketOpen) {
-    sendSocketMessage({ type: 'resize', terminal_id: session.id, ...measureTerminalSize(session.root) });
-  }
+  fitTerminal(session);
   saveTerminalState();
 }
 
@@ -328,7 +329,7 @@ function handleSocketMessage(message) {
       if (message.scrollback) {
         session.terminal.write(message.scrollback);
       }
-      sendSocketMessage({ type: 'resize', terminal_id: session.id, ...measureTerminalSize(session.root) });
+      fitTerminal(session);
       if (terminalManager.activeId === session.id) {
         setTerminalStatus('connected', `${session.label} connected`);
         session.terminal.focus();

@@ -318,7 +318,7 @@ button {
 .terminal-panel {
   display: none;
   height: 100%;
-  min-height: 26rem;
+  min-height: 0;
   background: #0b1016;
 }
 
@@ -328,8 +328,9 @@ button {
 
 .terminal-root {
   height: 100%;
-  min-height: 26rem;
+  min-height: 0;
   padding: 0.45rem;
+  overflow: auto;
 }
 
 .terminal-root .xterm {

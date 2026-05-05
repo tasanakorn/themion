@@ -29,6 +29,8 @@ const XTERM_CSS: &str = include_str!("../vendor/xterm/xterm.min.css");
 const XTERM_JS: &str = include_str!("../vendor/xterm/xterm.min.js");
 const TERMINAL_ROUTE: &str = "/api/terminal/ws";
 const TERMINAL_SCROLLBACK_LIMIT_BYTES: usize = 262_144;
+const DEFAULT_TERMINAL_COLS: u16 = 120;
+const DEFAULT_TERMINAL_ROWS: u16 = 40;
 
 #[derive(Clone)]
 struct AppState {
@@ -267,8 +269,8 @@ impl TerminalRegistry {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
-                rows: 30,
-                cols: 120,
+                rows: DEFAULT_TERMINAL_ROWS,
+                cols: DEFAULT_TERMINAL_COLS,
                 pixel_width: 0,
                 pixel_height: 0,
             })
