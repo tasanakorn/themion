@@ -4,28 +4,31 @@ use anyhow::{anyhow, bail, Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::header::CONTENT_TYPE;
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::HeaderValue;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use leptos::prelude::*;
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use serde::Deserialize;
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
-use std::sync::{mpsc, Arc};
 
 const APP_CSS: &str = include_str!("../style/app.css");
 const APP_JS: &str = include_str!("../style/app.js");
 const XTERM_CSS: &str = include_str!("../vendor/xterm/xterm.min.css");
 const XTERM_JS: &str = include_str!("../vendor/xterm/xterm.min.js");
 const TERMINAL_ROUTE: &str = "/api/terminal/ws";
+const TERMINAL_SCROLLBACK_LIMIT_BYTES: usize = 262_144;
 
 #[derive(Clone)]
 struct AppState {
@@ -38,16 +41,59 @@ struct TerminalService {
 }
 
 enum TerminalRequest {
-    CreateSession {
-        response_tx: oneshot::Sender<Result<TerminalSessionHandle>>,
+    CreateTerminal {
+        response_tx: oneshot::Sender<Result<TerminalDescriptor>>,
+    },
+    ListTerminals {
+        response_tx: oneshot::Sender<Result<Vec<TerminalDescriptor>>>,
+    },
+    AttachTerminal {
+        terminal_id: u64,
+        response_tx: oneshot::Sender<Result<TerminalAttachHandle>>,
+    },
+    Input {
+        terminal_id: u64,
+        data: Vec<u8>,
+        response_tx: oneshot::Sender<Result<()>>,
+    },
+    Resize {
+        terminal_id: u64,
+        cols: u16,
+        rows: u16,
+        response_tx: oneshot::Sender<Result<()>>,
+    },
+    CloseTerminal {
+        terminal_id: u64,
+        response_tx: oneshot::Sender<Result<()>>,
     },
 }
 
-#[derive(Clone)]
-struct TerminalSessionHandle {
+#[derive(Clone, Debug, Serialize)]
+struct TerminalDescriptor {
+    terminal_id: u64,
+    label: String,
+}
+
+struct TerminalAttachHandle {
+    descriptor: TerminalDescriptor,
+    scrollback: String,
+    output_rx: tokio_mpsc::UnboundedReceiver<String>,
+}
+
+struct TerminalRegistry {
+    next_terminal_id: AtomicU64,
+    shell: String,
+    cwd: Option<String>,
+    terminals: Mutex<HashMap<u64, TerminalEntry>>,
+}
+
+struct TerminalEntry {
+    descriptor: TerminalDescriptor,
     input_tx: tokio_mpsc::UnboundedSender<Vec<u8>>,
-    output_rx: Arc<tokio::sync::Mutex<tokio_mpsc::UnboundedReceiver<Vec<u8>>>>,
     resize_tx: tokio_mpsc::UnboundedSender<TerminalResize>,
+    subscribers: Vec<tokio_mpsc::UnboundedSender<String>>,
+    scrollback: String,
+    _child: Box<dyn Child + Send + Sync>,
 }
 
 #[derive(Clone, Copy)]
@@ -56,16 +102,26 @@ struct TerminalResize {
     rows: u16,
 }
 
-struct TerminalManager {
-    shell: String,
-    cwd: Option<String>,
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ClientSocketMessage {
+    CreateTerminal,
+    ListTerminals,
+    AttachTerminal { terminal_id: u64 },
+    Input { terminal_id: u64, data: String },
+    Resize { terminal_id: u64, cols: u16, rows: u16 },
+    CloseTerminal { terminal_id: u64 },
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ClientTerminalMessage {
-    Input { data: String },
-    Resize { cols: u16, rows: u16 },
+enum ServerSocketMessage {
+    TerminalList { terminals: Vec<TerminalDescriptor> },
+    TerminalCreated { terminal: TerminalDescriptor },
+    TerminalAttached { terminal: TerminalDescriptor, scrollback: String },
+    TerminalOutput { terminal_id: u64, data: String },
+    TerminalClosed { terminal_id: u64 },
+    Error { message: String },
 }
 
 fn main() -> Result<()> {
@@ -137,22 +193,51 @@ async fn run_web_server(addr: SocketAddr, app_state: AppState) -> Result<()> {
 async fn run_background_services(
     ready_tx: oneshot::Sender<Result<TerminalService>>,
 ) -> Result<()> {
-    let manager = Arc::new(TerminalManager::new()?);
+    let registry = Arc::new(TerminalRegistry::new()?);
     let (request_tx, request_rx) = mpsc::channel::<TerminalRequest>();
     let service = TerminalService { request_tx };
     let _ = ready_tx.send(Ok(service));
-    process_terminal_requests(manager, request_rx).await
+    process_terminal_requests(registry, request_rx).await
 }
 
 async fn process_terminal_requests(
-    manager: Arc<TerminalManager>,
+    registry: Arc<TerminalRegistry>,
     request_rx: mpsc::Receiver<TerminalRequest>,
 ) -> Result<()> {
     while let Ok(request) = request_rx.recv() {
         match request {
-            TerminalRequest::CreateSession { response_tx } => {
-                let result = manager.create_session();
-                let _ = response_tx.send(result);
+            TerminalRequest::CreateTerminal { response_tx } => {
+                let _ = response_tx.send(registry.create_terminal());
+            }
+            TerminalRequest::ListTerminals { response_tx } => {
+                let _ = response_tx.send(registry.list_terminals());
+            }
+            TerminalRequest::AttachTerminal {
+                terminal_id,
+                response_tx,
+            } => {
+                let _ = response_tx.send(registry.attach_terminal(terminal_id));
+            }
+            TerminalRequest::Input {
+                terminal_id,
+                data,
+                response_tx,
+            } => {
+                let _ = response_tx.send(registry.send_input(terminal_id, data));
+            }
+            TerminalRequest::Resize {
+                terminal_id,
+                cols,
+                rows,
+                response_tx,
+            } => {
+                let _ = response_tx.send(registry.resize_terminal(terminal_id, cols, rows));
+            }
+            TerminalRequest::CloseTerminal {
+                terminal_id,
+                response_tx,
+            } => {
+                let _ = response_tx.send(registry.close_terminal(terminal_id));
             }
         }
     }
@@ -160,17 +245,25 @@ async fn process_terminal_requests(
     bail!("terminal service request channel closed")
 }
 
-impl TerminalManager {
+impl TerminalRegistry {
     fn new() -> Result<Self> {
         Ok(Self {
+            next_terminal_id: AtomicU64::new(1),
             shell: resolve_shell(),
             cwd: env::current_dir()
                 .ok()
                 .and_then(|path| path.to_str().map(|value| value.to_string())),
+            terminals: Mutex::new(HashMap::new()),
         })
     }
 
-    fn create_session(&self) -> Result<TerminalSessionHandle> {
+    fn create_terminal(self: &Arc<Self>) -> Result<TerminalDescriptor> {
+        let terminal_id = self.next_terminal_id.fetch_add(1, Ordering::Relaxed);
+        let descriptor = TerminalDescriptor {
+            terminal_id,
+            label: format!("Shell {terminal_id}"),
+        };
+
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -190,26 +283,134 @@ impl TerminalManager {
             .slave
             .spawn_command(cmd)
             .with_context(|| format!("failed to spawn shell '{}'", self.shell))?;
-        drop(child);
 
         let writer = pair.master.take_writer().context("failed to get pty writer")?;
         let reader = pair.master.try_clone_reader().context("failed to clone pty reader")?;
         let resizer = pair.master;
 
         let (input_tx, input_rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
-        let (output_tx, output_rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+        let (output_tx, output_rx) = tokio_mpsc::unbounded_channel::<String>();
         let (resize_tx, resize_rx) = tokio_mpsc::unbounded_channel::<TerminalResize>();
 
         spawn_terminal_input_loop(writer, input_rx);
         spawn_terminal_output_loop(reader, output_tx);
         spawn_terminal_resize_loop(resizer, resize_rx);
+        spawn_terminal_broadcast_loop(terminal_id, Arc::clone(self), output_rx);
 
-        Ok(TerminalSessionHandle {
-            input_tx,
-            output_rx: Arc::new(tokio::sync::Mutex::new(output_rx)),
-            resize_tx,
+        self.terminals
+            .lock()
+            .map_err(|_| anyhow!("terminal registry poisoned"))?
+            .insert(
+                terminal_id,
+                TerminalEntry {
+                    descriptor: descriptor.clone(),
+                    input_tx,
+                    resize_tx,
+                    subscribers: Vec::new(),
+                    scrollback: String::new(),
+                    _child: child,
+                },
+            );
+
+        Ok(descriptor)
+    }
+
+    fn list_terminals(&self) -> Result<Vec<TerminalDescriptor>> {
+        let mut terminals: Vec<_> = self
+            .terminals
+            .lock()
+            .map_err(|_| anyhow!("terminal registry poisoned"))?
+            .values()
+            .map(|entry| entry.descriptor.clone())
+            .collect();
+        terminals.sort_by_key(|terminal| terminal.terminal_id);
+        Ok(terminals)
+    }
+
+    fn attach_terminal(&self, terminal_id: u64) -> Result<TerminalAttachHandle> {
+        let (subscriber_tx, subscriber_rx) = tokio_mpsc::unbounded_channel::<String>();
+        let mut terminals = self
+            .terminals
+            .lock()
+            .map_err(|_| anyhow!("terminal registry poisoned"))?;
+        let entry = terminals
+            .get_mut(&terminal_id)
+            .ok_or_else(|| anyhow!("unknown terminal_id {}", terminal_id))?;
+        entry.subscribers.push(subscriber_tx);
+        Ok(TerminalAttachHandle {
+            descriptor: entry.descriptor.clone(),
+            scrollback: entry.scrollback.clone(),
+            output_rx: subscriber_rx,
         })
     }
+
+    fn send_input(&self, terminal_id: u64, data: Vec<u8>) -> Result<()> {
+        let terminals = self
+            .terminals
+            .lock()
+            .map_err(|_| anyhow!("terminal registry poisoned"))?;
+        let entry = terminals
+            .get(&terminal_id)
+            .ok_or_else(|| anyhow!("unknown terminal_id {}", terminal_id))?;
+        entry
+            .input_tx
+            .send(data)
+            .map_err(|_| anyhow!("terminal input channel closed"))
+    }
+
+    fn resize_terminal(&self, terminal_id: u64, cols: u16, rows: u16) -> Result<()> {
+        let terminals = self
+            .terminals
+            .lock()
+            .map_err(|_| anyhow!("terminal registry poisoned"))?;
+        let entry = terminals
+            .get(&terminal_id)
+            .ok_or_else(|| anyhow!("unknown terminal_id {}", terminal_id))?;
+        entry
+            .resize_tx
+            .send(TerminalResize { cols, rows })
+            .map_err(|_| anyhow!("terminal resize channel closed"))
+    }
+
+    fn close_terminal(&self, terminal_id: u64) -> Result<()> {
+        let mut terminals = self
+            .terminals
+            .lock()
+            .map_err(|_| anyhow!("terminal registry poisoned"))?;
+        terminals
+            .remove(&terminal_id)
+            .ok_or_else(|| anyhow!("unknown terminal_id {}", terminal_id))?;
+        Ok(())
+    }
+
+    fn fan_out_output(&self, terminal_id: u64, data: String) -> Result<()> {
+        let mut terminals = self
+            .terminals
+            .lock()
+            .map_err(|_| anyhow!("terminal registry poisoned"))?;
+        let Some(entry) = terminals.get_mut(&terminal_id) else {
+            return Ok(());
+        };
+
+        entry.scrollback.push_str(&data);
+        trim_scrollback(&mut entry.scrollback);
+        entry
+            .subscribers
+            .retain(|subscriber| subscriber.send(data.clone()).is_ok());
+        Ok(())
+    }
+}
+
+fn trim_scrollback(scrollback: &mut String) {
+    if scrollback.len() <= TERMINAL_SCROLLBACK_LIMIT_BYTES {
+        return;
+    }
+    let drop_bytes = scrollback.len() - TERMINAL_SCROLLBACK_LIMIT_BYTES;
+    let drop_at = scrollback
+        .char_indices()
+        .find_map(|(index, _)| (index >= drop_bytes).then_some(index))
+        .unwrap_or(scrollback.len());
+    scrollback.drain(..drop_at);
 }
 
 fn spawn_terminal_input_loop(
@@ -230,7 +431,7 @@ fn spawn_terminal_input_loop(
 
 fn spawn_terminal_output_loop(
     mut reader: Box<dyn Read + Send>,
-    output_tx: tokio_mpsc::UnboundedSender<Vec<u8>>,
+    output_tx: tokio_mpsc::UnboundedSender<String>,
 ) {
     tokio::task::spawn_blocking(move || {
         let mut buf = vec![0_u8; 8192];
@@ -238,7 +439,8 @@ fn spawn_terminal_output_loop(
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(count) => {
-                    if output_tx.send(buf[..count].to_vec()).is_err() {
+                    let text = String::from_utf8_lossy(&buf[..count]).to_string();
+                    if output_tx.send(text).is_err() {
                         break;
                     }
                 }
@@ -249,7 +451,7 @@ fn spawn_terminal_output_loop(
 }
 
 fn spawn_terminal_resize_loop(
-    master: Box<dyn portable_pty::MasterPty + Send>,
+    master: Box<dyn MasterPty + Send>,
     mut resize_rx: tokio_mpsc::UnboundedReceiver<TerminalResize>,
 ) {
     tokio::spawn(async move {
@@ -260,6 +462,18 @@ fn spawn_terminal_resize_loop(
                 pixel_width: 0,
                 pixel_height: 0,
             });
+        }
+    });
+}
+
+fn spawn_terminal_broadcast_loop(
+    terminal_id: u64,
+    registry: Arc<TerminalRegistry>,
+    mut output_rx: tokio_mpsc::UnboundedReceiver<String>,
+) {
+    tokio::spawn(async move {
+        while let Some(data) = output_rx.recv().await {
+            let _ = registry.fan_out_output(terminal_id, data);
         }
     });
 }
@@ -285,100 +499,128 @@ async fn xterm_js() -> impl IntoResponse {
 
 fn asset_response(body: &'static str, content_type: &'static str) -> Response {
     let mut response = Response::new(body.into());
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static(content_type),
-    );
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
     response
 }
 
 async fn terminal_ws(
     ws: WebSocketUpgrade,
     State(app_state): State<AppState>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let session = app_state
-        .terminal_service
-        .create_session()
-        .await
-        .map_err(internal_error)?;
-
-    Ok(ws.on_upgrade(move |socket| async move {
-        if let Err(error) = handle_terminal_socket(socket, session).await {
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| async move {
+        if let Err(error) = handle_terminal_socket(socket, app_state.terminal_service).await {
             eprintln!("terminal websocket ended with error: {error:#}");
         }
-    }))
+    })
 }
 
 impl TerminalService {
-    async fn create_session(&self) -> Result<TerminalSessionHandle> {
+    async fn create_terminal(&self) -> Result<TerminalDescriptor> {
         let (response_tx, response_rx) = oneshot::channel();
         self.request_tx
-            .send(TerminalRequest::CreateSession { response_tx })
+            .send(TerminalRequest::CreateTerminal { response_tx })
             .map_err(|_| anyhow!("terminal service unavailable"))?;
         response_rx
             .await
-            .context("terminal service dropped session response")?
+            .context("terminal service dropped create response")?
+    }
+
+    async fn list_terminals(&self) -> Result<Vec<TerminalDescriptor>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.request_tx
+            .send(TerminalRequest::ListTerminals { response_tx })
+            .map_err(|_| anyhow!("terminal service unavailable"))?;
+        response_rx
+            .await
+            .context("terminal service dropped list response")?
+    }
+
+    async fn attach_terminal(&self, terminal_id: u64) -> Result<TerminalAttachHandle> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.request_tx
+            .send(TerminalRequest::AttachTerminal {
+                terminal_id,
+                response_tx,
+            })
+            .map_err(|_| anyhow!("terminal service unavailable"))?;
+        response_rx
+            .await
+            .context("terminal service dropped attach response")?
+    }
+
+    async fn send_input(&self, terminal_id: u64, data: Vec<u8>) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.request_tx
+            .send(TerminalRequest::Input {
+                terminal_id,
+                data,
+                response_tx,
+            })
+            .map_err(|_| anyhow!("terminal service unavailable"))?;
+        response_rx
+            .await
+            .context("terminal service dropped input response")?
+    }
+
+    async fn resize_terminal(&self, terminal_id: u64, cols: u16, rows: u16) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.request_tx
+            .send(TerminalRequest::Resize {
+                terminal_id,
+                cols,
+                rows,
+                response_tx,
+            })
+            .map_err(|_| anyhow!("terminal service unavailable"))?;
+        response_rx
+            .await
+            .context("terminal service dropped resize response")?
+    }
+
+    async fn close_terminal(&self, terminal_id: u64) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.request_tx
+            .send(TerminalRequest::CloseTerminal {
+                terminal_id,
+                response_tx,
+            })
+            .map_err(|_| anyhow!("terminal service unavailable"))?;
+        response_rx
+            .await
+            .context("terminal service dropped close response")?
     }
 }
 
-async fn handle_terminal_socket(socket: WebSocket, session: TerminalSessionHandle) -> Result<()> {
-    let (sender, receiver) = socket.split();
-    let output_rx = Arc::clone(&session.output_rx);
+async fn handle_terminal_socket(socket: WebSocket, terminal_service: TerminalService) -> Result<()> {
+    let (sender, mut receiver) = socket.split();
+    let outbound = Arc::new(tokio::sync::Mutex::new(sender));
 
-    let send_task = tokio::spawn(stream_terminal_output(sender, output_rx));
-    let receive_task = tokio::spawn(process_terminal_input(receiver, session.clone()));
+    send_socket_message(
+        &outbound,
+        ServerSocketMessage::TerminalList {
+            terminals: terminal_service.list_terminals().await?,
+        },
+    )
+    .await?;
 
-    let send_result = send_task.await.context("terminal send task join failed")?;
-    let receive_result = receive_task
-        .await
-        .context("terminal receive task join failed")?;
-
-    send_result?;
-    receive_result?;
-    Ok(())
-}
-
-async fn stream_terminal_output(
-    mut sender: SplitSink<WebSocket, Message>,
-    output_rx: Arc<tokio::sync::Mutex<tokio_mpsc::UnboundedReceiver<Vec<u8>>>>,
-) -> Result<()> {
-    let mut output_rx = output_rx.lock().await;
-    while let Some(bytes) = output_rx.recv().await {
-        let text = String::from_utf8_lossy(&bytes).to_string();
-        sender.send(Message::Text(text.into())).await?;
-    }
-    Ok(())
-}
-
-async fn process_terminal_input(
-    mut receiver: SplitStream<WebSocket>,
-    session: TerminalSessionHandle,
-) -> Result<()> {
     while let Some(message) = receiver.next().await {
         match message? {
-            Message::Text(text) => match serde_json::from_str::<ClientTerminalMessage>(&text) {
-                Ok(ClientTerminalMessage::Input { data }) => {
-                    session
-                        .input_tx
-                        .send(data.into_bytes())
-                        .map_err(|_| anyhow!("terminal input channel closed"))?;
+            Message::Text(text) => {
+                if let Err(error) =
+                    handle_client_message(text.as_str(), &terminal_service, Arc::clone(&outbound)).await
+                {
+                    send_socket_message(
+                        &outbound,
+                        ServerSocketMessage::Error {
+                            message: error.to_string(),
+                        },
+                    )
+                    .await?;
                 }
-                Ok(ClientTerminalMessage::Resize { cols, rows }) => {
-                    session
-                        .resize_tx
-                        .send(TerminalResize { cols, rows })
-                        .map_err(|_| anyhow!("terminal resize channel closed"))?;
-                }
-                Err(error) => {
-                    return Err(anyhow!("invalid terminal websocket payload: {error}"));
-                }
-            },
-            Message::Binary(bytes) => {
-                session
-                    .input_tx
-                    .send(bytes.to_vec())
-                    .map_err(|_| anyhow!("terminal input channel closed"))?;
             }
+            Message::Binary(_) => {}
             Message::Close(_) => break,
             Message::Ping(_) | Message::Pong(_) => {}
         }
@@ -387,8 +629,100 @@ async fn process_terminal_input(
     Ok(())
 }
 
-fn internal_error(error: anyhow::Error) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+async fn handle_client_message(
+    text: &str,
+    terminal_service: &TerminalService,
+    outbound: Arc<tokio::sync::Mutex<SplitSink<WebSocket, Message>>>,
+) -> Result<()> {
+    match serde_json::from_str::<ClientSocketMessage>(text)
+        .with_context(|| format!("invalid terminal websocket payload: {text}"))?
+    {
+        ClientSocketMessage::CreateTerminal => {
+            let terminal = terminal_service.create_terminal().await?;
+            send_socket_message(
+                &outbound,
+                ServerSocketMessage::TerminalCreated {
+                    terminal: terminal.clone(),
+                },
+            )
+            .await?;
+            attach_terminal_stream(terminal_service.clone(), Arc::clone(&outbound), terminal.terminal_id)
+                .await?;
+        }
+        ClientSocketMessage::ListTerminals => {
+            send_socket_message(
+                &outbound,
+                ServerSocketMessage::TerminalList {
+                    terminals: terminal_service.list_terminals().await?,
+                },
+            )
+            .await?;
+        }
+        ClientSocketMessage::AttachTerminal { terminal_id } => {
+            attach_terminal_stream(terminal_service.clone(), outbound, terminal_id).await?;
+        }
+        ClientSocketMessage::Input { terminal_id, data } => {
+            terminal_service.send_input(terminal_id, data.into_bytes()).await?;
+        }
+        ClientSocketMessage::Resize {
+            terminal_id,
+            cols,
+            rows,
+        } => {
+            terminal_service.resize_terminal(terminal_id, cols, rows).await?;
+        }
+        ClientSocketMessage::CloseTerminal { terminal_id } => {
+            terminal_service.close_terminal(terminal_id).await?;
+            send_socket_message(&outbound, ServerSocketMessage::TerminalClosed { terminal_id }).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn attach_terminal_stream(
+    terminal_service: TerminalService,
+    outbound: Arc<tokio::sync::Mutex<SplitSink<WebSocket, Message>>>,
+    terminal_id: u64,
+) -> Result<()> {
+    let mut handle = terminal_service.attach_terminal(terminal_id).await?;
+    send_socket_message(
+        &outbound,
+        ServerSocketMessage::TerminalAttached {
+            terminal: handle.descriptor.clone(),
+            scrollback: handle.scrollback,
+        },
+    )
+    .await?;
+
+    tokio::spawn(async move {
+        while let Some(data) = handle.output_rx.recv().await {
+            if send_socket_message(
+                &outbound,
+                ServerSocketMessage::TerminalOutput { terminal_id, data },
+            )
+            .await
+            .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    Ok(())
+}
+
+async fn send_socket_message(
+    outbound: &tokio::sync::Mutex<SplitSink<WebSocket, Message>>,
+    message: ServerSocketMessage,
+) -> Result<()> {
+    let payload = serde_json::to_string(&message)?;
+    outbound
+        .lock()
+        .await
+        .send(Message::Text(payload.into()))
+        .await?;
+    Ok(())
 }
 
 fn render_app_shell() -> String {
@@ -471,12 +805,16 @@ fn AppShell() -> impl IntoView {
                             <div class="terminal-toolbar">
                                 <div>
                                     <div class="terminal-title">"Remote Terminal"</div>
-                                    <div class="terminal-subtitle">"PTY runs on isolated background runtime"</div>
+                                    <div class="terminal-subtitle">"Persistent PTY sessions on isolated background runtime"</div>
                                 </div>
-                                <button id="terminal-reconnect" class="tab-button terminal-action" type="button">"Reconnect"</button>
+                                <div class="terminal-actions">
+                                    <button id="terminal-new" class="tab-button terminal-action" type="button">"New terminal"</button>
+                                    <button id="terminal-reconnect" class="tab-button terminal-action" type="button">"Reconnect socket"</button>
+                                </div>
                             </div>
-                            <div id="terminal-status" class="terminal-status" data-state="idle">"Terminal idle"</div>
-                            <div id="terminal-root" class="terminal-root"></div>
+                            <div id="terminal-status" class="terminal-status" data-state="idle">"Connecting terminal service…"</div>
+                            <div id="terminal-tabs" class="terminal-tabs" role="tablist" aria-label="Shell terminals"></div>
+                            <div id="terminal-panels" class="terminal-panels"></div>
                         </Card>
                     </section>
                 </section>
