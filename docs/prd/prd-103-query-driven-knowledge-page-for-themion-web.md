@@ -1,6 +1,6 @@
 # PRD-103: Query-Driven Knowledge Page for Themion Web
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Version:** v0.63.0
 - **Scope:** `themion-web`, `themion-core`, docs
 - **Author:** Tasanakorn (design intent) + Themion (PRD authoring)
@@ -14,6 +14,13 @@
 - Keep the current summary page as the landing view, then let operators pivot from summary cards into prefilled queries and read-only result drill-downs.
 - Introduce a typed core query request/response path so the tool surface and web surface call the same search implementation.
 - Keep this slice focused on retrieval and inspection; memory editing, arbitrary SQL, and a full graph-management surface remain out of scope.
+
+## Implementation notes
+
+- Landed with a browser query workspace in `themion-web` that reuses shared typed `themion-core` unified-search execution.
+- The shipped web UI keeps the summary and query views as direct-linkable knowledge destinations instead of one always-visible two-pane layout.
+- Summary-to-query pivots landed for summary tables and keep query context in browser URL state.
+- Advanced structured filters, source-scope selection, degraded/error handling, and source-aware result rendering are all present in the first implementation.
 
 ## Goals
 
@@ -426,17 +433,17 @@ Expected rollout behavior:
 
 ## Implementation checklist
 
-- [ ] define the knowledge-page two-pane query UX and summary/result state transitions
-- [ ] add summary-to-query pivot actions for the most useful existing summary sections
-- [ ] define the public typed themion-core unified-search request shape, including exact Rust field types and how omitted versus explicit `source_kinds` is represented
-- [ ] define the normalization boundary between the public request type and any internal normalized query shape
-- [ ] add a public themion-core unified-search interface that returns canonical `UnifiedSearchResponse` from that typed request
-- [ ] refactor the existing `unified_search` tool path to parse tool arguments, build the typed request, and call that shared core interface
-- [ ] implement browser query handlers/adapters that map UI state into the same typed request and call the same shared core interface
-- [ ] make the default web knowledge-page query preset explicit `memory` scope while preserving an operator path to broader or omitted source-kind search
-- [ ] implement progressive-disclosure advanced filters for canonical structured query fields
-- [ ] implement source-aware result rendering and no-results/degraded/error states
+- [x] define the knowledge-page query UX and shipped summary/result state transitions
+- [x] add summary-to-query pivot actions for the most useful existing summary sections
+- [x] define the public typed themion-core unified-search request shape, including exact Rust field types and omitted versus explicit `source_kinds`
+- [x] define the normalization boundary between the public request type and internal normalized query handling
+- [x] add a public themion-core unified-search interface that returns canonical `UnifiedSearchResponse` from that typed request
+- [x] refactor the existing `unified_search` tool path to parse tool arguments, build the typed request, and call that shared core interface
+- [x] implement browser query handlers/adapters that map UI state into the same typed request and call the same shared core interface
+- [x] make the default web knowledge-page query preset explicit `memory` scope while preserving an operator path to broader or omitted source-kind search
+- [x] implement advanced filters for canonical structured query fields
+- [x] implement source-aware result rendering and no-results/degraded/error states
 - [ ] add lightweight result drill-down and follow-up query actions from result metadata
-- [ ] preserve PRD-102 summary behavior while layering query workflows on top
-- [ ] update web and search documentation when the feature lands
-- [ ] validate touched crates in default and all-features configurations
+- [x] preserve PRD-102 summary behavior while layering query workflows on top
+- [x] update web and search documentation when the feature lands
+- [x] validate touched crates in default and all-features configurations
