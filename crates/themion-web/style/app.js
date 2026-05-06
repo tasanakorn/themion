@@ -150,7 +150,7 @@ function ensureSession(terminal) {
 
   session.terminal.open(session.root);
   session.terminal.onData((data) => {
-    if (!terminalManager?.socketOpen) return;
+    if (!terminalManager?.socketOpen || !session.attached) return;
     sendSocketMessage({ type: 'input', terminal_id: session.id, data });
   });
 
@@ -268,6 +268,7 @@ function connectSocket() {
   if (!terminalManager) return;
   terminalManager.socket?.close();
   terminalManager.socketOpen = false;
+  terminalManager.restoredInitialSessions = false;
   terminalManager.sessions.forEach((session) => {
     session.attached = false;
     session.attaching = false;
@@ -282,7 +283,6 @@ function connectSocket() {
   socket.addEventListener('open', () => {
     terminalManager.socketOpen = true;
     setTerminalStatus('connected', terminalManager.activeId ? `${terminalManager.sessions.get(terminalManager.activeId)?.label ?? 'Terminal'} connected` : 'Connected');
-    sendSocketMessage({ type: 'list_terminals' });
   });
 
   socket.addEventListener('message', (event) => {
@@ -293,6 +293,7 @@ function connectSocket() {
 
   socket.addEventListener('close', () => {
     terminalManager.socketOpen = false;
+    terminalManager.restoredInitialSessions = false;
     terminalManager.sessions.forEach((session) => {
       session.attached = false;
       session.attaching = false;
@@ -312,7 +313,10 @@ function handleSocketMessage(message) {
 
   switch (message.type) {
     case 'terminal_list': {
-      restoreSessions(message.terminals || []);
+      if (!terminalManager.restoredInitialSessions) {
+        terminalManager.restoredInitialSessions = true;
+        restoreSessions(message.terminals || []);
+      }
       break;
     }
     case 'terminal_created': {
@@ -369,6 +373,7 @@ function initTerminalManager() {
     activeId: null,
     socket: null,
     socketOpen: false,
+    restoredInitialSessions: false,
   };
 
   newButton.addEventListener('click', () => createNewTerminal());
