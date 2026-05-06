@@ -11,6 +11,7 @@ path = "src/main.rs"
 tailwind-input-file = "style/tailwind.css"
 
 [dependencies]
+themion-core = { path = "../themion-core", default-features = false, features = ["semantic-memory"] }
 anyhow.workspace = true
 axum = { version = "0.8", features = ["http1", "ws"] }
 futures-util = "0.3"

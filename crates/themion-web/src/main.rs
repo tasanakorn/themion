@@ -3,7 +3,7 @@ pub mod components;
 use anyhow::{anyhow, bail, Context, Result};
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::HeaderValue;
 use axum::response::{Html, IntoResponse, Response};
@@ -15,6 +15,8 @@ use futures_util::{SinkExt, StreamExt};
 use leptos::prelude::*;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use rusqlite::{Connection, OpenFlags};
+use themion_core::db::DbHandle;
+use themion_core::memory::{HashtagMatch, UnifiedSearchMode, UnifiedSearchQuery, UnifiedSearchResponse, UnifiedSearchResult, UnifiedSearchSourceKind};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
@@ -137,7 +139,42 @@ enum ServerSocketMessage {
 struct KnowledgeSummaryPageData {
     db_path: String,
     generated_at_label: String,
+    query: KnowledgeQueryPageData,
     state: KnowledgeSummaryState,
+}
+
+#[derive(Clone, Debug)]
+struct KnowledgeQueryPageData {
+    form: KnowledgeQueryFormState,
+    state: KnowledgeQueryState,
+}
+
+#[derive(Clone, Debug)]
+struct KnowledgeQueryFormState {
+    query: String,
+    mode: UnifiedSearchMode,
+    limit: u32,
+    source_scope: KnowledgeSourceScope,
+    hashtags: Vec<String>,
+    hashtag_match: HashtagMatch,
+    node_type: String,
+    relation_type: String,
+    linked_node_id: String,
+}
+
+#[derive(Clone, Debug)]
+enum KnowledgeSourceScope {
+    Memory,
+    ChatMessage,
+    MemoryAndChat,
+    OmittedDefault,
+}
+
+#[derive(Clone, Debug)]
+enum KnowledgeQueryState {
+    Idle,
+    Ready(UnifiedSearchResponse),
+    Error { message: String },
 }
 
 #[derive(Clone, Debug)]
@@ -179,6 +216,19 @@ struct GraphShapeSummary {
 struct CountRow {
     label: String,
     count: i64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct KnowledgeQueryParams {
+    query: Option<String>,
+    source_scope: Option<String>,
+    mode: Option<String>,
+    limit: Option<u32>,
+    hashtags: Option<String>,
+    hashtag_match: Option<String>,
+    node_type: Option<String>,
+    relation_type: Option<String>,
+    linked_node_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -551,9 +601,10 @@ fn resolve_shell() -> String {
         .unwrap_or_else(|| "/bin/sh".to_string())
 }
 
-async fn index() -> Html<String> {
-    let knowledge_summary = load_knowledge_summary_page_data();
-    Html(render_app_shell(&knowledge_summary))
+async fn index(Query(params): Query<KnowledgeQueryParams>) -> Html<String> {
+    let start_on_query_tab = !KnowledgeQueryFormState::from_params(&params).is_effectively_empty();
+    let knowledge_summary = load_knowledge_summary_page_data(&params);
+    Html(render_app_shell(&knowledge_summary, start_on_query_tab))
 }
 
 async fn xterm_css() -> impl IntoResponse {
@@ -817,11 +868,13 @@ async fn send_socket_message(
     Ok(())
 }
 
-fn load_knowledge_summary_page_data() -> KnowledgeSummaryPageData {
+fn load_knowledge_summary_page_data(params: &KnowledgeQueryParams) -> KnowledgeSummaryPageData {
     let db_path = resolve_system_db_path();
     let generated_at_ms = now_ms();
     let generated_at_label = format_timestamp_ms(generated_at_ms);
     let db_path_label = db_path.display().to_string();
+
+    let query = load_knowledge_query_page_data(&db_path, params);
 
     let state = match load_knowledge_summary(&db_path) {
         Ok(summary) => KnowledgeSummaryState::Ready(summary),
@@ -831,7 +884,160 @@ fn load_knowledge_summary_page_data() -> KnowledgeSummaryPageData {
     KnowledgeSummaryPageData {
         db_path: db_path_label,
         generated_at_label,
+        query,
         state,
+    }
+}
+
+fn load_knowledge_query_page_data(
+    db_path: &Path,
+    params: &KnowledgeQueryParams,
+) -> KnowledgeQueryPageData {
+    let form = KnowledgeQueryFormState::from_params(params);
+    let Some(db) = open_themion_db_handle(db_path) else {
+        return KnowledgeQueryPageData {
+            form,
+            state: KnowledgeQueryState::Idle,
+        };
+    };
+
+    if form.is_effectively_empty() {
+        return KnowledgeQueryPageData {
+            form,
+            state: KnowledgeQueryState::Idle,
+        };
+    }
+
+    let query = UnifiedSearchQuery {
+        query: form.query.clone(),
+        project_dir: Some(resolve_web_query_project_dir()),
+        source_kinds: form.source_scope.to_source_kinds(),
+        mode: Some(form.mode),
+        limit: Some(form.limit),
+        hashtags: form.hashtags.clone(),
+        hashtag_match: Some(form.hashtag_match),
+        node_type: normalize_filter_value(&form.node_type),
+        relation_type: normalize_filter_value(&form.relation_type),
+        linked_node_id: normalize_filter_value(&form.linked_node_id),
+    };
+
+    let state = match db.unified_search(query, None) {
+        Ok(response) => KnowledgeQueryState::Ready(response),
+        Err(error) => KnowledgeQueryState::Error {
+            message: error.to_string(),
+        },
+    };
+
+    KnowledgeQueryPageData { form, state }
+}
+
+fn resolve_web_query_project_dir() -> String {
+    env::current_dir()
+        .ok()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|| ".".to_string())
+}
+
+fn open_themion_db_handle(db_path: &Path) -> Option<std::sync::Arc<DbHandle>> {
+    if !db_path.exists() {
+        return None;
+    }
+    DbHandle::open(db_path).ok()
+}
+
+impl KnowledgeQueryFormState {
+    fn from_params(params: &KnowledgeQueryParams) -> Self {
+        Self {
+            query: params.query.clone().unwrap_or_default(),
+            mode: params
+                .mode
+                .as_deref()
+                .and_then(|value| UnifiedSearchMode::from_str(value.trim()))
+                .unwrap_or(UnifiedSearchMode::Fts),
+            limit: params.limit.map(|value| value.clamp(1, 50)).unwrap_or(10),
+            source_scope: params
+                .source_scope
+                .as_deref()
+                .and_then(|value| KnowledgeSourceScope::from_str(value.trim()))
+                .unwrap_or(KnowledgeSourceScope::Memory),
+            hashtags: parse_filter_list(params.hashtags.as_deref()),
+            hashtag_match: params
+                .hashtag_match
+                .as_deref()
+                .and_then(HashtagMatch::from_str)
+                .unwrap_or(HashtagMatch::Any),
+            node_type: params.node_type.clone().unwrap_or_default(),
+            relation_type: params.relation_type.clone().unwrap_or_default(),
+            linked_node_id: params.linked_node_id.clone().unwrap_or_default(),
+        }
+    }
+
+    fn is_effectively_empty(&self) -> bool {
+        self.query.trim().is_empty()
+            && self.hashtags.is_empty()
+            && self.node_type.trim().is_empty()
+            && self.relation_type.trim().is_empty()
+            && self.linked_node_id.trim().is_empty()
+    }
+}
+
+fn parse_filter_list(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn normalize_filter_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+impl KnowledgeSourceScope {
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "memory" => Some(Self::Memory),
+            "chat_message" => Some(Self::ChatMessage),
+            "memory+chat_message" | "memory_chat_message" | "memory,chat_message" => Some(Self::MemoryAndChat),
+            "default" | "omitted" => Some(Self::OmittedDefault),
+            _ => None,
+        }
+    }
+
+    fn as_param_value(&self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::ChatMessage => "chat_message",
+            Self::MemoryAndChat => "memory+chat_message",
+            Self::OmittedDefault => "omitted",
+        }
+    }
+
+    fn as_label(&self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::ChatMessage => "chat_message",
+            Self::MemoryAndChat => "memory + chat_message",
+            Self::OmittedDefault => "omitted default",
+        }
+    }
+
+    fn to_source_kinds(&self) -> Option<Vec<UnifiedSearchSourceKind>> {
+        match self {
+            Self::Memory => Some(vec![UnifiedSearchSourceKind::Memory]),
+            Self::ChatMessage => Some(vec![UnifiedSearchSourceKind::ChatMessage]),
+            Self::MemoryAndChat => Some(vec![
+                UnifiedSearchSourceKind::Memory,
+                UnifiedSearchSourceKind::ChatMessage,
+            ]),
+            Self::OmittedDefault => None,
+        }
     }
 }
 
@@ -1031,8 +1237,8 @@ fn ratio_label(numerator: i64, denominator: i64) -> String {
     format!("{:.2} edges per node", numerator as f64 / denominator as f64)
 }
 
-fn render_app_shell(knowledge_summary: &KnowledgeSummaryPageData) -> String {
-    let body = AppShell(AppShellProps { knowledge_summary: knowledge_summary.clone() }).to_html();
+fn render_app_shell(knowledge_summary: &KnowledgeSummaryPageData, start_on_query_tab: bool) -> String {
+    let body = AppShell(AppShellProps { knowledge_summary: knowledge_summary.clone(), start_on_query_tab }).to_html();
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\" /><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" /><title>Themion Web</title><style>{}</style><style>{}</style></head><body>{}<script>{}</script><script>{}</script></body></html>",
         APP_CSS,
@@ -1044,12 +1250,16 @@ fn render_app_shell(knowledge_summary: &KnowledgeSummaryPageData) -> String {
 }
 
 #[component]
-fn AppShell(knowledge_summary: KnowledgeSummaryPageData) -> impl IntoView {
+fn AppShell(knowledge_summary: KnowledgeSummaryPageData, start_on_query_tab: bool) -> impl IntoView {
     use crate::components::ui::card::Card;
+    let knowledge_stats = knowledge_summary.clone();
+    let knowledge_query = knowledge_summary.clone();
 
     view! {
         <main class="app-shell">
-            <input id="nav-dashboard" class="nav-radio" type="radio" name="sidebar-page" checked/>
+            <input id="nav-dashboard" class="nav-radio" type="radio" name="sidebar-page" checked={!start_on_query_tab}/>
+            <input id="nav-knowledge-stats" class="nav-radio" type="radio" name="sidebar-page" checked={!start_on_query_tab}/>
+            <input id="nav-knowledge-query" class="nav-radio" type="radio" name="sidebar-page" checked={start_on_query_tab}/>
             <input id="nav-example" class="nav-radio" type="radio" name="sidebar-page"/>
             <input id="nav-agent" class="nav-radio" type="radio" name="sidebar-page"/>
             <input id="nav-shell" class="nav-radio" type="radio" name="sidebar-page"/>
@@ -1061,7 +1271,8 @@ fn AppShell(knowledge_summary: KnowledgeSummaryPageData) -> impl IntoView {
                             <span class="sidebar-title">"Menu"</span>
                         </div>
                         <nav class="sidebar-body" aria-label="Sidebar menu">
-                            <label class="sidebar-item" for="nav-dashboard">"Knowledge"</label>
+                            <label class="sidebar-item" for="nav-knowledge-stats">"Knowledge · Stats"</label>
+                            <label class="sidebar-item" for="nav-knowledge-query">"Knowledge · Query"</label>
                             <label class="sidebar-item" for="nav-example">"Example"</label>
                             <label class="sidebar-item" for="nav-agent">"Agent"</label>
                             <label class="sidebar-item" for="nav-shell">"Shell"</label>
@@ -1076,7 +1287,13 @@ fn AppShell(knowledge_summary: KnowledgeSummaryPageData) -> impl IntoView {
 
                     <section class="page-panel page-dashboard">
                         <Card class="page-surface knowledge-page">
-                            {render_knowledge_summary(&knowledge_summary)}
+                            {render_knowledge_stats_page(&knowledge_stats)}
+                        </Card>
+                    </section>
+
+                    <section class="page-panel page-knowledge-query">
+                        <Card class="page-surface knowledge-page">
+                            {render_knowledge_query_page(&knowledge_query)}
                         </Card>
                     </section>
 
@@ -1129,9 +1346,9 @@ fn AppShell(knowledge_summary: KnowledgeSummaryPageData) -> impl IntoView {
     }
 }
 
-fn render_knowledge_summary(data: &KnowledgeSummaryPageData) -> leptos::prelude::AnyView {
+fn render_knowledge_stats_page(data: &KnowledgeSummaryPageData) -> leptos::prelude::AnyView {
     match &data.state {
-        KnowledgeSummaryState::Ready(summary) => render_ready_knowledge_summary(data, summary),
+        KnowledgeSummaryState::Ready(summary) => render_ready_knowledge_stats_page(data, summary),
         KnowledgeSummaryState::MissingDb { message } => render_knowledge_state(
             "Missing database",
             "Themion Web could not find the active system.db file yet.",
@@ -1156,7 +1373,7 @@ fn render_knowledge_summary(data: &KnowledgeSummaryPageData) -> leptos::prelude:
     }
 }
 
-fn render_ready_knowledge_summary(
+fn render_ready_knowledge_stats_page(
     data: &KnowledgeSummaryPageData,
     summary: &KnowledgeSummary,
 ) -> leptos::prelude::AnyView {
@@ -1201,10 +1418,10 @@ fn render_ready_knowledge_summary(
             </div>
 
             <div class="knowledge-grid knowledge-section-grid">
-                {render_count_section("Node types", "Distribution by memory node_type.", &summary.node_types)}
-                {render_count_section("Top hashtags", "Most-used Project Memory hashtags.", &summary.hashtags)}
-                {render_count_section("Relations", "Counts grouped by relation_type.", &summary.relations)}
-                {render_count_section("Scopes", "Counts grouped by project_dir, including [GLOBAL] when present.", &summary.scopes)}
+                {render_count_section("Node types", "Distribution by memory node_type.", &summary.node_types, QueryPivotKind::NodeType, &data.query.form)}
+                {render_count_section("Top hashtags", "Most-used Project Memory hashtags.", &summary.hashtags, QueryPivotKind::Hashtag, &data.query.form)}
+                {render_count_section("Relations", "Counts grouped by relation_type.", &summary.relations, QueryPivotKind::RelationType, &data.query.form)}
+                {render_count_section("Scopes", "Counts grouped by project_dir, including [GLOBAL] when present.", &summary.scopes, QueryPivotKind::QueryText, &data.query.form)}
             </div>
 
             <div class="knowledge-grid knowledge-section-grid">
@@ -1263,10 +1480,240 @@ fn render_ready_knowledge_summary(
     .into_any()
 }
 
+fn build_query_href(form: &KnowledgeQueryFormState) -> String {
+    let mut params = vec![
+        format!("source_scope={}", encode_query_value(form.source_scope.as_param_value())),
+        format!("mode={}", encode_query_value(&format!("{:?}", form.mode).to_lowercase())),
+        format!("limit={}", form.limit),
+    ];
+    if !form.query.trim().is_empty() {
+        params.push(format!("query={}", encode_query_value(form.query.trim())));
+    }
+    if !form.hashtags.is_empty() {
+        params.push(format!("hashtags={}", encode_query_value(&form.hashtags.join(", "))));
+    }
+    if !matches!(form.hashtag_match, HashtagMatch::Any) {
+        params.push(format!("hashtag_match={}", encode_query_value(hashtag_match_param(form.hashtag_match))));
+    }
+    if !form.node_type.trim().is_empty() {
+        params.push(format!("node_type={}", encode_query_value(form.node_type.trim())));
+    }
+    if !form.relation_type.trim().is_empty() {
+        params.push(format!("relation_type={}", encode_query_value(form.relation_type.trim())));
+    }
+    if !form.linked_node_id.trim().is_empty() {
+        params.push(format!("linked_node_id={}", encode_query_value(form.linked_node_id.trim())));
+    }
+    format!("/?{}#knowledge-query", params.join("&"))
+}
+
+enum QueryPivotKind {
+    QueryText,
+    Hashtag,
+    NodeType,
+    RelationType,
+}
+
+fn build_pivot_href(form: &KnowledgeQueryFormState, label: &str, pivot_kind: &QueryPivotKind) -> String {
+    let mut pivot_form = form.clone();
+    match pivot_kind {
+        QueryPivotKind::QueryText => {
+            pivot_form.query = label.to_string();
+        }
+        QueryPivotKind::Hashtag => {
+            pivot_form.hashtags = vec![label.to_string()];
+            pivot_form.source_scope = KnowledgeSourceScope::Memory;
+        }
+        QueryPivotKind::NodeType => {
+            pivot_form.node_type = label.to_string();
+            pivot_form.source_scope = KnowledgeSourceScope::Memory;
+        }
+        QueryPivotKind::RelationType => {
+            pivot_form.relation_type = label.to_string();
+            pivot_form.source_scope = KnowledgeSourceScope::Memory;
+        }
+    }
+    build_query_href(&pivot_form)
+}
+
+fn hashtag_match_param(value: HashtagMatch) -> &'static str {
+    match value {
+        HashtagMatch::Any => "any",
+        HashtagMatch::All => "all",
+    }
+}
+
+fn encode_query_value(value: &str) -> String {
+    value.replace(' ', "+")
+}
+
+fn render_knowledge_query_page(data: &KnowledgeSummaryPageData) -> leptos::prelude::AnyView {
+    view! {
+        <div class="knowledge-layout">
+            <div class="knowledge-header">
+                <div>
+                    <div class="terminal-title">"Project Memory Query"</div>
+                    <div class="terminal-subtitle">"Read-only unified_search workspace from the active SQLite database"</div>
+                </div>
+                <div class="knowledge-meta">
+                    <div><strong>"Database:"</strong> " " {data.db_path.clone()}</div>
+                    <div><strong>"Generated:"</strong> " " {data.generated_at_label.clone()}</div>
+                </div>
+            </div>
+            {render_knowledge_query_workspace(&data.query)}
+        </div>
+    }
+    .into_any()
+}
+
+fn render_knowledge_query_workspace(query: &KnowledgeQueryPageData) -> leptos::prelude::AnyView {
+    let scope_label = query.form.source_scope.as_label();
+    let submitted_scope_hint = match query.form.source_scope {
+        KnowledgeSourceScope::Memory => "Explicit memory-only default keeps this page focused on Project Memory.",
+        KnowledgeSourceScope::ChatMessage => "Explicit chat-message scope narrows the shared core search to transcript results.",
+        KnowledgeSourceScope::MemoryAndChat => "Explicit mixed scope searches Project Memory and chat messages together.",
+        KnowledgeSourceScope::OmittedDefault => "Omitted source_kinds preserves the canonical core default behavior.",
+    };
+    let mode_value = format!("{:?}", query.form.mode).to_lowercase();
+
+    view! {
+        <section id="knowledge-query" class="knowledge-section-card knowledge-query-card">
+            <div class="knowledge-section-head">
+                <div class="knowledge-section-title">"Knowledge query workspace"</div>
+                <div class="knowledge-section-subtitle">"Shared themion-core unified_search execution with a memory-first web default."</div>
+            </div>
+            <form class="knowledge-query-form" method="get" action="/">
+                <label class="knowledge-query-field knowledge-query-field-wide">
+                    <span>"Query"</span>
+                    <input type="text" name="query" value={query.form.query.clone()} placeholder="Search Project Memory"/>
+                </label>
+                <label class="knowledge-query-field">
+                    <span>"Source scope"</span>
+                    <select name="source_scope">
+                        <option value="memory" selected={matches!(query.form.source_scope, KnowledgeSourceScope::Memory)}>"memory"</option>
+                        <option value="chat_message" selected={matches!(query.form.source_scope, KnowledgeSourceScope::ChatMessage)}>"chat_message"</option>
+                        <option value="memory+chat_message" selected={matches!(query.form.source_scope, KnowledgeSourceScope::MemoryAndChat)}>"memory + chat_message"</option>
+                        <option value="omitted" selected={matches!(query.form.source_scope, KnowledgeSourceScope::OmittedDefault)}>"omitted default"</option>
+                    </select>
+                </label>
+                <label class="knowledge-query-field">
+                    <span>"Mode"</span>
+                    <select name="mode">
+                        <option value="fts" selected={mode_value == "fts"}>"fts"</option>
+                        <option value="semantic" selected={mode_value == "semantic"}>"semantic"</option>
+                        <option value="hybrid" selected={mode_value == "hybrid"}>"hybrid"</option>
+                    </select>
+                </label>
+                <label class="knowledge-query-field">
+                    <span>"Limit"</span>
+                    <input type="number" min="1" max="50" name="limit" value={query.form.limit.to_string()}/>
+                </label>
+                <label class="knowledge-query-field knowledge-query-field-wide">
+                    <span>"Hashtags"</span>
+                    <input type="text" name="hashtags" value={query.form.hashtags.join(", ")} placeholder="#rust, #provider or plain tags"/>
+                </label>
+                <label class="knowledge-query-field">
+                    <span>"Hashtag match"</span>
+                    <select name="hashtag_match">
+                        <option value="any" selected={matches!(query.form.hashtag_match, HashtagMatch::Any)}>"any"</option>
+                        <option value="all" selected={matches!(query.form.hashtag_match, HashtagMatch::All)}>"all"</option>
+                    </select>
+                </label>
+                <label class="knowledge-query-field">
+                    <span>"Node type"</span>
+                    <input type="text" name="node_type" value={query.form.node_type.clone()} placeholder="observation"/>
+                </label>
+                <label class="knowledge-query-field">
+                    <span>"Relation type"</span>
+                    <input type="text" name="relation_type" value={query.form.relation_type.clone()} placeholder="depends_on"/>
+                </label>
+                <label class="knowledge-query-field">
+                    <span>"Linked node id"</span>
+                    <input type="text" name="linked_node_id" value={query.form.linked_node_id.clone()} placeholder="UUID"/>
+                </label>
+                <div class="knowledge-query-actions">
+                    <button class="tab-button terminal-action knowledge-query-submit" type="submit">"Run query"</button>
+                </div>
+            </form>
+            <div class="knowledge-query-form-summary">
+                <div><strong>"Default scope:"</strong> " explicit memory"</div>
+                <div><strong>"Selected scope:"</strong> " " {scope_label}</div>
+                <div><strong>"Mode:"</strong> " " {mode_value}</div>
+                <div><strong>"Limit:"</strong> " " {query.form.limit}</div>
+                <div><strong>"Hashtags:"</strong> " " {if query.form.hashtags.is_empty() { "—".to_string() } else { query.form.hashtags.join(", ") }}</div>
+                <div><strong>"Node type:"</strong> " " {if query.form.node_type.trim().is_empty() { "—".to_string() } else { query.form.node_type.clone() }}</div>
+                <div><strong>"Relation type:"</strong> " " {if query.form.relation_type.trim().is_empty() { "—".to_string() } else { query.form.relation_type.clone() }}</div>
+            </div>
+            <div class="knowledge-query-hint">{submitted_scope_hint}</div>
+            {match &query.state {
+                KnowledgeQueryState::Idle => view! {
+                    <div class="knowledge-state-card">
+                        <div class="knowledge-state-title">"Summary view"</div>
+                        <div class="knowledge-state-body">"No query submitted yet. The page stays on the PRD-102 summary until you run a search. Summary rows now link back into this query workspace as lightweight pivots."</div>
+                    </div>
+                }.into_any(),
+                KnowledgeQueryState::Error { message } => view! {
+                    <div class="knowledge-state-card">
+                        <div class="knowledge-state-title">"Query error"</div>
+                        <div class="knowledge-state-body">{message.clone()}</div>
+                    </div>
+                }.into_any(),
+                KnowledgeQueryState::Ready(response) => render_knowledge_query_results(query, response),
+            }}
+        </section>
+    }.into_any()
+}
+
+fn render_knowledge_query_results(
+    query: &KnowledgeQueryPageData,
+    response: &UnifiedSearchResponse,
+) -> leptos::prelude::AnyView {
+    view! {
+        <div class="knowledge-query-results">
+            <div class="knowledge-query-result-meta">
+                <div><strong>"Submitted query:"</strong> " " {if query.form.query.trim().is_empty() { "—".to_string() } else { query.form.query.clone() }}</div>
+                <div><strong>"Results:"</strong> " " {response.results.len()}</div>
+                <div><strong>"Degraded:"</strong> " " {if response.degraded { "yes" } else { "no" }}</div>
+                <div><strong>"Hashtag match:"</strong> " " {hashtag_match_param(query.form.hashtag_match)}</div>
+            </div>
+            {if response.results.is_empty() {
+                view! { <div class="knowledge-empty-row">"No matches for the current query."</div> }.into_any()
+            } else {
+                view! {
+                    <ul class="knowledge-query-result-list">
+                        {response.results.iter().map(render_knowledge_query_result_row).collect::<Vec<_>>() }
+                    </ul>
+                }.into_any()
+            }}
+        </div>
+    }.into_any()
+}
+
+fn render_knowledge_query_result_row(result: &UnifiedSearchResult) -> leptos::prelude::AnyView {
+    view! {
+        <li class="knowledge-query-result-item">
+            <div class="knowledge-query-result-head">
+                <span class="knowledge-query-result-kind">{result.source_kind.clone()}</span>
+                <span class="knowledge-query-result-title">{result.title.clone()}</span>
+                <span class="knowledge-query-result-score">{format!("{:.2}", result.score)}</span>
+            </div>
+            <div class="knowledge-query-result-snippet">{result.primary_snippet.clone()}</div>
+            <div class="knowledge-query-result-meta">
+                <span>{result.project_dir.clone()}</span>
+                {result.node_type.clone().map(|node_type| view! { <span>{node_type}</span> })}
+                {if result.hashtags.is_empty() { None } else { Some(view! { <span>{result.hashtags.join(", ")}</span> }) }}
+            </div>
+        </li>
+    }
+    .into_any()
+}
+
 fn render_count_section(
     title: &'static str,
     subtitle: &'static str,
     rows: &[CountRow],
+    pivot_kind: QueryPivotKind,
+    form: &KnowledgeQueryFormState,
 ) -> leptos::prelude::AnyView {
     view! {
         <section class="knowledge-section-card">
@@ -1284,7 +1731,9 @@ fn render_count_section(
                                 {rows.iter().map(|row| {
                                     view! {
                                         <tr>
-                                            <td class="knowledge-table-label">{row.label.clone()}</td>
+                                            <td class="knowledge-table-label">
+                                                <a class="knowledge-pivot-link" href={build_pivot_href(form, &row.label, &pivot_kind)}>{row.label.clone()}</a>
+                                            </td>
                                             <td class="knowledge-table-count">{row.count}</td>
                                         </tr>
                                     }

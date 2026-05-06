@@ -14,6 +14,7 @@ Active and recent product requirements documents live in `docs/prd/`. Older impl
 
 | ID      | Title                                                                                                       | Status        | Version | Scope                                    |
 | ------- | ----------------------------------------------------------------------------------------------------------- | ------------- | ------- | ---------------------------------------- |
+| PRD-103 | [Query-Driven Knowledge Page for Themion Web](prd/prd-103-query-driven-knowledge-page-for-themion-web.md) | Proposed | v0.63.0 | `themion-web`, `themion-core`, docs; shared core `unified_search` execution with memory-first web default |
 | PRD-102 | [Overall Project Memory and Knowledge Summary via Direct Database Query](prd/prd-102-overall-project-memory-knowledge-summary-via-direct-db-query.md) | Implemented | v0.62.0 | `themion-web`, docs |
 | PRD-101 | [Self-Contained Web Server Crate for Themion Web Interface](prd/prd-101-self-contained-web-server-crate-for-themion-web-interface.md) | Partially implemented | v0.61.1 | `themion-web`, docs |
 | PRD-100 | [Improve Quota-Limit Error Detection and Reset Reporting](prd/prd-100-improve-quota-limit-error-reset-reporting.md) | Implemented | v0.61.1 | `themion-core`, `themion-cli`, docs |

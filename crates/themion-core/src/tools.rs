@@ -3,9 +3,8 @@ use crate::db::{
     SessionScope,
 };
 use crate::memory::{
-    append_unified_search_rows, memory_search_to_unified, metadata_to_string, parse_hashtags_value, parse_nullable_string,
-    CreateNodeArgs, HashtagMatch, LinkNodesArgs, OpenGraphArgs, SearchNodesArgs,
-    UnifiedSearchMode, UpdateNodeArgs, GLOBAL_PROJECT_DIR,
+    metadata_to_string, parse_hashtags_value, parse_nullable_string, CreateNodeArgs, HashtagMatch,
+    LinkNodesArgs, OpenGraphArgs, UnifiedSearchMode, UpdateNodeArgs, GLOBAL_PROJECT_DIR,
 };
 use crate::workflow::{
     allowed_transitions, can_retry_current_phase, can_retry_previous_phase, can_transition,
@@ -1398,100 +1397,42 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             })
         }
         "unified_search" => {
-            let hashtag_match = match args["hashtag_match"].as_str().unwrap_or("any") {
-                value => HashtagMatch::from_str(value)
-                    .ok_or_else(|| anyhow::anyhow!("invalid hashtag_match"))?,
-            };
-            let mode = match args["mode"].as_str().unwrap_or("fts") {
-                value => UnifiedSearchMode::from_str(value)
-                    .ok_or_else(|| anyhow::anyhow!("invalid unified search mode"))?,
-            };
-            let requested_source_kinds = args["source_kinds"]
-                .as_array()
-                .map(|values| {
+            let query = crate::memory::UnifiedSearchQuery {
+                query: args["query"].as_str().unwrap_or("").to_string(),
+                project_dir: Some(resolve_memory_project_dir(&args, ctx)),
+                source_kinds: args["source_kinds"].as_array().map(|values| {
                     values
                         .iter()
-                        .filter_map(|value| value.as_str().map(str::to_string))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_else(|| vec![
-                    "memory".to_string(),
-                    "chat_message".to_string(),
-                ]);
-            let wants_memory = requested_source_kinds.iter().any(|kind| kind == "memory");
-            let wants_db_rows = requested_source_kinds
-                .iter()
-                .any(|kind| matches!(kind.as_str(), "chat_message" | "tool_call" | "tool_result"));
-            let project_dir = resolve_memory_project_dir(&args, ctx);
-            let mut response = crate::memory::UnifiedSearchResponse {
-                mode,
-                degraded: false,
-                degradation_reason: None,
-                pending_index_count: 0,
-                unavailable_source_kinds: Vec::new(),
-                results: Vec::new(),
+                        .map(|value| {
+                            let raw = value
+                                .as_str()
+                                .ok_or_else(|| anyhow::anyhow!("source_kinds entries must be strings"))?;
+                            crate::memory::UnifiedSearchSourceKind::from_str(raw)
+                                .ok_or_else(|| anyhow::anyhow!("invalid source_kind: {raw}"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                }).transpose()?,
+                mode: match args["mode"].as_str() {
+                    Some(value) => Some(
+                        UnifiedSearchMode::from_str(value)
+                            .ok_or_else(|| anyhow::anyhow!("invalid unified search mode"))?,
+                    ),
+                    None => None,
+                },
+                limit: args["limit"].as_u64().map(|n| n as u32),
+                hashtags: parse_hashtags_value(args.get("hashtags"))?,
+                hashtag_match: match args["hashtag_match"].as_str() {
+                    Some(value) => Some(
+                        HashtagMatch::from_str(value)
+                            .ok_or_else(|| anyhow::anyhow!("invalid hashtag_match"))?,
+                    ),
+                    None => None,
+                },
+                node_type: args["node_type"].as_str().map(str::to_string),
+                relation_type: args["relation_type"].as_str().map(str::to_string),
+                linked_node_id: args["linked_node_id"].as_str().map(str::to_string),
             };
-            let limit = args["limit"].as_u64().map(|n| n as u32).unwrap_or(10).min(50);
-            let query = args["query"].as_str().unwrap_or("").trim().to_string();
-            if matches!(mode, UnifiedSearchMode::Semantic | UnifiedSearchMode::Hybrid) && !query.is_empty() {
-                #[cfg(feature = "semantic-memory")]
-                {
-                    let mut semantic = ctx.db.memory_store().unified_search_semantic(
-                        &project_dir,
-                        &requested_source_kinds,
-                        &query,
-                        limit,
-                    )?;
-                    if matches!(mode, UnifiedSearchMode::Hybrid) {
-                        semantic.mode = UnifiedSearchMode::Hybrid;
-                    }
-                    response = semantic;
-                }
-                #[cfg(not(feature = "semantic-memory"))]
-                {
-                    response.degraded = true;
-                    response.degradation_reason = Some("semantic retrieval unavailable: themion was built without the semantic-memory feature".to_string());
-                }
-            } else if wants_memory {
-                let nodes = ctx.db.memory_store().search_nodes(SearchNodesArgs {
-                    query: args["query"].as_str().map(str::to_string),
-                    project_dir: project_dir.clone(),
-                    hashtags: parse_hashtags_value(args.get("hashtags"))?,
-                    hashtag_match,
-                    node_type: args["node_type"].as_str().map(str::to_string),
-                    relation_type: args["relation_type"].as_str().map(str::to_string),
-                    linked_node_id: args["linked_node_id"].as_str().map(str::to_string),
-                    limit,
-                    mode,
-                })?;
-                response = memory_search_to_unified(nodes);
-                response.mode = mode;
-            }
-            if matches!(mode, UnifiedSearchMode::Fts | UnifiedSearchMode::Hybrid) && wants_db_rows && !query.is_empty() {
-                let mut rows = ctx.db.unified_search_rows(crate::db::SearchArgs {
-                    query,
-                    session_scope: crate::db::SessionScope::AllInCurrentProject,
-                    current_project_dir: std::path::PathBuf::from(project_dir.clone()),
-                    limit,
-                })?;
-                rows.retain(|row| requested_source_kinds.iter().any(|kind| kind == &row.source_kind));
-                if matches!(mode, UnifiedSearchMode::Hybrid) {
-                    let exact_ids = rows.iter().map(|row| (row.source_kind.clone(), row.source_id.clone(), row.project_dir.clone())).collect::<std::collections::BTreeSet<_>>();
-                    for result in response.results.iter_mut() {
-                        if exact_ids.contains(&(result.source_kind.clone(), result.source_id.clone(), result.project_dir.clone())) {
-                            result.score += 0.15 * result.score;
-                            result.score_kind = UnifiedSearchMode::Hybrid;
-                        }
-                    }
-                    let already = response.results.iter().map(|r| (r.source_kind.clone(), r.source_id.clone(), r.project_dir.clone())).collect::<std::collections::BTreeSet<_>>();
-                    rows.retain(|row| !already.contains(&(row.source_kind.clone(), row.source_id.clone(), row.project_dir.clone())));
-                    append_unified_search_rows(&mut response, rows, UnifiedSearchMode::Fts);
-                } else {
-                    append_unified_search_rows(&mut response, rows, mode);
-                }
-            }
-            response.results.sort_by(|a,b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-            response.results.truncate(limit as usize);
+            let response = ctx.db.unified_search(query, None)?;
             Ok(serde_json::to_string(&response)?)
         }
         "memory_open_graph" => {

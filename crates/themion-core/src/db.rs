@@ -1229,6 +1229,154 @@ impl DbHandle {
         Ok(out)
     }
 
+    pub fn unified_search(
+        &self,
+        query: crate::memory::UnifiedSearchQuery,
+        default_project_dir: Option<&std::path::Path>,
+    ) -> Result<crate::memory::UnifiedSearchResponse> {
+        use crate::memory::{
+            append_unified_search_rows, memory_search_to_unified, SearchNodesArgs, UnifiedSearchMode,
+            UnifiedSearchResponse, UnifiedSearchSourceKind,
+        };
+
+        let default_project_dir = default_project_dir
+            .map(|path| path.to_string_lossy().to_string());
+        let normalized = query.normalize(default_project_dir.as_deref())?;
+        let wants_memory = normalized
+            .source_kinds
+            .iter()
+            .any(|kind| matches!(kind, UnifiedSearchSourceKind::Memory));
+        let wants_db_rows = normalized.source_kinds.iter().any(|kind| {
+            matches!(
+                kind,
+                UnifiedSearchSourceKind::ChatMessage
+                    | UnifiedSearchSourceKind::ToolCall
+                    | UnifiedSearchSourceKind::ToolResult
+            )
+        });
+
+        let mut response = UnifiedSearchResponse {
+            mode: normalized.mode,
+            degraded: false,
+            degradation_reason: None,
+            pending_index_count: 0,
+            unavailable_source_kinds: Vec::new(),
+            results: Vec::new(),
+        };
+
+        if matches!(normalized.mode, UnifiedSearchMode::Semantic | UnifiedSearchMode::Hybrid)
+            && !normalized.query.is_empty()
+        {
+            #[cfg(feature = "semantic-memory")]
+            {
+                let requested_source_kinds = normalized
+                    .source_kinds
+                    .iter()
+                    .map(|kind| kind.as_str().to_string())
+                    .collect::<Vec<_>>();
+                let mut semantic = self.memory_store().unified_search_semantic(
+                    &normalized.project_dir,
+                    &requested_source_kinds,
+                    &normalized.query,
+                    normalized.limit,
+                )?;
+                if matches!(normalized.mode, UnifiedSearchMode::Hybrid) {
+                    semantic.mode = UnifiedSearchMode::Hybrid;
+                }
+                response = semantic;
+            }
+            #[cfg(not(feature = "semantic-memory"))]
+            {
+                response.degraded = true;
+                response.degradation_reason = Some(
+                    "semantic retrieval unavailable: themion was built without the semantic-memory feature"
+                        .to_string(),
+                );
+            }
+        } else if wants_memory {
+            let nodes = self.memory_store().search_nodes(SearchNodesArgs {
+                query: Some(normalized.query.clone()),
+                project_dir: normalized.project_dir.clone(),
+                hashtags: normalized.hashtags.clone(),
+                hashtag_match: normalized.hashtag_match,
+                node_type: normalized.node_type.clone(),
+                relation_type: normalized.relation_type.clone(),
+                linked_node_id: normalized.linked_node_id.clone(),
+                limit: normalized.limit,
+                mode: normalized.mode,
+            })?;
+            response = memory_search_to_unified(nodes);
+            response.mode = normalized.mode;
+        }
+
+        if matches!(normalized.mode, UnifiedSearchMode::Fts | UnifiedSearchMode::Hybrid)
+            && wants_db_rows
+            && !normalized.query.is_empty()
+        {
+            let allowed_source_kinds = normalized
+                .source_kinds
+                .iter()
+                .map(|kind| kind.as_str().to_string())
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut rows = self.unified_search_rows(crate::db::SearchArgs {
+                query: normalized.query.clone(),
+                session_scope: crate::db::SessionScope::AllInCurrentProject,
+                current_project_dir: std::path::PathBuf::from(normalized.project_dir.clone()),
+                limit: normalized.limit,
+            })?;
+            rows.retain(|row| allowed_source_kinds.contains(&row.source_kind));
+            if matches!(normalized.mode, UnifiedSearchMode::Hybrid) {
+                let exact_ids = rows
+                    .iter()
+                    .map(|row| (
+                        row.source_kind.clone(),
+                        row.source_id.clone(),
+                        row.project_dir.clone(),
+                    ))
+                    .collect::<std::collections::BTreeSet<_>>();
+                for result in response.results.iter_mut() {
+                    if exact_ids.contains(&(
+                        result.source_kind.clone(),
+                        result.source_id.clone(),
+                        result.project_dir.clone(),
+                    )) {
+                        result.score += 0.15 * result.score;
+                        result.score_kind = UnifiedSearchMode::Hybrid;
+                    }
+                }
+                let already = response
+                    .results
+                    .iter()
+                    .map(|result| (
+                        result.source_kind.clone(),
+                        result.source_id.clone(),
+                        result.project_dir.clone(),
+                    ))
+                    .collect::<std::collections::BTreeSet<_>>();
+                rows.retain(|row| {
+                    !already.contains(&(
+                        row.source_kind.clone(),
+                        row.source_id.clone(),
+                        row.project_dir.clone(),
+                    ))
+                });
+                append_unified_search_rows(&mut response, rows, UnifiedSearchMode::Fts);
+            } else {
+                append_unified_search_rows(&mut response, rows, normalized.mode);
+            }
+        }
+
+        response.results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        response.results.truncate(normalized.limit as usize);
+
+        let _ = normalized.source_kinds_were_omitted;
+        Ok(response)
+    }
+
     pub fn unified_search_rows(&self, args: SearchArgs) -> Result<Vec<UnifiedSearchSourceRow>> {
         if !self.fts5 {
             return Ok(vec![]);

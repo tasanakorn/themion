@@ -328,6 +328,110 @@ pub struct UnifiedSearchResponse {
 }
 
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnifiedSearchSourceKind {
+    Memory,
+    ChatMessage,
+    ToolCall,
+    ToolResult,
+}
+
+impl UnifiedSearchSourceKind {
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "memory" => Some(Self::Memory),
+            "chat_message" => Some(Self::ChatMessage),
+            "tool_call" => Some(Self::ToolCall),
+            "tool_result" => Some(Self::ToolResult),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::ChatMessage => "chat_message",
+            Self::ToolCall => "tool_call",
+            Self::ToolResult => "tool_result",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UnifiedSearchQuery {
+    pub query: String,
+    pub project_dir: Option<String>,
+    pub source_kinds: Option<Vec<UnifiedSearchSourceKind>>,
+    pub mode: Option<UnifiedSearchMode>,
+    pub limit: Option<u32>,
+    pub hashtags: Vec<String>,
+    pub hashtag_match: Option<HashtagMatch>,
+    pub node_type: Option<String>,
+    pub relation_type: Option<String>,
+    pub linked_node_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NormalizedUnifiedSearchQuery {
+    pub query: String,
+    pub project_dir: String,
+    pub source_kinds: Vec<UnifiedSearchSourceKind>,
+    pub source_kinds_were_omitted: bool,
+    pub mode: UnifiedSearchMode,
+    pub limit: u32,
+    pub hashtags: Vec<String>,
+    pub hashtag_match: HashtagMatch,
+    pub node_type: Option<String>,
+    pub relation_type: Option<String>,
+    pub linked_node_id: Option<String>,
+}
+
+impl UnifiedSearchQuery {
+    pub fn normalize(self, default_project_dir: Option<&str>) -> Result<NormalizedUnifiedSearchQuery> {
+        let project_dir = self
+            .project_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| default_project_dir.map(str::to_string))
+            .ok_or_else(|| anyhow::anyhow!("missing project_dir"))?;
+        let query = self.query.trim().to_string();
+        let source_kinds_were_omitted = self.source_kinds.is_none();
+        let source_kinds = self.source_kinds.unwrap_or_else(|| {
+            vec![
+                UnifiedSearchSourceKind::Memory,
+                UnifiedSearchSourceKind::ChatMessage,
+            ]
+        });
+        let limit = self.limit.unwrap_or(10).min(50);
+        Ok(NormalizedUnifiedSearchQuery {
+            query,
+            project_dir,
+            source_kinds,
+            source_kinds_were_omitted,
+            mode: self.mode.unwrap_or_default(),
+            limit,
+            hashtags: self.hashtags,
+            hashtag_match: self.hashtag_match.unwrap_or(HashtagMatch::Any),
+            node_type: self.node_type.and_then(|value| normalize_optional_string(Some(value))),
+            relation_type: self.relation_type.and_then(|value| normalize_optional_string(Some(value))),
+            linked_node_id: self.linked_node_id.and_then(|value| normalize_optional_string(Some(value))),
+        })
+    }
+}
+
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct UnifiedSearchIndexReport {
     pub mode: String,
