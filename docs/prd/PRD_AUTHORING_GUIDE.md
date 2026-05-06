@@ -11,6 +11,7 @@ Use this guide whenever you create or update a PRD.
    - Use source only to fill gaps or confirm undocumented behavior.
 2. Read the most recent 2–3 PRDs in `docs/prd/`.
    - Match their structure, heading depth, table style, and prose voice.
+   - Match their strengths, not their verbosity.
 3. Keep scope focused.
    - One concern per PRD.
    - Do not turn the document into an implementation task list for unrelated changes.
@@ -18,10 +19,18 @@ Use this guide whenever you create or update a PRD.
    - Make the document easy to skim and easy to decide on.
    - Prefer concise requirements over long narrative explanation.
    - Include detail only when it changes a product or implementation decision.
+   - Remove repeated explanation across sections.
+   - If one sentence says the same thing as three, keep the one sentence.
    - If technical research or evidence is useful but too detailed for the main PRD body, move it into an optional technical note or appendix rather than bloating the core review path.
-5. Update `docs/README.md`.
+5. Write for non-native English readers.
+   - Prefer short sentences.
+   - Prefer common words over formal or abstract wording.
+   - Prefer direct statements such as "Add X" or "Do not add Y".
+   - Avoid idioms, clever phrasing, and long nested clauses.
+   - If a requirement is important, say it once clearly instead of repeating it in different words.
+6. Update `docs/README.md`.
    - Add the new PRD to the PRD table with link, status, and short description.
-6. Treat guideline-document updates as mandatory when the PRD changes documented behavior or repository guidance.
+7. Treat guideline-document updates as mandatory when the PRD changes documented behavior or repository guidance.
    - If the proposed change affects architecture expectations, authoring guidance, workflow conventions, prompt/instruction handling, validation expectations, or any other durable guidance document, update that guidance in the same task.
    - Do not leave guidance drift for later when the needed update is already known.
    - Treat this as important follow-through, not an optional polish pass.
@@ -33,11 +42,6 @@ Use this guide whenever you create or update a PRD.
 - Zero-pad the number to 3 digits.
 - Keep the slug kebab-case and concise.
 - Detect the highest existing `NNN` in `docs/prd/` and increment it by 1 for the new PRD.
-
-Current examples:
-- `prd-001-config-and-repl-feedback.md`
-- `prd-002-persistent-history-multi-agent.md`
-- `prd-003-openai-codex-provider.md`
 
 ## Document header
 
@@ -67,13 +71,12 @@ When a PRD still has unresolved design questions, uncertain correctness, or need
 After the metadata block, add a short plain-language summary section before the main body:
 
 - Use the heading `## Summary`.
-- Keep it short, usually 3–5 flat bullets. Go beyond that only when the extra bullets materially help review.
-- Explain the proposal in simple terms so a reader can quickly understand the approach without reading the full PRD.
+- Keep it short, usually 3–5 flat bullets.
+- Go beyond 5 bullets only when the extra bullets change a review decision.
+- Explain the proposal in simple terms so a reader can quickly understand it without reading the full PRD.
 - Lead with the product problem, intended outcome, or user-visible behavior before implementation tactics.
-- Prefer direct language such as "keep X, add Y, avoid Z" over abstract product or architecture phrasing.
-- When useful, include one bullet for the main problem, one for the proposed approach, and one for what explicitly stays unchanged.
-- If the work is phased, summarize the overall product outcome first and then note which phase is being proposed or implemented now.
-- Avoid repeating lower-level design detail that is covered later.
+- Prefer direct language such as "keep X, add Y, avoid Z".
+- Avoid repeating lower-level design detail that appears later.
 
 This section is for fast comprehension, not for replacing the full PRD.
 
@@ -93,13 +96,6 @@ For `Draft` PRDs, prefer a semantic target when the exact landing release is not
 - `>vX.Y.Z +minor`
 - `>vX.Y.Z +major`
 
-This means the PRD is expected to land after the referenced version and indicates the intended semver impact without pretending the exact implementation release is already fixed.
-
-Examples:
-
-- `- **Version:** >v0.36.0 +minor` for a draft that is not yet implementation-ready but is expected to be a minor release when it lands
-- `- **Version:** v0.37.0` once the PRD becomes implementation-ready or the target release is known
-
 When a draft becomes implementation-ready, replace the semantic target with a concrete version. When updating a PRD for newly implemented work, detect whether the change is patch, minor, or major scope and set or update the concrete version accordingly instead of always bumping the minor version.
 
 ## Canonical section order
@@ -118,60 +114,66 @@ Use these top-level sections in this order when they are relevant:
 Rules:
 - The `## Summary` section appears before these canonical sections.
 - Omit sections that would only contain placeholders.
+- Omit any section that does not help the reader make a decision.
 - Do not add filler text such as `None` just to preserve numbering.
 - Keep top-level headings as `##`.
 - Use `###` for subsections.
 - Use `####` only rarely.
 - Optional `## Appendix` or `## Technical note` sections may appear after the main required sections when they materially help preserve evidence without slowing the main review path.
 
+## Default size target
+
+Treat PRDs as short decision documents by default.
+
+- Prefer about 1–3 short paragraphs per section, or a short bullet list.
+- Prefer one clear design subsection over many small subsections when possible.
+- Add detail only when it changes behavior, scope, or implementation direction.
+- Avoid repeating the same requirement in Summary, Goals, Background, and Design.
+- If a PRD becomes hard to skim in a few minutes, shorten it.
+- If detailed evidence is needed, move it to an appendix.
+
 ## Section expectations
 
 ### Goals
 - Describe what the PRD intends to achieve.
 - Prefer concrete, user-visible or architecture-visible outcomes.
-- Keep the product requirement or user/problem outcome primary; do not let a delivery phase become the effective goal of the PRD.
-- Prefer short bullets over long explanatory paragraphs when possible.
+- Prefer short bullets.
+- Keep the product requirement or user/problem outcome primary.
 
 ### Non-goals
 - State what is explicitly out of scope.
-- This should prevent scope creep and future ambiguity.
-- Prefer product-scope boundaries first; implementation exclusions may follow when they clarify the proposed delivery slice.
 - Keep the list tight and decision-relevant.
+- Prefer 3–6 bullets unless more are clearly needed.
 
 ### Background & Motivation
 - Explain current behavior and why the change is needed.
 - Include a `### Current state` subsection when useful.
 - Ground this section in existing docs first.
-- If the work is phased, explain the overall product motivation before narrowing to the current implementation slice.
-- Keep this section short by default. Explain the problem, why it matters, and why now; avoid long historical retellings unless they affect the decision.
-- Use history or prior discussion only to clarify the product problem or decision boundaries; do not let transcript archaeology replace a clear statement of the product issue.
+- Keep this section short by default.
+- Explain the problem, why it matters, and why now.
+- Avoid long history retellings.
 
 ### Design
 - Describe the proposed behavior and structure.
-- Break major topics into focused subsections.
-- If the work is phased, preserve the distinction between the overall product behavior and the current delivery phase.
+- Break into focused subsections only when each subsection adds a distinct decision.
+- Prefer 2–5 design subsections for most PRDs.
 - Do not add a standalone `Alternatives` section by default.
 - Include alternative discussion only when it helps a reviewer understand a meaningful design decision, tradeoff, or rejected direction.
-- If an alternative note is useful, keep it brief and scannable. Prefer patterns such as:
-  - `Alternative considered: <option> — rejected because <reason>.`
-  - `Alternatives considered: <short list> — chose <option> because <reason>.`
-  - `No useful alternative identified for this subsection.`
-- Do not force exactly one `Alternative considered` note into every subsection. Omit it when it would be filler.
-- If alternatives are included, make accept/reject outcome obvious in plain language rather than hiding the decision in verbose prose.
-- Make each subsection easy to review: state what changes, what stays the same, and why this choice was made.
-- Prefer requirements phrased as what the product must do over placeholder tokens, temporary shorthand, or speculative implementation wording.
-- If an example token or sketch appears in discussion, verify whether it is the actual requirement or only shorthand before baking it into the PRD.
-- When a user correction narrows or reframes the intent, rewrite the PRD around the corrected product requirement rather than merely patching the old wording.
+- If an alternative note is useful, keep it to one short sentence when possible.
+- Make each subsection easy to review: state what changes, what stays the same, and why.
+- Prefer requirements phrased as what the product must do.
+- Avoid speculative implementation detail unless it is needed to make the requirement clear.
 
 ### Changes by Component
 - Use a table.
 - Map files or modules to the changes they require.
-- Keep it specific enough to guide implementation without becoming noisy.
+- Keep each row short.
+- Mention only components that matter to implementation.
 
 ### Edge Cases
 - List realistic failure modes, constraints, or unusual scenarios.
 - Focus on behavior, not hypothetical trivia.
-- Prefer bullets.
+- Prefer 3–6 bullets unless more are clearly needed.
 
 ### Migration
 - Explain rollout, upgrade, downgrade, compatibility, or user transition behavior.
@@ -181,43 +183,39 @@ Rules:
 ### Testing
 - Write each test outcome as `step → verify:`.
 - Make verification observable and concrete.
-- Prefer behavior-focused validation over vague statements.
-- Prefer concise bullet lists over prose paragraphs.
+- Prefer concise bullet lists.
+- Include only checks that materially prove the requirement.
 
 ### Implementation checklist
 - If the PRD describes intended implementation work in enough detail to guide coding, add an `## Implementation checklist` section near the end of the PRD.
 - Use markdown task list items such as `- [ ]` while the work is proposed or in progress.
-- Update items to `- [x]` as implementation lands when the PRD is later updated to reflect shipped work.
-- Keep the checklist scoped to concrete implementation slices implied by the PRD; do not turn it into a generic restatement of every paragraph.
-- The checklist should track engineering work, not replace the product outcome stated elsewhere in the PRD.
-- If the work is phased, make it clear which checklist items belong to the currently proposed or implemented phase and avoid erasing later phases from the document.
-- Omit the section only when the PRD is purely exploratory, historical, or otherwise not pretending to define an implementation path.
+- Keep the checklist scoped to concrete implementation slices.
+- Do not restate the whole PRD as checklist items.
+- Omit the section when it would add noise instead of clarity.
 
 ### Appendix / technical note
-- Use this only when supporting evidence, model comparisons, benchmarks, API notes, or technical research materially help the decision but would slow down the main review path.
-- Keep the main PRD body self-sufficient: a reviewer should still understand the problem, proposal, and decision points without reading the appendix.
-- Treat appendices as supporting evidence, not as a place to hide core requirements or unresolved product decisions.
-- Place optional appendices after the main required sections and after any implementation checklist.
-- Title them clearly, for example `## Appendix: Model comparison notes` or `## Technical note: Embedding candidate evidence`.
+- Use this only when supporting evidence materially helps the decision but would slow down the main review path.
+- Keep the main PRD body self-sufficient.
+- Treat appendices as supporting evidence, not as a place to hide core requirements.
 
 ## Style
 
-Match the style of neighboring PRDs:
+Match the style of neighboring PRDs, but prefer clarity over imitation when older PRDs are too verbose.
 
 - Declarative, direct prose.
 - Consistent heading hierarchy.
 - Similar metadata formatting.
 - Similar table formatting.
-- Use blockquote admonitions only when actually needed, such as supersession notes.
 - Keep the `## Summary` section plain-language and easy to skim.
 - Keep the document reading like a Product Requirements Document rather than only an engineering implementation plan.
-- Prefer bullets, compact paragraphs, and tables over long narrative blocks when they communicate the same information.
-- Do not repeat the same point across Summary, Goals, Background, and Design unless the later section adds new decision-relevant detail.
-- If detailed evidence is needed, prefer a short synthesis in the main body and move the supporting detail to an appendix or technical note.
-- Prefer naming the user-visible distinction or product behavior directly instead of anchoring the PRD around placeholder markers such as `[xxxx]` unless the literal marker itself is truly the requirement.
-- If an alternatives note does not help the reviewer make or understand a decision, omit it instead of adding verbose junk.
+- Prefer bullets, compact paragraphs, and tables over long narrative blocks.
+- Do not repeat the same point across sections unless the later section adds new decision-relevant detail.
+- Prefer plain English that a non-native reader can understand quickly.
+- Prefer short subject-verb-object sentences.
+- Avoid filler phrases such as "it is important to note that", "in order to", or "should be able to" when a shorter statement works.
+- If an alternatives note does not help the reviewer make or understand a decision, omit it.
 
-The finished PRD should look visually consistent with nearby PRDs in `docs/prd/`.
+The finished PRD should be easy to understand in a few minutes.
 
 ## Research guidance
 
@@ -236,19 +234,17 @@ Before finishing:
 - Filename matches `prd-NNN-<slug>.md`.
 - Header metadata is complete.
 - Add a `## Summary` section after the metadata block.
-- Summary leads with the product problem/outcome before implementation tactics.
+- Summary is short and leads with the product problem or outcome.
 - Top-level sections follow the required order.
-- Goals still describe the product requirement or user/problem outcome, not only the current implementation phase.
-- Background explains the actual product problem, not just the transcript history of how the wording evolved.
-- Design states what the product must do and does not silently promote placeholder examples into requirements.
-- Any alternatives note that remains is actually decision-useful and easy to scan for the chosen/rejected outcome.
-- If the PRD is phased, the overall product intent remains visible and the current phase is clearly identified.
-- Empty sections were omitted.
+- Empty or low-value sections were omitted.
+- Goals describe the product requirement or user/problem outcome, not only the implementation phase.
+- Background explains the actual product problem, not transcript history.
+- Design states what the product must do.
+- Repeated explanation was removed.
+- Most sentences are short and plain enough for non-native English readers.
 - Testing uses `step → verify:` lines.
-- Add an `Implementation checklist` section when the PRD defines an implementation path.
-- If detailed evidence is needed, keep the PRD review-efficient by moving it into an optional appendix or technical note.
+- Add an `Implementation checklist` section only when it adds real implementation value.
+- If detailed evidence is needed, move it into an optional appendix or technical note.
 - `docs/README.md` PRD table was updated.
 - If the PRD changes documented behavior or durable repository guidance, all affected guideline documents were updated in the same task.
-- Structure and voice match recent PRDs.
-- Repeated explanation was removed where bullets or tables would be clearer.
 - A reviewer should be able to understand the problem and proposed change in a few minutes.

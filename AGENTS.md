@@ -170,7 +170,9 @@ Typical feature checks for `themion-cli`:
 ## When writing PRDs
 
 - Follow `docs/prd/PRD_AUTHORING_GUIDE.md` for PRD authoring conventions in this repository.
-- Before writing, read the most recent 2–3 PRDs in `docs/prd/` and match their structure, heading style, and prose voice.
+- Before writing, read the most recent 2–3 PRDs in `docs/prd/` and match their structure, heading style, and prose voice, but do not copy avoidable verbosity from older documents.
+- Treat PRDs as short decision documents by default: remove repeated explanation, keep sections tight, and add detail only when it changes the decision or implementation direction.
+- Write PRDs in plain English that non-native readers can understand quickly: prefer short sentences, common words, direct statements, and small bullet lists over dense paragraphs.
 - Keep PRDs docs-first: ground the document in existing behavior described in `docs/`, then read source only where documentation leaves gaps.
 - Use sequential filenames `prd-NNN-<slug>.md` and update the PRD table in `docs/README.md` with the new entry.
 - Keep canonical top-level sections in this order when they are relevant: Goals, Non-goals, Background & Motivation, Design, Changes by Component, Edge Cases, Migration, Testing.
@@ -178,6 +180,7 @@ Typical feature checks for `themion-cli`:
 - In Testing, write each outcome as `step → verify:`.
 - For major design choices, include a brief inline `Alternative considered` note in the relevant design subsection instead of adding a standalone alternatives section.
 - Keep PRDs centered on product requirements and intended behavior, not only engineering tactics.
+- If a PRD becomes hard to skim in a few minutes, shorten it before finishing.
 - Write PRDs in terms of what the product must do, not around placeholder example tokens or temporary shorthand unless the literal token is itself the requirement.
 - If discussion includes an example marker or sketch such as `[xxxx]`, verify whether it is the real requirement or only a shorthand for a broader product distinction before baking it into the PRD.
 - If the user correction changes the intent of a PRD, rewrite the PRD around the corrected product requirement instead of merely patching the old framing.
