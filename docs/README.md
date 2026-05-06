@@ -14,6 +14,7 @@ Active and recent product requirements documents live in `docs/prd/`. Older impl
 
 | ID      | Title                                                                                                       | Status        | Version | Scope                                    |
 | ------- | ----------------------------------------------------------------------------------------------------------- | ------------- | ------- | ---------------------------------------- |
+| PRD-102 | [Overall Project Memory and Knowledge Summary via Direct Database Query](prd/prd-102-overall-project-memory-knowledge-summary-via-direct-db-query.md) | Implemented | v0.62.0 | `themion-web`, docs |
 | PRD-101 | [Self-Contained Web Server Crate for Themion Web Interface](prd/prd-101-self-contained-web-server-crate-for-themion-web-interface.md) | Partially implemented | v0.61.1 | `themion-web`, docs |
 | PRD-100 | [Improve Quota-Limit Error Detection and Reset Reporting](prd/prd-100-improve-quota-limit-error-reset-reporting.md) | Implemented | v0.61.1 | `themion-core`, `themion-cli`, docs |
 | PRD-099 | [Build Metadata Injection and Stylos Version Reporting](prd/prd-099-build-metadata-and-stylos-version-reporting.md) | Implemented | v0.61.0 | `themion-core`, `themion-cli`, docs |

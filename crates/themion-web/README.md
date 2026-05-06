@@ -7,14 +7,14 @@ Local browser surface for Themion hosted by a dedicated `themion-web` binary.
 This crate currently provides:
 - a self-contained Axum server with SSR-rendered Leptos UI
 - a separate `themion-web` executable
+- a read-only Project Memory summary page sourced directly from the active SQLite `system.db` file
 - browser shell sessions backed by `portable-pty`
 - bundled `xterm.js` terminal rendering over websocket transport
 - persistent in-process terminal sessions with reconnect and multi-tab support
 - embedded `JetBrains Mono Nerd Font` as the default terminal font
 
 This crate does not currently provide:
-- SQLite-backed monitoring panels
-- read-only database browsing
+- general SQLite browsing beyond the summary page
 - config/auth-file inspection
 - browser-native agent chat or control flows
 

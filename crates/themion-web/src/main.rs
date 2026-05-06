@@ -1,23 +1,26 @@
 pub mod components;
 
 use anyhow::{anyhow, bail, Context, Result};
+use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::body::Body;
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::HeaderValue;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
+use chrono::{Local, TimeZone};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use leptos::prelude::*;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -33,6 +36,8 @@ const TERMINAL_ROUTE: &str = "/api/terminal/ws";
 const TERMINAL_SCROLLBACK_LIMIT_BYTES: usize = 262_144;
 const DEFAULT_TERMINAL_COLS: u16 = 120;
 const DEFAULT_TERMINAL_ROWS: u16 = 40;
+const TOP_HASHTAG_LIMIT: usize = 10;
+const RECENT_ACTIVITY_LIMIT: usize = 12;
 
 #[derive(Clone)]
 struct AppState {
@@ -126,6 +131,62 @@ enum ServerSocketMessage {
     TerminalOutput { terminal_id: u64, data: String },
     TerminalClosed { terminal_id: u64 },
     Error { message: String },
+}
+
+#[derive(Clone, Debug)]
+struct KnowledgeSummaryPageData {
+    db_path: String,
+    generated_at_label: String,
+    state: KnowledgeSummaryState,
+}
+
+#[derive(Clone, Debug)]
+enum KnowledgeSummaryState {
+    Ready(KnowledgeSummary),
+    MissingDb { message: String },
+    IncompatibleSchema { message: String },
+    QueryError { message: String },
+}
+
+#[derive(Clone, Debug)]
+struct KnowledgeSummary {
+    overview: KnowledgeOverview,
+    node_types: Vec<CountRow>,
+    hashtags: Vec<CountRow>,
+    relations: Vec<CountRow>,
+    scopes: Vec<CountRow>,
+    graph_shape: GraphShapeSummary,
+    recent_activity: Vec<RecentMemoryNode>,
+}
+
+#[derive(Clone, Debug)]
+struct KnowledgeOverview {
+    total_nodes: i64,
+    total_edges: i64,
+    distinct_hashtags: i64,
+    latest_updated_at_label: String,
+    is_empty: bool,
+}
+
+#[derive(Clone, Debug)]
+struct GraphShapeSummary {
+    nodes_with_edges: i64,
+    nodes_without_edges: i64,
+    edge_to_node_ratio_label: String,
+}
+
+#[derive(Clone, Debug)]
+struct CountRow {
+    label: String,
+    count: i64,
+}
+
+#[derive(Clone, Debug)]
+struct RecentMemoryNode {
+    title: String,
+    node_type: String,
+    project_dir: String,
+    updated_at_label: String,
 }
 
 fn main() -> Result<()> {
@@ -491,7 +552,8 @@ fn resolve_shell() -> String {
 }
 
 async fn index() -> Html<String> {
-    Html(render_app_shell())
+    let knowledge_summary = load_knowledge_summary_page_data();
+    Html(render_app_shell(&knowledge_summary))
 }
 
 async fn xterm_css() -> impl IntoResponse {
@@ -755,8 +817,222 @@ async fn send_socket_message(
     Ok(())
 }
 
-fn render_app_shell() -> String {
-    let body = view! { <AppShell/> }.to_html();
+fn load_knowledge_summary_page_data() -> KnowledgeSummaryPageData {
+    let db_path = resolve_system_db_path();
+    let generated_at_ms = now_ms();
+    let generated_at_label = format_timestamp_ms(generated_at_ms);
+    let db_path_label = db_path.display().to_string();
+
+    let state = match load_knowledge_summary(&db_path) {
+        Ok(summary) => KnowledgeSummaryState::Ready(summary),
+        Err(error) => classify_summary_error(&db_path, error),
+    };
+
+    KnowledgeSummaryPageData {
+        db_path: db_path_label,
+        generated_at_label,
+        state,
+    }
+}
+
+fn load_knowledge_summary(db_path: &Path) -> Result<KnowledgeSummary> {
+    if !db_path.exists() {
+        bail!("database file does not exist yet")
+    }
+
+    let conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .with_context(|| format!("failed to open sqlite database at {}", db_path.display()))?;
+
+    ensure_required_table(&conn, "memory_nodes")?;
+    ensure_required_table(&conn, "memory_node_hashtags")?;
+    ensure_required_table(&conn, "memory_edges")?;
+
+    let total_nodes: i64 = conn.query_row("SELECT COUNT(*) FROM memory_nodes", [], |row| row.get(0))?;
+    let total_edges: i64 = conn.query_row("SELECT COUNT(*) FROM memory_edges", [], |row| row.get(0))?;
+    let distinct_hashtags: i64 = conn.query_row(
+        "SELECT COUNT(DISTINCT hashtag) FROM memory_node_hashtags",
+        [],
+        |row| row.get(0),
+    )?;
+    let latest_updated_at_ms: Option<i64> = conn.query_row(
+        "SELECT MAX(updated_at_ms) FROM memory_nodes",
+        [],
+        |row| row.get(0),
+    )?;
+
+    let node_types = query_count_rows(
+        &conn,
+        "SELECT node_type, COUNT(*) AS count FROM memory_nodes GROUP BY node_type ORDER BY count DESC, node_type ASC",
+    )?;
+    let hashtags = query_count_rows_limited(
+        &conn,
+        "SELECT hashtag, COUNT(*) AS count FROM memory_node_hashtags GROUP BY hashtag ORDER BY count DESC, hashtag ASC",
+        TOP_HASHTAG_LIMIT,
+    )?;
+    let relations = query_count_rows(
+        &conn,
+        "SELECT relation_type, COUNT(*) AS count FROM memory_edges GROUP BY relation_type ORDER BY count DESC, relation_type ASC",
+    )?;
+    let scopes = query_count_rows(
+        &conn,
+        "SELECT project_dir, COUNT(*) AS count FROM memory_nodes GROUP BY project_dir ORDER BY count DESC, project_dir ASC",
+    )?;
+
+    let nodes_with_edges: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memory_nodes n WHERE EXISTS (SELECT 1 FROM memory_edges e WHERE e.from_node_id = n.node_id OR e.to_node_id = n.node_id)",
+        [],
+        |row| row.get(0),
+    )?;
+    let nodes_without_edges = total_nodes.saturating_sub(nodes_with_edges);
+
+    let mut recent_stmt = conn.prepare(
+        "SELECT title, node_type, project_dir, updated_at_ms
+         FROM memory_nodes
+         ORDER BY updated_at_ms DESC, title ASC
+         LIMIT ?1",
+    )?;
+    let recent_activity = recent_stmt
+        .query_map([RECENT_ACTIVITY_LIMIT as i64], |row| {
+            Ok(RecentMemoryNode {
+                title: row.get::<_, String>(0)?,
+                node_type: row.get::<_, String>(1)?,
+                project_dir: row.get::<_, String>(2)?,
+                updated_at_label: format_timestamp_ms(row.get::<_, i64>(3)?),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(KnowledgeSummary {
+        overview: KnowledgeOverview {
+            total_nodes,
+            total_edges,
+            distinct_hashtags,
+            latest_updated_at_label: latest_updated_at_ms
+                .map(format_timestamp_ms)
+                .unwrap_or_else(|| "No memory updates yet".to_string()),
+            is_empty: total_nodes == 0,
+        },
+        node_types,
+        hashtags,
+        relations,
+        scopes,
+        graph_shape: GraphShapeSummary {
+            nodes_with_edges,
+            nodes_without_edges,
+            edge_to_node_ratio_label: ratio_label(total_edges, total_nodes),
+        },
+        recent_activity,
+    })
+}
+
+fn ensure_required_table(conn: &Connection, table_name: &str) -> Result<()> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [table_name],
+        |row| row.get(0),
+    )?;
+    if exists == 0 {
+        bail!("missing required table '{}'", table_name);
+    }
+    Ok(())
+}
+
+fn query_count_rows(conn: &Connection, sql: &str) -> Result<Vec<CountRow>> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(CountRow {
+                label: row.get::<_, String>(0)?,
+                count: row.get::<_, i64>(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+fn query_count_rows_limited(conn: &Connection, sql: &str, limit: usize) -> Result<Vec<CountRow>> {
+    let limited_sql = format!("{sql} LIMIT ?1");
+    let mut stmt = conn.prepare(&limited_sql)?;
+    let rows = stmt
+        .query_map([limit as i64], |row| {
+            Ok(CountRow {
+                label: row.get::<_, String>(0)?,
+                count: row.get::<_, i64>(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+fn classify_summary_error(db_path: &Path, error: anyhow::Error) -> KnowledgeSummaryState {
+    if !db_path.exists() {
+        return KnowledgeSummaryState::MissingDb {
+            message: error.to_string(),
+        };
+    }
+
+    let text = error.to_string();
+    if text.contains("missing required table") {
+        return KnowledgeSummaryState::IncompatibleSchema { message: text };
+    }
+
+    if text.contains("no such table") {
+        return KnowledgeSummaryState::IncompatibleSchema { message: text };
+    }
+
+    KnowledgeSummaryState::QueryError { message: text }
+}
+
+fn resolve_system_db_path() -> PathBuf {
+    if let Ok(path) = env::var("THEMION_WEB_DB_PATH") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+
+    if let Ok(xdg_data_home) = env::var("XDG_DATA_HOME") {
+        let trimmed = xdg_data_home.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed).join("themion").join("system.db");
+        }
+    }
+
+    let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".local")
+        .join("share")
+        .join("themion")
+        .join("system.db")
+}
+
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn format_timestamp_ms(timestamp_ms: i64) -> String {
+    match Local.timestamp_millis_opt(timestamp_ms).single() {
+        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S %Z").to_string(),
+        None => format!("{timestamp_ms} ms"),
+    }
+}
+
+fn ratio_label(numerator: i64, denominator: i64) -> String {
+    if denominator <= 0 {
+        return "0.00 edges per node".to_string();
+    }
+    format!("{:.2} edges per node", numerator as f64 / denominator as f64)
+}
+
+fn render_app_shell(knowledge_summary: &KnowledgeSummaryPageData) -> String {
+    let body = AppShell(AppShellProps { knowledge_summary: knowledge_summary.clone() }).to_html();
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\" /><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" /><title>Themion Web</title><style>{}</style><style>{}</style></head><body>{}<script>{}</script><script>{}</script></body></html>",
         APP_CSS,
@@ -768,7 +1044,7 @@ fn render_app_shell() -> String {
 }
 
 #[component]
-fn AppShell() -> impl IntoView {
+fn AppShell(knowledge_summary: KnowledgeSummaryPageData) -> impl IntoView {
     use crate::components::ui::card::Card;
 
     view! {
@@ -785,7 +1061,7 @@ fn AppShell() -> impl IntoView {
                             <span class="sidebar-title">"Menu"</span>
                         </div>
                         <nav class="sidebar-body" aria-label="Sidebar menu">
-                            <label class="sidebar-item" for="nav-dashboard">"Dashboard"</label>
+                            <label class="sidebar-item" for="nav-dashboard">"Knowledge"</label>
                             <label class="sidebar-item" for="nav-example">"Example"</label>
                             <label class="sidebar-item" for="nav-agent">"Agent"</label>
                             <label class="sidebar-item" for="nav-shell">"Shell"</label>
@@ -799,8 +1075,8 @@ fn AppShell() -> impl IntoView {
                     </div>
 
                     <section class="page-panel page-dashboard">
-                        <Card class="page-surface">
-                            <div class="empty-page">"Dashboard"</div>
+                        <Card class="page-surface knowledge-page">
+                            {render_knowledge_summary(&knowledge_summary)}
                         </Card>
                     </section>
 
@@ -851,4 +1127,202 @@ fn AppShell() -> impl IntoView {
             </div>
         </main>
     }
+}
+
+fn render_knowledge_summary(data: &KnowledgeSummaryPageData) -> leptos::prelude::AnyView {
+    match &data.state {
+        KnowledgeSummaryState::Ready(summary) => render_ready_knowledge_summary(data, summary),
+        KnowledgeSummaryState::MissingDb { message } => render_knowledge_state(
+            "Missing database",
+            "Themion Web could not find the active system.db file yet.",
+            &data.db_path,
+            &data.generated_at_label,
+            message,
+        ),
+        KnowledgeSummaryState::IncompatibleSchema { message } => render_knowledge_state(
+            "Incompatible schema",
+            "The database is readable, but it does not expose the expected Project Memory tables for this summary page.",
+            &data.db_path,
+            &data.generated_at_label,
+            message,
+        ),
+        KnowledgeSummaryState::QueryError { message } => render_knowledge_state(
+            "Query error",
+            "Themion Web could not summarize the Project Memory database cleanly.",
+            &data.db_path,
+            &data.generated_at_label,
+            message,
+        ),
+    }
+}
+
+fn render_ready_knowledge_summary(
+    data: &KnowledgeSummaryPageData,
+    summary: &KnowledgeSummary,
+) -> leptos::prelude::AnyView {
+    let empty_note = if summary.overview.is_empty {
+        Some("This database is readable, but it does not contain any Project Memory nodes yet.")
+    } else {
+        None
+    };
+
+    view! {
+        <div class="knowledge-layout">
+            <div class="knowledge-header">
+                <div>
+                    <div class="terminal-title">"Project Memory Summary"</div>
+                    <div class="terminal-subtitle">"Read-only overview from the active SQLite database"</div>
+                </div>
+                <div class="knowledge-meta">
+                    <div><strong>"Database:"</strong> " " {data.db_path.clone()}</div>
+                    <div><strong>"Generated:"</strong> " " {data.generated_at_label.clone()}</div>
+                </div>
+            </div>
+
+            {empty_note.map(|text| view! { <div class="knowledge-empty-note">{text}</div> })}
+
+            <div class="knowledge-grid knowledge-overview-grid">
+                <div class="knowledge-stat-card">
+                    <div class="knowledge-stat-label">"Memory nodes"</div>
+                    <div class="knowledge-stat-value">{summary.overview.total_nodes}</div>
+                </div>
+                <div class="knowledge-stat-card">
+                    <div class="knowledge-stat-label">"Edges"</div>
+                    <div class="knowledge-stat-value">{summary.overview.total_edges}</div>
+                </div>
+                <div class="knowledge-stat-card">
+                    <div class="knowledge-stat-label">"Distinct hashtags"</div>
+                    <div class="knowledge-stat-value">{summary.overview.distinct_hashtags}</div>
+                </div>
+                <div class="knowledge-stat-card">
+                    <div class="knowledge-stat-label">"Latest update"</div>
+                    <div class="knowledge-stat-value knowledge-stat-value-wide">{summary.overview.latest_updated_at_label.clone()}</div>
+                </div>
+            </div>
+
+            <div class="knowledge-grid knowledge-section-grid">
+                {render_count_section("Node types", "Distribution by memory node_type.", &summary.node_types)}
+                {render_count_section("Top hashtags", "Most-used Project Memory hashtags.", &summary.hashtags)}
+                {render_count_section("Relations", "Counts grouped by relation_type.", &summary.relations)}
+                {render_count_section("Scopes", "Counts grouped by project_dir, including [GLOBAL] when present.", &summary.scopes)}
+            </div>
+
+            <div class="knowledge-grid knowledge-section-grid">
+                <section class="knowledge-section-card">
+                    <div class="knowledge-section-head">
+                        <div class="knowledge-section-title">"Graph shape"</div>
+                        <div class="knowledge-section-subtitle">"How connected the Project Memory graph currently is."</div>
+                    </div>
+                    <div class="knowledge-graph-grid">
+                        <div class="knowledge-stat-card compact">
+                            <div class="knowledge-stat-label">"Nodes with edges"</div>
+                            <div class="knowledge-stat-value">{summary.graph_shape.nodes_with_edges}</div>
+                        </div>
+                        <div class="knowledge-stat-card compact">
+                            <div class="knowledge-stat-label">"Nodes without edges"</div>
+                            <div class="knowledge-stat-value">{summary.graph_shape.nodes_without_edges}</div>
+                        </div>
+                        <div class="knowledge-stat-card compact">
+                            <div class="knowledge-stat-label">"Edge density"</div>
+                            <div class="knowledge-stat-value knowledge-stat-value-wide">{summary.graph_shape.edge_to_node_ratio_label.clone()}</div>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="knowledge-section-card knowledge-activity-section">
+                    <div class="knowledge-section-head">
+                        <div class="knowledge-section-title">"Recent activity"</div>
+                        <div class="knowledge-section-subtitle">"Most recently updated Project Memory nodes."</div>
+                    </div>
+                    <div class="knowledge-activity-list">
+                        {if summary.recent_activity.is_empty() {
+                            view! { <div class="knowledge-empty-row">"No memory updates recorded yet."</div> }.into_any()
+                        } else {
+                            view! {
+                                <ul class="knowledge-activity-items">
+                                    {summary.recent_activity.iter().map(|item| {
+                                        view! {
+                                            <li class="knowledge-activity-item">
+                                                <div class="knowledge-activity-title">{item.title.clone()}</div>
+                                                <div class="knowledge-activity-meta">
+                                                    <span>{item.node_type.clone()}</span>
+                                                    <span>{item.project_dir.clone()}</span>
+                                                    <span>{item.updated_at_label.clone()}</span>
+                                                </div>
+                                            </li>
+                                        }
+                                    }).collect_view()}
+                                </ul>
+                            }.into_any()
+                        }}
+                    </div>
+                </section>
+            </div>
+        </div>
+    }
+    .into_any()
+}
+
+fn render_count_section(
+    title: &'static str,
+    subtitle: &'static str,
+    rows: &[CountRow],
+) -> leptos::prelude::AnyView {
+    view! {
+        <section class="knowledge-section-card">
+            <div class="knowledge-section-head">
+                <div class="knowledge-section-title">{title}</div>
+                <div class="knowledge-section-subtitle">{subtitle}</div>
+            </div>
+            <div class="knowledge-table-wrap">
+                {if rows.is_empty() {
+                    view! { <div class="knowledge-empty-row">"No rows available."</div> }.into_any()
+                } else {
+                    view! {
+                        <table class="knowledge-table">
+                            <tbody>
+                                {rows.iter().map(|row| {
+                                    view! {
+                                        <tr>
+                                            <td class="knowledge-table-label">{row.label.clone()}</td>
+                                            <td class="knowledge-table-count">{row.count}</td>
+                                        </tr>
+                                    }
+                                }).collect_view()}
+                            </tbody>
+                        </table>
+                    }.into_any()
+                }}
+            </div>
+        </section>
+    }
+    .into_any()
+}
+
+fn render_knowledge_state(
+    title: &'static str,
+    subtitle: &'static str,
+    db_path: &str,
+    generated_at_label: &str,
+    message: &str,
+) -> leptos::prelude::AnyView {
+    view! {
+        <div class="knowledge-layout">
+            <div class="knowledge-header">
+                <div>
+                    <div class="terminal-title">{title}</div>
+                    <div class="terminal-subtitle">{subtitle}</div>
+                </div>
+                <div class="knowledge-meta">
+                    <div><strong>"Database:"</strong> " " {db_path.to_string()}</div>
+                    <div><strong>"Generated:"</strong> " " {generated_at_label.to_string()}</div>
+                </div>
+            </div>
+            <div class="knowledge-state-card">
+                <div class="knowledge-state-title">{title}</div>
+                <div class="knowledge-state-body">{message.to_string()}</div>
+            </div>
+        </div>
+    }
+    .into_any()
 }

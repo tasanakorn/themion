@@ -4507,7 +4507,7 @@ dependencies = [
 
 [[package]]
 name = "themion-cli"
-version = "0.61.1"
+version = "0.62.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4534,7 +4534,7 @@ dependencies = [
 
 [[package]]
 name = "themion-core"
-version = "0.61.1"
+version = "0.62.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4554,16 +4554,18 @@ dependencies = [
 
 [[package]]
 name = "themion-web"
-version = "0.61.0"
+version = "0.62.0"
 dependencies = [
  "anyhow",
  "axum",
+ "chrono",
  "futures-util",
  "icons",
  "leptos",
  "leptos_router",
  "leptos_ui",
  "portable-pty",
+ "rusqlite",
  "serde",
  "serde_json",
  "tokio",
