@@ -218,8 +218,19 @@ struct CountRow {
     count: i64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WebPage {
+    KnowledgeStats,
+    KnowledgeQuery,
+    Example,
+    Agent,
+    Shell,
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct KnowledgeQueryParams {
+    page: Option<String>,
+    view: Option<String>,
     query: Option<String>,
     source_scope: Option<String>,
     mode: Option<String>,
@@ -602,9 +613,9 @@ fn resolve_shell() -> String {
 }
 
 async fn index(Query(params): Query<KnowledgeQueryParams>) -> Html<String> {
-    let start_on_query_tab = !KnowledgeQueryFormState::from_params(&params).is_effectively_empty();
+    let active_page = WebPage::from_params(&params);
     let knowledge_summary = load_knowledge_summary_page_data(&params);
-    Html(render_app_shell(&knowledge_summary, start_on_query_tab))
+    Html(render_app_shell(&knowledge_summary, active_page))
 }
 
 async fn xterm_css() -> impl IntoResponse {
@@ -945,6 +956,30 @@ fn open_themion_db_handle(db_path: &Path) -> Option<std::sync::Arc<DbHandle>> {
     DbHandle::open(db_path).ok()
 }
 
+impl WebPage {
+    fn from_params(params: &KnowledgeQueryParams) -> Self {
+        match params.page.as_deref().map(str::trim) {
+            Some("example") => Self::Example,
+            Some("agent") => Self::Agent,
+            Some("shell") => Self::Shell,
+            Some("knowledge") => {
+                if matches!(params.view.as_deref().map(str::trim), Some("query")) {
+                    Self::KnowledgeQuery
+                } else {
+                    Self::KnowledgeStats
+                }
+            }
+            _ => {
+                if !KnowledgeQueryFormState::from_params(params).is_effectively_empty() {
+                    Self::KnowledgeQuery
+                } else {
+                    Self::KnowledgeStats
+                }
+            }
+        }
+    }
+}
+
 impl KnowledgeQueryFormState {
     fn from_params(params: &KnowledgeQueryParams) -> Self {
         Self {
@@ -1237,8 +1272,8 @@ fn ratio_label(numerator: i64, denominator: i64) -> String {
     format!("{:.2} edges per node", numerator as f64 / denominator as f64)
 }
 
-fn render_app_shell(knowledge_summary: &KnowledgeSummaryPageData, start_on_query_tab: bool) -> String {
-    let body = AppShell(AppShellProps { knowledge_summary: knowledge_summary.clone(), start_on_query_tab }).to_html();
+fn render_app_shell(knowledge_summary: &KnowledgeSummaryPageData, active_page: WebPage) -> String {
+    let body = AppShell(AppShellProps { knowledge_summary: knowledge_summary.clone(), active_page }).to_html();
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\" /><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" /><title>Themion Web</title><style>{}</style><style>{}</style></head><body>{}<script>{}</script><script>{}</script></body></html>",
         APP_CSS,
@@ -1250,19 +1285,19 @@ fn render_app_shell(knowledge_summary: &KnowledgeSummaryPageData, start_on_query
 }
 
 #[component]
-fn AppShell(knowledge_summary: KnowledgeSummaryPageData, start_on_query_tab: bool) -> impl IntoView {
+fn AppShell(knowledge_summary: KnowledgeSummaryPageData, active_page: WebPage) -> impl IntoView {
     use crate::components::ui::card::Card;
     let knowledge_stats = knowledge_summary.clone();
     let knowledge_query = knowledge_summary.clone();
 
     view! {
         <main class="app-shell">
-            <input id="nav-dashboard" class="nav-radio" type="radio" name="sidebar-page" checked={!start_on_query_tab}/>
-            <input id="nav-knowledge-stats" class="nav-radio" type="radio" name="sidebar-page" checked={!start_on_query_tab}/>
-            <input id="nav-knowledge-query" class="nav-radio" type="radio" name="sidebar-page" checked={start_on_query_tab}/>
-            <input id="nav-example" class="nav-radio" type="radio" name="sidebar-page"/>
-            <input id="nav-agent" class="nav-radio" type="radio" name="sidebar-page"/>
-            <input id="nav-shell" class="nav-radio" type="radio" name="sidebar-page"/>
+            <input id="nav-dashboard" class="nav-radio" type="radio" name="sidebar-page" checked={matches!(active_page, WebPage::KnowledgeStats)}/>
+            <input id="nav-knowledge-stats" class="nav-radio" type="radio" name="sidebar-page" checked={matches!(active_page, WebPage::KnowledgeStats)}/>
+            <input id="nav-knowledge-query" class="nav-radio" type="radio" name="sidebar-page" checked={matches!(active_page, WebPage::KnowledgeQuery)}/>
+            <input id="nav-example" class="nav-radio" type="radio" name="sidebar-page" checked={matches!(active_page, WebPage::Example)}/>
+            <input id="nav-agent" class="nav-radio" type="radio" name="sidebar-page" checked={matches!(active_page, WebPage::Agent)}/>
+            <input id="nav-shell" class="nav-radio" type="radio" name="sidebar-page" checked={matches!(active_page, WebPage::Shell)}/>
 
             <div id="workspace" class="workspace">
                 <aside id="sidebar" class="sidebar">
@@ -1271,8 +1306,11 @@ fn AppShell(knowledge_summary: KnowledgeSummaryPageData, start_on_query_tab: boo
                             <span class="sidebar-title">"Menu"</span>
                         </div>
                         <nav class="sidebar-body" aria-label="Sidebar menu">
-                            <label class="sidebar-item" for="nav-knowledge-stats">"Knowledge · Stats"</label>
-                            <label class="sidebar-item" for="nav-knowledge-query">"Knowledge · Query"</label>
+                            <div class="sidebar-group">
+                                <div class="sidebar-group-label">"Knowledge"</div>
+                                <label class="sidebar-item sidebar-item-child" for="nav-knowledge-stats">"Stats"</label>
+                                <label class="sidebar-item sidebar-item-child" for="nav-knowledge-query">"Query"</label>
+                            </div>
                             <label class="sidebar-item" for="nav-example">"Example"</label>
                             <label class="sidebar-item" for="nav-agent">"Agent"</label>
                             <label class="sidebar-item" for="nav-shell">"Shell"</label>
@@ -1482,6 +1520,8 @@ fn render_ready_knowledge_stats_page(
 
 fn build_query_href(form: &KnowledgeQueryFormState) -> String {
     let mut params = vec![
+        "page=knowledge".to_string(),
+        "view=query".to_string(),
         format!("source_scope={}", encode_query_value(form.source_scope.as_param_value())),
         format!("mode={}", encode_query_value(&format!("{:?}", form.mode).to_lowercase())),
         format!("limit={}", form.limit),
@@ -1504,7 +1544,7 @@ fn build_query_href(form: &KnowledgeQueryFormState) -> String {
     if !form.linked_node_id.trim().is_empty() {
         params.push(format!("linked_node_id={}", encode_query_value(form.linked_node_id.trim())));
     }
-    format!("/?{}#knowledge-query", params.join("&"))
+    format!("/?{}", params.join("&"))
 }
 
 enum QueryPivotKind {

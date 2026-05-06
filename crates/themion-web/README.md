@@ -7,7 +7,9 @@ Local browser surface for Themion hosted by a dedicated `themion-web` binary.
 This crate currently provides:
 - a self-contained Axum server with SSR-rendered Leptos UI
 - a separate `themion-web` executable
+- a mixed sidebar navigation model with standalone items plus grouped sections such as `Knowledge` → `Stats` and `Knowledge` → `Query`
 - a read-only Project Memory summary page sourced directly from the active SQLite `system.db` file
+- a browser query page backed by shared `themion-core` `unified_search` execution using direct-linkable URL state
 - browser shell sessions backed by `portable-pty`
 - bundled `xterm.js` terminal rendering over websocket transport
 - persistent in-process terminal sessions with reconnect and multi-tab support

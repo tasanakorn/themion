@@ -101,8 +101,23 @@ button {
 .sidebar-body {
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
+  gap: 0.35rem;
   padding: 0.35rem;
+}
+
+.sidebar-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.sidebar-group-label {
+  padding: 0.35rem 0.55rem 0.15rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .sidebar-item,
@@ -125,6 +140,11 @@ button {
   font-size: 0.82rem;
 }
 
+.sidebar-item-child {
+  margin-left: 0.7rem;
+  width: calc(100% - 0.7rem);
+}
+
 .sidebar-item:hover {
   background: var(--accent);
   color: var(--foreground);
@@ -136,6 +156,11 @@ button {
 #nav-agent:checked ~ .workspace .sidebar label[for="nav-agent"],
 #nav-shell:checked ~ .workspace .sidebar label[for="nav-shell"] {
   background: var(--accent);
+  color: var(--foreground);
+}
+
+#nav-knowledge-stats:checked ~ .workspace .sidebar .sidebar-group-label,
+#nav-knowledge-query:checked ~ .workspace .sidebar .sidebar-group-label {
   color: var(--foreground);
 }
 
