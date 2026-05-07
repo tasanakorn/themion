@@ -682,3 +682,224 @@ button {
 .knowledge-pivot-link:hover {
   text-decoration: underline;
 }
+
+.agent-page {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.agent-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.7rem 0.7rem 0.4rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.agent-status {
+  padding: 0.45rem 0.7rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.agent-status[data-state="connected"] {
+  color: #86efac;
+}
+
+.agent-status[data-state="connecting"] {
+  color: #fde68a;
+}
+
+.agent-status[data-state="error"] {
+  color: #fca5a5;
+}
+
+.agent-layout {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+}
+
+.agent-sidebar {
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-sidebar-head {
+  padding: 0.8rem 0.7rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.agent-roster {
+  min-height: 0;
+  overflow: auto;
+  padding: 0.55rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.agent-roster-item {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(15, 23, 42, 0.34);
+  color: var(--foreground);
+  border-radius: 0.7rem;
+  padding: 0.7rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.agent-roster-item:hover,
+.agent-roster-item.is-active {
+  background: rgba(51, 65, 85, 0.62);
+  border-color: rgba(148, 163, 184, 0.38);
+}
+
+.agent-roster-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.agent-roster-label {
+  font-weight: 700;
+}
+
+.agent-roster-status {
+  font-size: 0.75rem;
+  color: var(--muted);
+  text-transform: lowercase;
+}
+
+.agent-roster-status[data-state="busy"],
+.agent-roster-status[data-state="running"] {
+  color: #fde68a;
+}
+
+.agent-roster-status[data-state="error"] {
+  color: #fca5a5;
+}
+
+.agent-roster-meta,
+.agent-details {
+  margin-top: 0.35rem;
+  font-size: 0.78rem;
+  color: rgba(226, 232, 240, 0.72);
+  line-height: 1.45;
+}
+
+.agent-main {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.agent-details {
+  margin-top: 0;
+  padding: 0.7rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.agent-transcript {
+  min-height: 0;
+  overflow: auto;
+  padding: 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.agent-transcript-row {
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 0.75rem;
+  padding: 0.75rem;
+  background: rgba(15, 23, 42, 0.28);
+}
+
+.agent-transcript-row.is-user {
+  border-color: rgba(59, 130, 246, 0.28);
+}
+
+.agent-transcript-row.is-assistant {
+  border-color: rgba(134, 239, 172, 0.2);
+}
+
+.agent-transcript-row.is-error {
+  border-color: rgba(252, 165, 165, 0.28);
+}
+
+.agent-transcript-kind {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: rgba(148, 163, 184, 0.88);
+}
+
+.agent-transcript-text {
+  margin: 0.45rem 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  line-height: 1.45;
+  color: rgba(248, 250, 252, 0.94);
+}
+
+.agent-composer-form {
+  border-top: 1px solid var(--border);
+  padding: 0.7rem;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.agent-composer {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(15, 23, 42, 0.72);
+  color: #f8fafc;
+  border-radius: 0.6rem;
+  padding: 0.75rem;
+  font: inherit;
+}
+
+.agent-composer:disabled {
+  opacity: 0.65;
+}
+
+.agent-composer-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.agent-empty {
+  color: rgba(226, 232, 240, 0.68);
+  font-size: 0.9rem;
+}
+
+@media (max-width: 900px) {
+  .agent-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .agent-sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .agent-toolbar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+.agent-warning {
+  margin-top: 0.45rem;
+  font-size: 0.76rem;
+  color: #fde68a;
+  line-height: 1.4;
+}

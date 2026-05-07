@@ -14,6 +14,8 @@ Active and recent product requirements documents live in `docs/prd/`. Older impl
 
 | ID      | Title                                                                                                       | Status        | Version | Scope                                    |
 | ------- | ----------------------------------------------------------------------------------------------------------- | ------------- | ------- | ---------------------------------------- |
+| PRD-106 | [Web Interface as a `themion-cli --web` I/O Layer](prd/prd-106-web-interface-as-themion-cli-web-io-layer.md) | Proposed | v0.65.0 | `themion-cli`, `themion-core`, selected reusable web assets, docs; make the browser a CLI-owned local I/O layer instead of a separate runtime product |
+| PRD-105 | [Web Interface Delivered Through `themion-cli --web`](prd/prd-105-lite-web-agent-surface-for-themion-web.md) | Canceled | v0.64.0 | historical `themion-web` direction, docs; canceled because future web work should plug into `themion-cli` as another local I/O layer |
 | PRD-104 | [Mixed Single-Level and Two-Level Left Sidebar Navigation for Themion Web](prd/prd-104-mixed-single-level-and-two-level-left-sidebar-navigation-for-themion-web.md) | Implemented | v0.63.0 | `themion-web`, docs; mixed sidebar navigation with grouped knowledge pages and direct-linkable page/view URL state |
 | PRD-103 | [Query-Driven Knowledge Page for Themion Web](prd/prd-103-query-driven-knowledge-page-for-themion-web.md) | Implemented | v0.63.0 | `themion-web`, `themion-core`, docs; shared typed `unified_search` execution with summary pivots, direct-linkable query state, and memory-first web default |
 | PRD-102 | [Overall Project Memory and Knowledge Summary via Direct Database Query](prd/prd-102-overall-project-memory-knowledge-summary-via-direct-db-query.md) | Implemented | v0.62.0 | `themion-web`, docs |
@@ -40,7 +42,7 @@ Active and recent product requirements documents live in `docs/prd/`. Older impl
 | PRD-081 | [Single-Instance Multi-Agent Team Structure and Agent Membership Tools](prd/prd-081-single-instance-multi-agent-team-structure-and-agent-membership-tools.md) | Implemented | v0.53.0 | `themion-core`, `themion-cli`, docs |
 | PRD-080 | [Rename the Primary Agent Identity from `main` to `master`](prd/prd-080-rename-primary-agent-main-to-master.md) | Implemented | v0.52.0 | `themion-core`, `themion-cli`, docs |
 | PRD-079 | [Codex-Like User-Shell Execution Mode for Shell Tooling](prd/prd-079-codex-like-user-shell-execution-mode.md) | Implemented | v0.51.0 | `themion-core`, docs |
-| PRD-078 | [Idle Watchdog for Background Agent Follow-Up and Pending Board-Note Injection](prd/prd-078-idle-watchdog-for-background-agent-follow-up-and-board-note-injection.md) | Implemented | v0.50.0 | `themion-core`, `themion-cli`, docs |
+| PRD-078 | [Idle Watchdog for Background Agent Follow-Up and Pending Board-Note Injection](prd/prd-078-idle-watchdog-for-background-agent-follow-up-and-pending-board-note-injection.md) | Implemented | v0.50.0 | `themion-core`, `themion-cli`, docs |
 | PRD-077 | [Reset Temporary Model Override When Switching Session Profile](prd/prd-077-reset-temporary-model-override-when-switching-session-profile.md) | Implemented | v0.49.1 | `themion-cli`, docs |
 | PRD-076 | [Temporary Session-Only Profile and Model Switching](prd/prd-076-temporary-session-profile-or-model-switch.md) | Implemented | v0.49.0 | `themion-cli`, `themion-core`, docs |
 | PRD-075 | [Cap Prompt History Replay at `T-7`](prd/prd-075-cap-prompt-history-replay-at-t-7.md) | Implemented | v0.48.2 | `themion-core`, `themion-cli`, docs |
@@ -66,8 +68,8 @@ Active and recent product requirements documents live in `docs/prd/`. Older impl
 | PRD-055 | [Fix TUI Input Dirty Detection for Non-ASCII Typing and Paste-Burst Flushes](prd/prd-055-fix-tui-input-dirty-detection-for-non-ascii-and-paste-burst.md) | Implemented | v0.34.2 | `themion-cli`, docs |
 | PRD-054 | [Rename Shared CLI Application Runtime Type to `AppState`](prd/prd-054-rename-shared-cli-app-runtime-to-app-state.md) | Implemented | v0.34.1 | `themion-cli`, docs |
 | PRD-053 | [Tighten Tokio Runtime Topology Semantics and Remove Remaining TUI-Orchestration Leakage](prd/prd-053-tighten-tokio-runtime-topology-and-tui-layering.md) | Implemented | v0.34.0 | `themion-cli`, docs |
-| PRD-052 | [Local System Inspection Tool for Runtime, Tooling, and Provider Readiness](prd/prd-052-tool-and-model-self-healthcheck.md) | Implemented | v0.33.0 | `themion-core`, `themion-cli`, docs |
-| PRD-051 | [Separate Shared Application Runtime from TUI Presentation and Introduce Headless Mode](prd/prd-051-separate-shared-application-runtime-and-introduce-headless-mode.md) | Implemented | v0.32.0 | `themion-cli`, docs |
+| PRD-052 | [Local System Inspection Tool for Runtime, Tooling, and Provider Readiness](prd-052-tool-and-model-self-healthcheck.md) | Implemented | v0.33.0 | `themion-core`, `themion-cli`, docs |
+| PRD-051 | [Separate Shared Application Runtime from TUI Presentation and Introduce Headless Mode](prd-051-separate-shared-application-runtime-and-introduce-headless-mode.md) | Implemented | v0.32.0 | `themion-cli`, docs |
 | PRD-050 | [Reorganize Tokio Runtime Execution into Domain-Specific Pools](prd/archive/prd-050-reorganize-tokio-runtime-pools.md) | Implemented | v0.31.0 | `themion-cli`, `themion-core`, docs |
 | PRD-049 | [Project Memory and Global Knowledge Naming for Durable Knowledge Tools](prd/archive/prd-049-project-memory-and-global-knowledge-naming.md) | Implemented | v0.30.0 | `themion-core`, `themion-cli`, docs |
 | PRD-048 | [Remove Long Navigation Shortcut Hints from the TUI Statusline](prd/archive/prd-048-remove-navigation-shortcut-hints-from-statusline.md) | Implemented | v0.29.3 | `themion-cli`, docs |
@@ -85,7 +87,7 @@ Active and recent product requirements documents live in `docs/prd/`. Older impl
 | PRD-036 | [Prompt Guidance for Self-Note Creation Beyond Simple Q&A](prd/archive/prd-036-prompt-guidance-for-self-note-creation-beyond-simple-qa.md) | Implemented | v0.22.0 | `themion-core`, docs |
 | PRD-035 | [Add `blocked` Board Column with Cooldown-Aware Revisit Semantics](prd/archive/prd-035-blocked-board-column-and-cooldown.md) | Implemented | v0.21.0 | `themion-core`, `themion-cli`, docs |
 | PRD-034 | [Note-First Multi-Agent Collaboration and Done Mentions](prd/archive/prd-034-note-first-multi-agent-collaboration-and-done-mentions.md) | Implemented | v0.20.0 | `themion-core`, `themion-cli`, docs |
-| PRD-033 | [Note Injection Should Present Note Identity and Metadata in the Initial Prompt](prd/archive/prd-033-note-injection-metadata-first-prompting.md) | Implemented | v0.19.0 | `themion-core`, `themion-cli`, docs |
+| PRD-033 | [Note Injection Should Present Note Identity and Metadata in the Initial Prompt](prd/archive/prd-033-note-injection-metadata-first-prompting.md) | Implemented | v0.19.0 | `themion-core`, docs |
 | PRD-032 | [Stylos Network-Delivered Note Creation When `stylos` Feature Is Enabled](prd/archive/prd-032-stylos-network-delivered-note-creation.md) | Implemented | v0.18.0 | `themion-core`, `themion-cli`, docs |
 | PRD-031 | [Rename Local Notes Tools from `stylos_` to `board_`](prd/archive/prd-031-rename-local-note-tools-to-board-prefix.md) | Implemented | v0.17.0 | `themion-core`, `themion-cli`, docs |
 | PRD-030 | [Stylos Notes Table Identifier Hardening and Human-Friendly Slugs](prd/archive/prd-030-stylos-notes-table-uuid-and-slug.md) | Implemented | v0.16.1 | `themion-core`, `themion-cli`, docs |

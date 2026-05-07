@@ -1,138 +1,47 @@
 pub mod components;
+mod agent_runtime;
+mod terminal_runtime;
+mod web_socket;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use axum::body::Body;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::Query;
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::HeaderValue;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use chrono::{Local, TimeZone};
-use futures_util::stream::SplitSink;
-use futures_util::{SinkExt, StreamExt};
 use leptos::prelude::*;
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use rusqlite::{Connection, OpenFlags};
-use themion_core::db::DbHandle;
-use themion_core::memory::{HashtagMatch, UnifiedSearchMode, UnifiedSearchQuery, UnifiedSearchResponse, UnifiedSearchResult, UnifiedSearchSourceKind};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde::Deserialize;
 use std::env;
-use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread;
+use themion_core::db::DbHandle;
+use themion_core::memory::{
+    HashtagMatch, UnifiedSearchMode, UnifiedSearchQuery, UnifiedSearchResponse,
+    UnifiedSearchResult, UnifiedSearchSourceKind,
+};
 use tokio::runtime::{Builder, Runtime};
-use tokio::sync::{mpsc as tokio_mpsc, oneshot};
+use tokio::sync::oneshot;
+
+use crate::agent_runtime::AgentRuntimeService;
+use crate::web_socket::WebSocketServices;
 
 const APP_CSS: &str = include_str!("../style/app.css");
 const APP_JS: &str = include_str!("../style/app.js");
 const XTERM_CSS: &str = include_str!("../vendor/xterm/xterm.min.css");
 const XTERM_JS: &str = include_str!("../vendor/xterm/xterm.min.js");
-const JETBRAINS_MONO_NERD_FONT: &[u8] = include_bytes!("../assets/fonts/JetBrainsMonoNerdFont-Regular.ttf");
-const TERMINAL_ROUTE: &str = "/api/terminal/ws";
-const TERMINAL_SCROLLBACK_LIMIT_BYTES: usize = 262_144;
-const DEFAULT_TERMINAL_COLS: u16 = 120;
-const DEFAULT_TERMINAL_ROWS: u16 = 40;
+const JETBRAINS_MONO_NERD_FONT: &[u8] =
+    include_bytes!("../assets/fonts/JetBrainsMonoNerdFont-Regular.ttf");
+const SHARED_WS_ROUTE: &str = "/api/ws";
 const TOP_HASHTAG_LIMIT: usize = 10;
 const RECENT_ACTIVITY_LIMIT: usize = 12;
 
 #[derive(Clone)]
 struct AppState {
-    terminal_service: TerminalService,
-}
-
-#[derive(Clone)]
-struct TerminalService {
-    request_tx: mpsc::Sender<TerminalRequest>,
-}
-
-enum TerminalRequest {
-    CreateTerminal {
-        response_tx: oneshot::Sender<Result<TerminalDescriptor>>,
-    },
-    ListTerminals {
-        response_tx: oneshot::Sender<Result<Vec<TerminalDescriptor>>>,
-    },
-    AttachTerminal {
-        terminal_id: u64,
-        response_tx: oneshot::Sender<Result<TerminalAttachHandle>>,
-    },
-    Input {
-        terminal_id: u64,
-        data: Vec<u8>,
-        response_tx: oneshot::Sender<Result<()>>,
-    },
-    Resize {
-        terminal_id: u64,
-        cols: u16,
-        rows: u16,
-        response_tx: oneshot::Sender<Result<()>>,
-    },
-    CloseTerminal {
-        terminal_id: u64,
-        response_tx: oneshot::Sender<Result<()>>,
-    },
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct TerminalDescriptor {
-    terminal_id: u64,
-    label: String,
-}
-
-struct TerminalAttachHandle {
-    descriptor: TerminalDescriptor,
-    scrollback: String,
-    output_rx: tokio_mpsc::UnboundedReceiver<String>,
-}
-
-struct TerminalRegistry {
-    next_terminal_id: AtomicU64,
-    shell: String,
-    cwd: Option<String>,
-    terminals: Mutex<HashMap<u64, TerminalEntry>>,
-}
-
-struct TerminalEntry {
-    descriptor: TerminalDescriptor,
-    input_tx: tokio_mpsc::UnboundedSender<Vec<u8>>,
-    resize_tx: tokio_mpsc::UnboundedSender<TerminalResize>,
-    subscribers: Vec<tokio_mpsc::UnboundedSender<String>>,
-    scrollback: String,
-    _child: Box<dyn Child + Send + Sync>,
-}
-
-#[derive(Clone, Copy)]
-struct TerminalResize {
-    cols: u16,
-    rows: u16,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ClientSocketMessage {
-    CreateTerminal,
-    ListTerminals,
-    AttachTerminal { terminal_id: u64 },
-    Input { terminal_id: u64, data: String },
-    Resize { terminal_id: u64, cols: u16, rows: u16 },
-    CloseTerminal { terminal_id: u64 },
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ServerSocketMessage {
-    TerminalList { terminals: Vec<TerminalDescriptor> },
-    TerminalCreated { terminal: TerminalDescriptor },
-    TerminalAttached { terminal: TerminalDescriptor, scrollback: String },
-    TerminalOutput { terminal_id: u64, data: String },
-    TerminalClosed { terminal_id: u64 },
-    Error { message: String },
+    ws_services: WebSocketServices,
 }
 
 #[derive(Clone, Debug)]
@@ -256,34 +165,25 @@ fn main() -> Result<()> {
         .parse()
         .with_context(|| format!("invalid THEMION_WEB_BIND '{}'", bind))?;
 
-    let (background_ready_tx, background_ready_rx) = oneshot::channel();
-    let background_thread = spawn_background_service_runtime(background_ready_tx)?;
-    let terminal_service = background_ready_rx
-        .blocking_recv()
-        .context("background service runtime exited before startup completed")??;
-
-    let app_state = AppState { terminal_service };
+    let terminal_service = start_terminal_runtime()?;
     let web_runtime = build_web_runtime()?;
-    let web_result = web_runtime.block_on(run_web_server(addr, app_state));
+    let agent_runtime = web_runtime.block_on(start_agent_runtime())?;
+    let app_state = AppState {
+        ws_services: WebSocketServices {
+            terminal: terminal_service,
+            agent: agent_runtime,
+        },
+    };
 
-    drop(web_runtime);
-    background_thread
-        .join()
-        .map_err(|_| anyhow!("background service runtime thread panicked"))??;
-
-    web_result
+    web_runtime.block_on(run_web_server(addr, app_state))
 }
 
-fn spawn_background_service_runtime(
-    ready_tx: oneshot::Sender<Result<TerminalService>>,
-) -> Result<thread::JoinHandle<Result<()>>> {
-    thread::Builder::new()
-        .name("themion-web-background".to_string())
-        .spawn(move || {
-            let runtime = build_background_runtime()?;
-            runtime.block_on(run_background_services(ready_tx))
-        })
-        .context("failed to spawn background service runtime thread")
+fn start_terminal_runtime() -> Result<terminal_runtime::TerminalService> {
+    let (background_ready_tx, background_ready_rx) = oneshot::channel();
+    let _background_thread = terminal_runtime::spawn_background_service_runtime(background_ready_tx)?;
+    background_ready_rx
+        .blocking_recv()
+        .context("background service runtime exited before startup completed")?
 }
 
 fn build_web_runtime() -> Result<Runtime> {
@@ -294,12 +194,8 @@ fn build_web_runtime() -> Result<Runtime> {
         .context("failed to build web runtime")
 }
 
-fn build_background_runtime() -> Result<Runtime> {
-    Builder::new_multi_thread()
-        .enable_all()
-        .thread_name("themion-web-background")
-        .build()
-        .context("failed to build background service runtime")
+async fn start_agent_runtime() -> Result<AgentRuntimeService> {
+    agent_runtime::start_agent_runtime().await
 }
 
 async fn run_web_server(addr: SocketAddr, app_state: AppState) -> Result<()> {
@@ -307,309 +203,17 @@ async fn run_web_server(addr: SocketAddr, app_state: AppState) -> Result<()> {
         .route("/", get(index))
         .route("/assets/xterm.css", get(xterm_css))
         .route("/assets/xterm.js", get(xterm_js))
-        .route("/assets/fonts/JetBrainsMonoNerdFont-Regular.ttf", get(jetbrains_mono_nerd_font))
-        .route(TERMINAL_ROUTE, get(terminal_ws))
+        .route(
+            "/assets/fonts/JetBrainsMonoNerdFont-Regular.ttf",
+            get(jetbrains_mono_nerd_font),
+        )
+        .route(SHARED_WS_ROUTE, get(shared_ws))
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("themion-web listening on http://{}", listener.local_addr()?);
     axum::serve(listener, app).await?;
     Ok(())
-}
-
-async fn run_background_services(
-    ready_tx: oneshot::Sender<Result<TerminalService>>,
-) -> Result<()> {
-    let registry = Arc::new(TerminalRegistry::new()?);
-    let (request_tx, request_rx) = mpsc::channel::<TerminalRequest>();
-    let service = TerminalService { request_tx };
-    let _ = ready_tx.send(Ok(service));
-    process_terminal_requests(registry, request_rx).await
-}
-
-async fn process_terminal_requests(
-    registry: Arc<TerminalRegistry>,
-    request_rx: mpsc::Receiver<TerminalRequest>,
-) -> Result<()> {
-    while let Ok(request) = request_rx.recv() {
-        match request {
-            TerminalRequest::CreateTerminal { response_tx } => {
-                let _ = response_tx.send(registry.create_terminal());
-            }
-            TerminalRequest::ListTerminals { response_tx } => {
-                let _ = response_tx.send(registry.list_terminals());
-            }
-            TerminalRequest::AttachTerminal {
-                terminal_id,
-                response_tx,
-            } => {
-                let _ = response_tx.send(registry.attach_terminal(terminal_id));
-            }
-            TerminalRequest::Input {
-                terminal_id,
-                data,
-                response_tx,
-            } => {
-                let _ = response_tx.send(registry.send_input(terminal_id, data));
-            }
-            TerminalRequest::Resize {
-                terminal_id,
-                cols,
-                rows,
-                response_tx,
-            } => {
-                let _ = response_tx.send(registry.resize_terminal(terminal_id, cols, rows));
-            }
-            TerminalRequest::CloseTerminal {
-                terminal_id,
-                response_tx,
-            } => {
-                let _ = response_tx.send(registry.close_terminal(terminal_id));
-            }
-        }
-    }
-
-    bail!("terminal service request channel closed")
-}
-
-impl TerminalRegistry {
-    fn new() -> Result<Self> {
-        Ok(Self {
-            next_terminal_id: AtomicU64::new(1),
-            shell: resolve_shell(),
-            cwd: env::current_dir()
-                .ok()
-                .and_then(|path| path.to_str().map(|value| value.to_string())),
-            terminals: Mutex::new(HashMap::new()),
-        })
-    }
-
-    fn create_terminal(self: &Arc<Self>) -> Result<TerminalDescriptor> {
-        let terminal_id = self.next_terminal_id.fetch_add(1, Ordering::Relaxed);
-        let descriptor = TerminalDescriptor {
-            terminal_id,
-            label: format!("Shell {terminal_id}"),
-        };
-
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows: DEFAULT_TERMINAL_ROWS,
-                cols: DEFAULT_TERMINAL_COLS,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .context("failed to open pty")?;
-
-        let mut cmd = CommandBuilder::new(&self.shell);
-        if let Some(cwd) = self.cwd.as_deref() {
-            cmd.cwd(cwd);
-        }
-
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .with_context(|| format!("failed to spawn shell '{}'", self.shell))?;
-
-        let writer = pair.master.take_writer().context("failed to get pty writer")?;
-        let reader = pair.master.try_clone_reader().context("failed to clone pty reader")?;
-        let resizer = pair.master;
-
-        let (input_tx, input_rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
-        let (output_tx, output_rx) = tokio_mpsc::unbounded_channel::<String>();
-        let (resize_tx, resize_rx) = tokio_mpsc::unbounded_channel::<TerminalResize>();
-
-        spawn_terminal_input_loop(writer, input_rx);
-        spawn_terminal_output_loop(reader, output_tx);
-        spawn_terminal_resize_loop(resizer, resize_rx);
-        spawn_terminal_broadcast_loop(terminal_id, Arc::clone(self), output_rx);
-
-        self.terminals
-            .lock()
-            .map_err(|_| anyhow!("terminal registry poisoned"))?
-            .insert(
-                terminal_id,
-                TerminalEntry {
-                    descriptor: descriptor.clone(),
-                    input_tx,
-                    resize_tx,
-                    subscribers: Vec::new(),
-                    scrollback: String::new(),
-                    _child: child,
-                },
-            );
-
-        Ok(descriptor)
-    }
-
-    fn list_terminals(&self) -> Result<Vec<TerminalDescriptor>> {
-        let mut terminals: Vec<_> = self
-            .terminals
-            .lock()
-            .map_err(|_| anyhow!("terminal registry poisoned"))?
-            .values()
-            .map(|entry| entry.descriptor.clone())
-            .collect();
-        terminals.sort_by_key(|terminal| terminal.terminal_id);
-        Ok(terminals)
-    }
-
-    fn attach_terminal(&self, terminal_id: u64) -> Result<TerminalAttachHandle> {
-        let (subscriber_tx, subscriber_rx) = tokio_mpsc::unbounded_channel::<String>();
-        let mut terminals = self
-            .terminals
-            .lock()
-            .map_err(|_| anyhow!("terminal registry poisoned"))?;
-        let entry = terminals
-            .get_mut(&terminal_id)
-            .ok_or_else(|| anyhow!("unknown terminal_id {}", terminal_id))?;
-        entry.subscribers.push(subscriber_tx);
-        Ok(TerminalAttachHandle {
-            descriptor: entry.descriptor.clone(),
-            scrollback: entry.scrollback.clone(),
-            output_rx: subscriber_rx,
-        })
-    }
-
-    fn send_input(&self, terminal_id: u64, data: Vec<u8>) -> Result<()> {
-        let terminals = self
-            .terminals
-            .lock()
-            .map_err(|_| anyhow!("terminal registry poisoned"))?;
-        let entry = terminals
-            .get(&terminal_id)
-            .ok_or_else(|| anyhow!("unknown terminal_id {}", terminal_id))?;
-        entry
-            .input_tx
-            .send(data)
-            .map_err(|_| anyhow!("terminal input channel closed"))
-    }
-
-    fn resize_terminal(&self, terminal_id: u64, cols: u16, rows: u16) -> Result<()> {
-        let terminals = self
-            .terminals
-            .lock()
-            .map_err(|_| anyhow!("terminal registry poisoned"))?;
-        let entry = terminals
-            .get(&terminal_id)
-            .ok_or_else(|| anyhow!("unknown terminal_id {}", terminal_id))?;
-        entry
-            .resize_tx
-            .send(TerminalResize { cols, rows })
-            .map_err(|_| anyhow!("terminal resize channel closed"))
-    }
-
-    fn close_terminal(&self, terminal_id: u64) -> Result<()> {
-        let mut terminals = self
-            .terminals
-            .lock()
-            .map_err(|_| anyhow!("terminal registry poisoned"))?;
-        terminals
-            .remove(&terminal_id)
-            .ok_or_else(|| anyhow!("unknown terminal_id {}", terminal_id))?;
-        Ok(())
-    }
-
-    fn fan_out_output(&self, terminal_id: u64, data: String) -> Result<()> {
-        let mut terminals = self
-            .terminals
-            .lock()
-            .map_err(|_| anyhow!("terminal registry poisoned"))?;
-        let Some(entry) = terminals.get_mut(&terminal_id) else {
-            return Ok(());
-        };
-
-        entry.scrollback.push_str(&data);
-        trim_scrollback(&mut entry.scrollback);
-        entry
-            .subscribers
-            .retain(|subscriber| subscriber.send(data.clone()).is_ok());
-        Ok(())
-    }
-}
-
-fn trim_scrollback(scrollback: &mut String) {
-    if scrollback.len() <= TERMINAL_SCROLLBACK_LIMIT_BYTES {
-        return;
-    }
-    let drop_bytes = scrollback.len() - TERMINAL_SCROLLBACK_LIMIT_BYTES;
-    let drop_at = scrollback
-        .char_indices()
-        .find_map(|(index, _)| (index >= drop_bytes).then_some(index))
-        .unwrap_or(scrollback.len());
-    scrollback.drain(..drop_at);
-}
-
-fn spawn_terminal_input_loop(
-    mut writer: Box<dyn Write + Send>,
-    mut input_rx: tokio_mpsc::UnboundedReceiver<Vec<u8>>,
-) {
-    tokio::task::spawn_blocking(move || {
-        while let Some(bytes) = input_rx.blocking_recv() {
-            if writer.write_all(&bytes).is_err() {
-                break;
-            }
-            if writer.flush().is_err() {
-                break;
-            }
-        }
-    });
-}
-
-fn spawn_terminal_output_loop(
-    mut reader: Box<dyn Read + Send>,
-    output_tx: tokio_mpsc::UnboundedSender<String>,
-) {
-    tokio::task::spawn_blocking(move || {
-        let mut buf = vec![0_u8; 8192];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(count) => {
-                    let text = String::from_utf8_lossy(&buf[..count]).to_string();
-                    if output_tx.send(text).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
-}
-
-fn spawn_terminal_resize_loop(
-    master: Box<dyn MasterPty + Send>,
-    mut resize_rx: tokio_mpsc::UnboundedReceiver<TerminalResize>,
-) {
-    tokio::spawn(async move {
-        while let Some(resize) = resize_rx.recv().await {
-            let _ = master.resize(PtySize {
-                rows: resize.rows,
-                cols: resize.cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            });
-        }
-    });
-}
-
-fn spawn_terminal_broadcast_loop(
-    terminal_id: u64,
-    registry: Arc<TerminalRegistry>,
-    mut output_rx: tokio_mpsc::UnboundedReceiver<String>,
-) {
-    tokio::spawn(async move {
-        while let Some(data) = output_rx.recv().await {
-            let _ = registry.fan_out_output(terminal_id, data);
-        }
-    });
-}
-
-fn resolve_shell() -> String {
-    env::var("SHELL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "/bin/sh".to_string())
 }
 
 async fn index(Query(params): Query<KnowledgeQueryParams>) -> Html<String> {
@@ -659,224 +263,11 @@ fn binary_asset_response(
     response
 }
 
-async fn terminal_ws(
-    ws: WebSocketUpgrade,
-    State(app_state): State<AppState>,
+async fn shared_ws(
+    ws: axum::extract::ws::WebSocketUpgrade,
+    axum::extract::State(app_state): axum::extract::State<AppState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| async move {
-        if let Err(error) = handle_terminal_socket(socket, app_state.terminal_service).await {
-            eprintln!("terminal websocket ended with error: {error:#}");
-        }
-    })
-}
-
-impl TerminalService {
-    async fn create_terminal(&self) -> Result<TerminalDescriptor> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.request_tx
-            .send(TerminalRequest::CreateTerminal { response_tx })
-            .map_err(|_| anyhow!("terminal service unavailable"))?;
-        response_rx
-            .await
-            .context("terminal service dropped create response")?
-    }
-
-    async fn list_terminals(&self) -> Result<Vec<TerminalDescriptor>> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.request_tx
-            .send(TerminalRequest::ListTerminals { response_tx })
-            .map_err(|_| anyhow!("terminal service unavailable"))?;
-        response_rx
-            .await
-            .context("terminal service dropped list response")?
-    }
-
-    async fn attach_terminal(&self, terminal_id: u64) -> Result<TerminalAttachHandle> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.request_tx
-            .send(TerminalRequest::AttachTerminal {
-                terminal_id,
-                response_tx,
-            })
-            .map_err(|_| anyhow!("terminal service unavailable"))?;
-        response_rx
-            .await
-            .context("terminal service dropped attach response")?
-    }
-
-    async fn send_input(&self, terminal_id: u64, data: Vec<u8>) -> Result<()> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.request_tx
-            .send(TerminalRequest::Input {
-                terminal_id,
-                data,
-                response_tx,
-            })
-            .map_err(|_| anyhow!("terminal service unavailable"))?;
-        response_rx
-            .await
-            .context("terminal service dropped input response")?
-    }
-
-    async fn resize_terminal(&self, terminal_id: u64, cols: u16, rows: u16) -> Result<()> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.request_tx
-            .send(TerminalRequest::Resize {
-                terminal_id,
-                cols,
-                rows,
-                response_tx,
-            })
-            .map_err(|_| anyhow!("terminal service unavailable"))?;
-        response_rx
-            .await
-            .context("terminal service dropped resize response")?
-    }
-
-    async fn close_terminal(&self, terminal_id: u64) -> Result<()> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.request_tx
-            .send(TerminalRequest::CloseTerminal {
-                terminal_id,
-                response_tx,
-            })
-            .map_err(|_| anyhow!("terminal service unavailable"))?;
-        response_rx
-            .await
-            .context("terminal service dropped close response")?
-    }
-}
-
-async fn handle_terminal_socket(socket: WebSocket, terminal_service: TerminalService) -> Result<()> {
-    let (sender, mut receiver) = socket.split();
-    let outbound = Arc::new(tokio::sync::Mutex::new(sender));
-
-    send_socket_message(
-        &outbound,
-        ServerSocketMessage::TerminalList {
-            terminals: terminal_service.list_terminals().await?,
-        },
-    )
-    .await?;
-
-    while let Some(message) = receiver.next().await {
-        match message? {
-            Message::Text(text) => {
-                if let Err(error) =
-                    handle_client_message(text.as_str(), &terminal_service, Arc::clone(&outbound)).await
-                {
-                    send_socket_message(
-                        &outbound,
-                        ServerSocketMessage::Error {
-                            message: error.to_string(),
-                        },
-                    )
-                    .await?;
-                }
-            }
-            Message::Binary(_) => {}
-            Message::Close(_) => break,
-            Message::Ping(_) | Message::Pong(_) => {}
-        }
-    }
-
-    Ok(())
-}
-
-async fn handle_client_message(
-    text: &str,
-    terminal_service: &TerminalService,
-    outbound: Arc<tokio::sync::Mutex<SplitSink<WebSocket, Message>>>,
-) -> Result<()> {
-    match serde_json::from_str::<ClientSocketMessage>(text)
-        .with_context(|| format!("invalid terminal websocket payload: {text}"))?
-    {
-        ClientSocketMessage::CreateTerminal => {
-            let terminal = terminal_service.create_terminal().await?;
-            send_socket_message(
-                &outbound,
-                ServerSocketMessage::TerminalCreated {
-                    terminal: terminal.clone(),
-                },
-            )
-            .await?;
-            attach_terminal_stream(terminal_service.clone(), Arc::clone(&outbound), terminal.terminal_id)
-                .await?;
-        }
-        ClientSocketMessage::ListTerminals => {
-            send_socket_message(
-                &outbound,
-                ServerSocketMessage::TerminalList {
-                    terminals: terminal_service.list_terminals().await?,
-                },
-            )
-            .await?;
-        }
-        ClientSocketMessage::AttachTerminal { terminal_id } => {
-            attach_terminal_stream(terminal_service.clone(), outbound, terminal_id).await?;
-        }
-        ClientSocketMessage::Input { terminal_id, data } => {
-            terminal_service.send_input(terminal_id, data.into_bytes()).await?;
-        }
-        ClientSocketMessage::Resize {
-            terminal_id,
-            cols,
-            rows,
-        } => {
-            terminal_service.resize_terminal(terminal_id, cols, rows).await?;
-        }
-        ClientSocketMessage::CloseTerminal { terminal_id } => {
-            terminal_service.close_terminal(terminal_id).await?;
-            send_socket_message(&outbound, ServerSocketMessage::TerminalClosed { terminal_id }).await?;
-        }
-    }
-
-    Ok(())
-}
-
-async fn attach_terminal_stream(
-    terminal_service: TerminalService,
-    outbound: Arc<tokio::sync::Mutex<SplitSink<WebSocket, Message>>>,
-    terminal_id: u64,
-) -> Result<()> {
-    let mut handle = terminal_service.attach_terminal(terminal_id).await?;
-    send_socket_message(
-        &outbound,
-        ServerSocketMessage::TerminalAttached {
-            terminal: handle.descriptor.clone(),
-            scrollback: handle.scrollback,
-        },
-    )
-    .await?;
-
-    tokio::spawn(async move {
-        while let Some(data) = handle.output_rx.recv().await {
-            if send_socket_message(
-                &outbound,
-                ServerSocketMessage::TerminalOutput { terminal_id, data },
-            )
-            .await
-            .is_err()
-            {
-                break;
-            }
-        }
-    });
-
-    Ok(())
-}
-
-async fn send_socket_message(
-    outbound: &tokio::sync::Mutex<SplitSink<WebSocket, Message>>,
-    message: ServerSocketMessage,
-) -> Result<()> {
-    let payload = serde_json::to_string(&message)?;
-    outbound
-        .lock()
-        .await
-        .send(Message::Text(payload.into()))
-        .await?;
-    Ok(())
+    web_socket::shared_ws(ws, app_state.ws_services)
 }
 
 fn load_knowledge_summary_page_data(params: &KnowledgeQueryParams) -> KnowledgeSummaryPageData {
@@ -1039,7 +430,9 @@ impl KnowledgeSourceScope {
         match value {
             "memory" => Some(Self::Memory),
             "chat_message" => Some(Self::ChatMessage),
-            "memory+chat_message" | "memory_chat_message" | "memory,chat_message" => Some(Self::MemoryAndChat),
+            "memory+chat_message" | "memory_chat_message" | "memory,chat_message" => {
+                Some(Self::MemoryAndChat)
+            }
             "default" | "omitted" => Some(Self::OmittedDefault),
             _ => None,
         }
@@ -1273,14 +666,14 @@ fn ratio_label(numerator: i64, denominator: i64) -> String {
 }
 
 fn render_app_shell(knowledge_summary: &KnowledgeSummaryPageData, active_page: WebPage) -> String {
-    let body = AppShell(AppShellProps { knowledge_summary: knowledge_summary.clone(), active_page }).to_html();
+    let body = AppShell(AppShellProps {
+        knowledge_summary: knowledge_summary.clone(),
+        active_page,
+    })
+    .to_html();
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\" /><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" /><title>Themion Web</title><style>{}</style><style>{}</style></head><body>{}<script>{}</script><script>{}</script></body></html>",
-        APP_CSS,
-        XTERM_CSS,
-        body,
-        XTERM_JS,
-        APP_JS,
+        APP_CSS, XTERM_CSS, body, XTERM_JS, APP_JS,
     )
 }
 
@@ -1356,8 +749,38 @@ fn AppShell(knowledge_summary: KnowledgeSummaryPageData, active_page: WebPage) -
                     </section>
 
                     <section class="page-panel page-agent">
-                        <Card class="page-surface">
-                            <div class="empty-page">"Agent"</div>
+                        <Card class="page-surface agent-page">
+                            <div class="agent-toolbar">
+                                <div>
+                                    <div id="agent-selected-title" class="terminal-title">"Web Agent"</div>
+                                    <div class="terminal-subtitle">"Browser-native chat surface backed by a web-owned runtime roster."</div>
+                                </div>
+                                <div class="terminal-actions">
+                                    <button id="agent-new" class="tab-button terminal-action" type="button">"New agent"</button>
+                                    <button id="agent-delete" class="tab-button terminal-action" type="button">"Delete agent"</button>
+                                    <button id="agent-reconnect" class="tab-button terminal-action" type="button">"Reconnect agent socket"</button>
+                                </div>
+                            </div>
+                            <div id="agent-status" class="agent-status" data-state="idle">"Connecting web agent runtime…"</div>
+                            <div class="agent-layout">
+                                <aside class="agent-sidebar">
+                                    <div class="agent-sidebar-head">
+                                        <div class="knowledge-section-title">"Agents"</div>
+                                        <div class="knowledge-section-subtitle">"Runtime-owned web roster"</div>
+                                    </div>
+                                    <div id="agent-roster" class="agent-roster"></div>
+                                </aside>
+                                <section class="agent-main">
+                                    <div id="agent-details" class="agent-details">"Select an agent to view details."</div>
+                                    <div id="agent-transcript" class="agent-transcript"></div>
+                                    <form id="agent-composer-form" class="agent-composer-form">
+                                        <textarea id="agent-composer" class="agent-composer" rows="6" placeholder="Send a prompt to the selected web agent"></textarea>
+                                        <div class="agent-composer-actions">
+                                            <button id="agent-submit" class="tab-button terminal-action" type="submit">"Send prompt"</button>
+                                        </div>
+                                    </form>
+                                </section>
+                            </div>
                         </Card>
                     </section>
 
@@ -1533,16 +956,25 @@ fn build_query_href(form: &KnowledgeQueryFormState) -> String {
         params.push(format!("hashtags={}", encode_query_value(&form.hashtags.join(", "))));
     }
     if !matches!(form.hashtag_match, HashtagMatch::Any) {
-        params.push(format!("hashtag_match={}", encode_query_value(hashtag_match_param(form.hashtag_match))));
+        params.push(format!(
+            "hashtag_match={}",
+            encode_query_value(hashtag_match_param(form.hashtag_match))
+        ));
     }
     if !form.node_type.trim().is_empty() {
         params.push(format!("node_type={}", encode_query_value(form.node_type.trim())));
     }
     if !form.relation_type.trim().is_empty() {
-        params.push(format!("relation_type={}", encode_query_value(form.relation_type.trim())));
+        params.push(format!(
+            "relation_type={}",
+            encode_query_value(form.relation_type.trim())
+        ));
     }
     if !form.linked_node_id.trim().is_empty() {
-        params.push(format!("linked_node_id={}", encode_query_value(form.linked_node_id.trim())));
+        params.push(format!(
+            "linked_node_id={}",
+            encode_query_value(form.linked_node_id.trim())
+        ));
     }
     format!("/?{}", params.join("&"))
 }
@@ -1609,10 +1041,18 @@ fn render_knowledge_query_page(data: &KnowledgeSummaryPageData) -> leptos::prelu
 fn render_knowledge_query_workspace(query: &KnowledgeQueryPageData) -> leptos::prelude::AnyView {
     let scope_label = query.form.source_scope.as_label();
     let submitted_scope_hint = match query.form.source_scope {
-        KnowledgeSourceScope::Memory => "Explicit memory-only default keeps this page focused on Project Memory.",
-        KnowledgeSourceScope::ChatMessage => "Explicit chat-message scope narrows the shared core search to transcript results.",
-        KnowledgeSourceScope::MemoryAndChat => "Explicit mixed scope searches Project Memory and chat messages together.",
-        KnowledgeSourceScope::OmittedDefault => "Omitted source_kinds preserves the canonical core default behavior.",
+        KnowledgeSourceScope::Memory => {
+            "Explicit memory-only default keeps this page focused on Project Memory."
+        }
+        KnowledgeSourceScope::ChatMessage => {
+            "Explicit chat-message scope narrows the shared core search to transcript results."
+        }
+        KnowledgeSourceScope::MemoryAndChat => {
+            "Explicit mixed scope searches Project Memory and chat messages together."
+        }
+        KnowledgeSourceScope::OmittedDefault => {
+            "Omitted source_kinds preserves the canonical core default behavior."
+        }
     };
     let mode_value = format!("{:?}", query.form.mode).to_lowercase();
 
