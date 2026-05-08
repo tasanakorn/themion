@@ -219,7 +219,7 @@ If the message body is shown, it should appear only through the same transcript 
 
 ## Implementation Notes
 
-Implemented in v0.66.0. The landed slice removes the non-idle rejection guard, adds a process-local FIFO queue per target agent with a 16 message limit and 10 minute TTL, extends `TalkReply` with delivery state/correlation/queue position fields, and drains queued talk through the normal incoming-prompt path when admission becomes available.
+Implemented in v0.66.0. The landed slice removes the non-idle rejection guard, adds a process-local FIFO queue per target agent with a 16 message limit and 10 minute TTL, extends `TalkReply` with delivery state/correlation/queue position fields, and drains queued talk through the normal incoming-prompt path when admission becomes available. A follow-up in the same version also handles the admission race where a target appears idle to Stylos but becomes busy before prompt intake: peer-message intake now requeues instead of emitting `rejected: local agent busy`.
 
 ## Migration
 

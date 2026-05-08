@@ -1,6 +1,8 @@
 use themion_core::db::{NoteColumn, NoteKind};
 
 const NOTE_PREFIX: &str = "type=stylos_note";
+#[cfg(feature = "stylos")]
+const PEER_MESSAGE_PREFIX: &str = "type=peer_message";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -77,4 +79,9 @@ pub fn build_board_note_prompt(
 #[cfg(feature = "stylos")]
 pub fn is_board_note_prompt(prompt: &str) -> bool {
     prompt.starts_with(NOTE_PREFIX)
+}
+
+#[cfg(feature = "stylos")]
+pub fn is_peer_message_prompt(prompt: &str) -> bool {
+    prompt.starts_with(PEER_MESSAGE_PREFIX)
 }

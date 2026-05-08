@@ -1705,6 +1705,76 @@ fn process_incoming_prompt_request(
         });
         return;
     }
+    let request_is_peer_message = crate::local_prompts::is_peer_message_prompt(&request.prompt);
+    let agent_busy_for_request = request
+        .agent_id
+        .as_deref()
+        .and_then(|agent_id| {
+            app.runtime
+                .agents
+                .iter()
+                .find(|agent| agent.agent_id == agent_id)
+        })
+        .map(|agent| {
+            agent.busy
+                || crate::app_runtime::incoming_prompt_request(
+                    &app.runtime.incoming_prompts,
+                    &agent.agent_id,
+                )
+                .is_some()
+        })
+        .unwrap_or(false);
+    if request_is_peer_message && agent_busy_for_request {
+        if let Some(handle) = app.runtime.stylos.as_ref() {
+            let agent_id = request
+                .agent_id
+                .clone()
+                .unwrap_or_else(|| "interactive".to_string());
+            let sender = request.from.clone().unwrap_or_else(|| "unknown sender".to_string());
+            let sender_agent = request.from_agent_id.clone();
+            let target = request.to.clone().unwrap_or_else(|| current_local_instance_id(app));
+            match handle.query_context().talk_queue().enqueue(
+                agent_id.clone(),
+                request.request_id.clone(),
+                sender.clone(),
+                sender_agent.clone(),
+                target.clone(),
+                request.prompt.clone(),
+            ) {
+                Ok(queued) => {
+                    app.push(crate::tui::Entry::RemoteEvent {
+                        agent_id: Some(agent_id.clone()),
+                        source: None,
+                        text: format!(
+                            "Stylos talk queued correlation_id={} from={} from_agent_id={} to={} to_agent_id={} queue_position={}",
+                            queued.correlation_id,
+                            sender,
+                            sender_agent.as_deref().unwrap_or("unknown"),
+                            target,
+                            agent_id,
+                            queued.queue_position,
+                        ),
+                    });
+                }
+                Err(reason) => {
+                    app.push(crate::tui::Entry::RemoteEvent {
+                        agent_id: Some(agent_id.clone()),
+                        source: None,
+                        text: format!(
+                            "Stylos talk rejected reason={} from={} from_agent_id={} to={} to_agent_id={}",
+                            reason,
+                            sender,
+                            sender_agent.as_deref().unwrap_or("unknown"),
+                            target,
+                            agent_id,
+                        ),
+                    });
+                }
+            }
+        }
+        return;
+    }
+
     let outcome = crate::app_runtime::plan_incoming_prompt(
         &crate::app_runtime::build_local_agent_status_entries(&app.runtime.agents, &app.runtime.incoming_prompts),
         &app.runtime.board_claims,

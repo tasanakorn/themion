@@ -2182,12 +2182,16 @@ fn render_instance_identifier(instance: Option<&str>) -> String {
 
 impl QueuedTalkMessage {
     pub(crate) fn into_incoming_prompt(self) -> IncomingPromptRequest {
-        let prompt = build_peer_message_prompt(
-            &self.from_instance,
-            &self.to_instance,
-            &self.to_agent_id,
-            &self.message,
-        );
+        let prompt = if crate::local_prompts::is_peer_message_prompt(&self.message) {
+            self.message.clone()
+        } else {
+            build_peer_message_prompt(
+                &self.from_instance,
+                &self.to_instance,
+                &self.to_agent_id,
+                &self.message,
+            )
+        };
         IncomingPromptRequest {
             prompt,
             source: IncomingPromptSource::RemoteStylos,
@@ -2382,6 +2386,25 @@ mod tests {
         assert!(prompt.contains("***QRU***"));
         assert!(prompt.contains("type=peer_message from=node-1:42 to=node-2:77 to_agent_id=master"));
         assert!(prompt.contains("hello"));
+    }
+
+    #[test]
+    fn queued_peer_prompt_is_not_double_wrapped() {
+        let prompt = build_peer_message_prompt("node-1:42", "node-2:77", "master", "hello");
+        let request = QueuedTalkMessage {
+            correlation_id: "talk-1".to_string(),
+            request_id: Some("request-1".to_string()),
+            from_instance: "node-1:42".to_string(),
+            from_agent_id: Some("smith-1".to_string()),
+            to_instance: "node-2:77".to_string(),
+            to_agent_id: "master".to_string(),
+            message: prompt.clone(),
+            enqueued_at_ms: 0,
+            expires_at_ms: QUEUED_TALK_TTL_MS,
+        }
+        .into_incoming_prompt();
+
+        assert_eq!(request.prompt, prompt);
     }
 
     #[test]
