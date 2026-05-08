@@ -30,6 +30,8 @@ pub(crate) enum AppRuntimeEvent {
     StylosCmd(crate::stylos::StylosCmdRequest),
     #[cfg(feature = "stylos")]
     IncomingPrompt(crate::local_prompts::IncomingPromptRequest),
+    #[cfg(feature = "stylos")]
+    DrainQueuedTalk { agent_id: String },
     WatchdogTick,
     #[cfg(feature = "stylos")]
     StylosEvent(String),
@@ -1174,6 +1176,61 @@ pub(crate) fn handle_incoming_prompt_event(
     process_incoming_prompt_request(app, request, app_tx);
 }
 
+#[cfg(feature = "stylos")]
+fn schedule_queued_talk_drain(app: &App, agent_id: &str) {
+    let tx = app.runtime.runtime_tx.clone();
+    let agent_id = agent_id.to_string();
+    app.runtime.background_domain().spawn(async move {
+        let _ = tx.send(AppRuntimeEvent::DrainQueuedTalk { agent_id });
+    });
+}
+
+#[cfg(feature = "stylos")]
+fn drain_one_queued_talk_for_agent(
+    app: &mut App,
+    agent_id: String,
+    app_tx: &mpsc::UnboundedSender<crate::tui::AppEvent>,
+) {
+    let Some(handle) = app.runtime.stylos.as_ref() else {
+        return;
+    };
+    let Some(index) = app.runtime.agents.iter().position(|h| h.agent_id == agent_id) else {
+        for item in handle.query_context().talk_queue().fail_all_for_agent(&agent_id) {
+            let _ = handle.query_context().submit_event(format!(
+                "Stylos talk failed correlation_id={} reason=target_agent_missing to_agent_id={}",
+                item.correlation_id, agent_id
+            ));
+        }
+        return;
+    };
+    if app.runtime.agents[index].busy
+        || crate::app_runtime::incoming_prompt_request(&app.runtime.incoming_prompts, &agent_id)
+            .is_some()
+    {
+        return;
+    }
+    let Some(item) = handle.query_context().talk_queue().pop_next(&agent_id) else {
+        return;
+    };
+    let correlation_id = item.correlation_id.clone();
+    let from = item.from_instance.clone();
+    let from_agent_id = item.from_agent_id.clone();
+    let to = item.to_instance.clone();
+    let to_agent_id = item.to_agent_id.clone();
+    let enqueued_at_ms = item.enqueued_at_ms;
+    let request = item.into_incoming_prompt();
+    let _ = handle.query_context().submit_event(format!(
+        "Stylos talk delivered correlation_id={} from={} from_agent_id={} to={} to_agent_id={} enqueued_at_ms={}",
+        correlation_id,
+        from,
+        from_agent_id.as_deref().unwrap_or("unknown"),
+        to,
+        to_agent_id,
+        enqueued_at_ms,
+    ));
+    process_incoming_prompt_request(app, request, app_tx);
+}
+
 
 pub(crate) fn process_agent_event(
     app: &mut App,
@@ -1312,12 +1369,13 @@ pub(crate) fn process_agent_event(
         }
         themion_core::agent::AgentEvent::TurnDone(stats) => {
             #[cfg(feature = "stylos")]
+            let completed_agent_index = app.runtime.agents.iter().position(|h| h.session_id == sid);
+            #[cfg(feature = "stylos")]
             {
-                let agent_index = app.runtime.agents.iter().position(|h| h.session_id == sid);
-                if let Some(agent_index) = agent_index {
+                if let Some(agent_index) = completed_agent_index {
                     maybe_emit_done_mention_for_completed_note(app, agent_index, app_tx);
                 }
-                if let (Some(agent_index), Some(handle)) = (agent_index, app.runtime.stylos.as_ref()) {
+                if let (Some(agent_index), Some(handle)) = (completed_agent_index, app.runtime.stylos.as_ref()) {
                     if let Some(remote) = crate::app_runtime::take_incoming_prompt_request(&mut app.runtime.incoming_prompts, &app.runtime.agents[agent_index].agent_id) {
                         if let Some(task_id) = remote.task_id {
                             let result_text = app.runtime.last_assistant_text.clone();
@@ -1345,6 +1403,11 @@ pub(crate) fn process_agent_event(
             app.push(crate::tui::Entry::Blank);
             app.runtime.activity_counters.agent_turn_completed_count += 1;
             app.runtime.agent_busy = runtime_any_agent_busy(&app.runtime) || app.runtime.agent_activity.is_some();
+            #[cfg(feature = "stylos")]
+            if let Some(agent_index) = completed_agent_index {
+                let agent_id = app.runtime.agents[agent_index].agent_id.clone();
+                schedule_queued_talk_drain(app, &agent_id);
+            }
             if let Some(last_api_call_tokens_in) = stats.last_api_call_tokens_in {
                 app.runtime.last_ctx_tokens = last_api_call_tokens_in;
             }
@@ -1728,6 +1791,16 @@ fn handle_watchdog_tick_local_event(app: &mut App) {
         if handle.busy || handle.has_active_incoming_prompt {
             continue;
         }
+        #[cfg(feature = "stylos")]
+        if app.runtime
+            .stylos
+            .as_ref()
+            .map(|stylos| stylos.query_context().talk_queue().count_for_agent(&agent_id) > 0)
+            .unwrap_or(false)
+        {
+            schedule_queued_talk_drain(app, &agent_id);
+            return;
+        }
         if let Some(no_pending_since) = app.runtime.watchdog_no_pending_since_by_agent.get(&agent_id) {
             if (no_pending_since.elapsed().as_millis() as u64)
                 < crate::board_runtime::WATCHDOG_NO_PENDING_COOLDOWN_MS_DEFAULT
@@ -1778,7 +1851,13 @@ pub(crate) async fn handle_runtime_event(
     _app_tx: &mpsc::UnboundedSender<crate::tui::AppEvent>,
 ) {
     match event {
-        AppRuntimeEvent::AgentReady(agent, sid) => handle_agent_ready_event(app, agent, sid, frame_requester),
+        AppRuntimeEvent::AgentReady(agent, sid) => {
+            handle_agent_ready_event(app, agent, sid, frame_requester);
+            #[cfg(feature = "stylos")]
+            if let Some(agent_id) = app.runtime.agents.iter().find(|h| h.session_id == sid).map(|h| h.agent_id.clone()) {
+                schedule_queued_talk_drain(app, &agent_id);
+            }
+        },
         AppRuntimeEvent::ShellComplete { output, exit_code } => {
             handle_shell_complete_event(app, output, exit_code, frame_requester)
         }
@@ -1786,6 +1865,8 @@ pub(crate) async fn handle_runtime_event(
         AppRuntimeEvent::StylosCmd(cmd) => handle_stylos_cmd_event(app, cmd, _app_tx),
         #[cfg(feature = "stylos")]
         AppRuntimeEvent::IncomingPrompt(request) => handle_incoming_prompt_event(app, request, _app_tx),
+        #[cfg(feature = "stylos")]
+        AppRuntimeEvent::DrainQueuedTalk { agent_id } => drain_one_queued_talk_for_agent(app, agent_id, _app_tx),
         #[cfg(feature = "stylos")]
         AppRuntimeEvent::StylosEvent(text) => {
             app.push(crate::tui::Entry::RemoteEvent {

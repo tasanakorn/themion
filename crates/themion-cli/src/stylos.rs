@@ -1,12 +1,12 @@
 #![cfg(feature = "stylos")]
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use themion_core::db::{CreateNoteArgs, NoteColumn, NoteKind};
 
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,8 @@ const TASK_RETENTION: Duration = Duration::from_secs(30 * 60);
 const MAX_WAIT_TIMEOUT_MS: u64 = 60_000;
 const DISCOVERY_QUERY_TIMEOUT_MS: u64 = 1_500;
 const TALK_POLL_INTERVAL_MS: u64 = 300;
+pub(crate) const MAX_QUEUED_TALK_PER_AGENT: usize = 16;
+pub(crate) const QUEUED_TALK_TTL_MS: u64 = 600_000;
 
 const PRIMARY_AGENT_ID: &str = "master";
 const PRIMARY_AGENT_ID_COMPAT_ALIAS: &str = "main";
@@ -215,6 +217,7 @@ pub struct StylosQueryContext {
     prompt_tx: mpsc::UnboundedSender<IncomingPromptRequest>,
     event_tx: mpsc::UnboundedSender<String>,
     task_registry: TaskRegistry,
+    talk_queue: TalkQueue,
     notes_db: Arc<themion_core::db::DbHandle>,
     local_instance: String,
 }
@@ -238,6 +241,10 @@ impl StylosQueryContext {
 
     pub fn notes_db(&self) -> &Arc<themion_core::db::DbHandle> {
         &self.notes_db
+    }
+
+    pub(crate) fn talk_queue(&self) -> &TalkQueue {
+        &self.talk_queue
     }
 
     pub fn local_instance(&self) -> &str {
@@ -595,6 +602,7 @@ impl StylosHandle {
                 prompt_tx,
                 event_tx,
                 task_registry: TaskRegistry::new(),
+                talk_queue: TalkQueue::default(),
                 notes_db,
                 local_instance: String::new(),
             },
@@ -798,6 +806,120 @@ struct TalkReply {
     request_id: Option<String>,
     correlation_id: Option<String>,
     reason: Option<String>,
+    delivery_state: String,
+    to_instance: String,
+    to_agent_id: String,
+    queue_position: Option<usize>,
+}
+
+
+#[derive(Clone, Debug)]
+pub(crate) struct QueuedTalkMessage {
+    pub correlation_id: String,
+    pub request_id: Option<String>,
+    pub from_instance: String,
+    pub from_agent_id: Option<String>,
+    pub to_instance: String,
+    pub to_agent_id: String,
+    pub message: String,
+    pub enqueued_at_ms: u64,
+    pub expires_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TalkQueue {
+    inner: Arc<std::sync::Mutex<HashMap<String, VecDeque<QueuedTalkMessage>>>>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TalkQueueEnqueueResult {
+    pub correlation_id: String,
+    pub queue_position: usize,
+}
+
+impl TalkQueue {
+    pub(crate) fn enqueue(
+        &self,
+        to_agent_id: String,
+        request_id: Option<String>,
+        from_instance: String,
+        from_agent_id: Option<String>,
+        to_instance: String,
+        message: String,
+    ) -> Result<TalkQueueEnqueueResult, String> {
+        let now_ms = unix_epoch_now_ms();
+        let mut inner = self.inner.lock().expect("talk queue lock");
+        let queue = inner.entry(to_agent_id.clone()).or_default();
+        queue.retain(|item| item.expires_at_ms > now_ms);
+        if queue.len() >= MAX_QUEUED_TALK_PER_AGENT {
+            return Err("queue_full".to_string());
+        }
+        let correlation_id = format!("talk-{}", Uuid::new_v4());
+        queue.push_back(QueuedTalkMessage {
+            correlation_id: correlation_id.clone(),
+            request_id,
+            from_instance,
+            from_agent_id,
+            to_instance,
+            to_agent_id,
+            message,
+            enqueued_at_ms: now_ms,
+            expires_at_ms: now_ms.saturating_add(QUEUED_TALK_TTL_MS),
+        });
+        Ok(TalkQueueEnqueueResult {
+            correlation_id,
+            queue_position: queue.len(),
+        })
+    }
+
+    pub(crate) fn pop_next(&self, to_agent_id: &str) -> Option<QueuedTalkMessage> {
+        let now_ms = unix_epoch_now_ms();
+        let mut inner = self.inner.lock().expect("talk queue lock");
+        let queue = inner.get_mut(to_agent_id)?;
+        while let Some(front) = queue.front() {
+            if front.expires_at_ms > now_ms {
+                break;
+            }
+            queue.pop_front();
+        }
+        let item = queue.pop_front();
+        if queue.is_empty() {
+            inner.remove(to_agent_id);
+        }
+        item
+    }
+
+    pub(crate) fn fail_all_for_agent(&self, to_agent_id: &str) -> Vec<QueuedTalkMessage> {
+        self.inner
+            .lock()
+            .expect("talk queue lock")
+            .remove(to_agent_id)
+            .map(VecDeque::into_iter)
+            .map(Iterator::collect)
+            .unwrap_or_default()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn count_for_agent(&self, to_agent_id: &str) -> usize {
+        let now_ms = unix_epoch_now_ms();
+        let mut inner = self.inner.lock().expect("talk queue lock");
+        let Some(queue) = inner.get_mut(to_agent_id) else {
+            return 0;
+        };
+        queue.retain(|item| item.expires_at_ms > now_ms);
+        let len = queue.len();
+        if len == 0 {
+            inner.remove(to_agent_id);
+        }
+        len
+    }
+}
+
+fn unix_epoch_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1044,6 +1166,7 @@ async fn start_inner(
     let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let task_registry = TaskRegistry::new();
+    let talk_queue = TalkQueue::default();
     let activity_counters = Arc::new(StylosActivityCounters::default());
     let snapshot_provider = shared_status_hub
         .unwrap_or_else(SharedStylosStatusHub::new)
@@ -1052,6 +1175,7 @@ async fn start_inner(
         prompt_tx,
         event_tx,
         task_registry: task_registry.clone(),
+        talk_queue: talk_queue.clone(),
         notes_db,
         local_instance: key_instance.clone(),
     };
@@ -1425,50 +1549,50 @@ async fn handle_talk_query(
     req: Option<TalkRequest>,
 ) -> TalkReply {
     let Some(req) = req else {
-        return TalkReply {
-            accepted: false,
-            agent_id: String::new(),
-            request_id: None,
-            correlation_id: None,
-            reason: Some("invalid_request".to_string()),
-        };
+        return rejected_talk_reply(
+            String::new(),
+            None,
+            "invalid_request",
+            query_context.local_instance().to_string(),
+        );
     };
     let normalized_to_agent_id = normalize_primary_agent_id(&req.to_agent_id).to_string();
+    let to_instance = req
+        .to
+        .clone()
+        .unwrap_or_else(|| query_context.local_instance().to_string());
     let wait_for_idle_timeout_ms = req.wait_for_idle_timeout_ms.unwrap_or(0);
     if wait_for_idle_timeout_ms > MAX_WAIT_TIMEOUT_MS {
-        return TalkReply {
-            accepted: false,
-            agent_id: normalized_to_agent_id.clone(),
-            request_id: req.request_id,
-            correlation_id: None,
-            reason: Some("wait_for_idle_timeout_ms_too_large".to_string()),
-        };
+        return rejected_talk_reply(
+            normalized_to_agent_id,
+            req.request_id,
+            "wait_for_idle_timeout_ms_too_large",
+            to_instance,
+        );
     }
 
     let deadline = Instant::now() + Duration::from_millis(wait_for_idle_timeout_ms);
 
     loop {
         let Some(snapshot) = current_snapshot(snapshot_provider).await else {
-            return TalkReply {
-                accepted: false,
-                agent_id: normalized_to_agent_id.clone(),
-                request_id: req.request_id,
-                correlation_id: None,
-                reason: Some("snapshot_unavailable".to_string()),
-            };
+            return rejected_talk_reply(
+                normalized_to_agent_id,
+                req.request_id,
+                "snapshot_unavailable",
+                to_instance,
+            );
         };
         let agent = snapshot
             .agents
             .into_iter()
             .find(|a| a.agent_id == normalized_to_agent_id);
         let Some(agent) = agent else {
-            return TalkReply {
-                accepted: false,
-                agent_id: normalized_to_agent_id.clone(),
-                request_id: req.request_id,
-                correlation_id: None,
-                reason: Some("not_found".to_string()),
-            };
+            return rejected_talk_reply(
+                normalized_to_agent_id,
+                req.request_id,
+                "not_found",
+                to_instance,
+            );
         };
 
         if matches!(agent.activity_status.as_str(), "idle" | "nap") {
@@ -1484,38 +1608,100 @@ async fn handle_talk_query(
                 request_id: req.request_id.clone(),
                 from: Some(sender.clone()),
                 from_agent_id: req.from_agent_id.clone(),
-                to: Some(target),
+                to: Some(target.clone()),
                 to_agent_id: Some(agent.agent_id.clone()),
             });
-            return TalkReply {
-                accepted: result.is_ok(),
-                agent_id: agent.agent_id,
-                request_id: req.request_id,
-                correlation_id: if result.is_ok() {
-                    Some(correlation_id)
-                } else {
-                    None
+            return match result {
+                Ok(()) => TalkReply {
+                    accepted: true,
+                    agent_id: agent.agent_id.clone(),
+                    request_id: req.request_id,
+                    correlation_id: Some(correlation_id),
+                    reason: None,
+                    delivery_state: "delivered_now".to_string(),
+                    to_instance: target,
+                    to_agent_id: agent.agent_id,
+                    queue_position: None,
                 },
-                reason: result.err(),
+                Err(reason) => rejected_talk_reply(
+                    agent.agent_id,
+                    req.request_id,
+                    reason,
+                    target,
+                ),
             };
         }
 
-        if wait_for_idle_timeout_ms == 0 || Instant::now() >= deadline {
-            return TalkReply {
-                accepted: false,
-                agent_id: agent.agent_id,
-                request_id: req.request_id,
-                correlation_id: None,
-                reason: Some(if wait_for_idle_timeout_ms == 0 {
-                    "agent_busy".to_string()
-                } else {
-                    "timed_out_waiting_for_idle".to_string()
-                }),
-            };
+        if wait_for_idle_timeout_ms > 0 && Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            tokio::time::sleep(remaining.min(Duration::from_millis(TALK_POLL_INTERVAL_MS))).await;
+            continue;
         }
 
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        tokio::time::sleep(remaining.min(Duration::from_millis(TALK_POLL_INTERVAL_MS))).await;
+        let sender = render_instance_identifier(req.from.as_deref());
+        let target = render_instance_identifier(req.to.as_deref());
+        let enqueue_result = query_context.talk_queue().enqueue(
+            agent.agent_id.clone(),
+            req.request_id.clone(),
+            sender.clone(),
+            req.from_agent_id.clone(),
+            target.clone(),
+            req.message.clone(),
+        );
+        return match enqueue_result {
+            Ok(queued) => {
+                let _ = query_context.submit_event(format!(
+                    "Stylos talk queued correlation_id={} from={} from_agent_id={} to={} to_agent_id={} queue_position={}",
+                    queued.correlation_id,
+                    sender,
+                    req.from_agent_id.as_deref().unwrap_or("unknown"),
+                    target,
+                    agent.agent_id,
+                    queued.queue_position,
+                ));
+                TalkReply {
+                    accepted: true,
+                    agent_id: agent.agent_id.clone(),
+                    request_id: req.request_id,
+                    correlation_id: Some(queued.correlation_id),
+                    reason: None,
+                    delivery_state: "queued".to_string(),
+                    to_instance: target,
+                    to_agent_id: agent.agent_id,
+                    queue_position: Some(queued.queue_position),
+                }
+            }
+            Err(reason) => {
+                let _ = query_context.submit_event(format!(
+                    "Stylos talk rejected reason={} from={} from_agent_id={} to={} to_agent_id={}",
+                    reason,
+                    sender,
+                    req.from_agent_id.as_deref().unwrap_or("unknown"),
+                    target,
+                    agent.agent_id,
+                ));
+                rejected_talk_reply(agent.agent_id, req.request_id, reason, target)
+            }
+        };
+    }
+}
+
+fn rejected_talk_reply(
+    agent_id: String,
+    request_id: Option<String>,
+    reason: impl Into<String>,
+    to_instance: String,
+) -> TalkReply {
+    TalkReply {
+        accepted: false,
+        to_agent_id: agent_id.clone(),
+        agent_id,
+        request_id,
+        correlation_id: None,
+        reason: Some(reason.into()),
+        delivery_state: "rejected".to_string(),
+        to_instance,
+        queue_position: None,
     }
 }
 
@@ -1992,6 +2178,28 @@ fn render_instance_identifier(instance: Option<&str>) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or("external")
         .to_string()
+}
+
+impl QueuedTalkMessage {
+    pub(crate) fn into_incoming_prompt(self) -> IncomingPromptRequest {
+        let prompt = build_peer_message_prompt(
+            &self.from_instance,
+            &self.to_instance,
+            &self.to_agent_id,
+            &self.message,
+        );
+        IncomingPromptRequest {
+            prompt,
+            source: IncomingPromptSource::RemoteStylos,
+            agent_id: Some(self.to_agent_id.clone()),
+            task_id: None,
+            request_id: self.request_id.clone(),
+            from: Some(self.from_instance),
+            from_agent_id: self.from_agent_id,
+            to: Some(self.to_instance),
+            to_agent_id: Some(self.to_agent_id),
+        }
+    }
 }
 
 fn build_peer_message_prompt(

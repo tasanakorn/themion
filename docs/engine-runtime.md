@@ -241,12 +241,12 @@ The query layer makes best-effort decisions from the current local snapshot rath
 That includes:
 
 - `free` discovery using exported `activity_status`
-- `talk` acceptance requiring the requested agent to be present and currently `idle` or `nap`, unless the caller provides positive `wait_for_idle_timeout_ms`
+- `talk` acceptance requiring the requested agent to be present; if immediate prompt admission is unavailable, valid talk queues in memory unless that target queue is full
 - `talk` busy-peer waiting polling the exported snapshot until the target becomes available or the timeout expires
 - `tasks/request` candidate selection using the exported agent list, role metadata, git-repo metadata, and current activity state
 - Zenoh-level `stylos_query_nodes` using `session.info()` from the active local Stylos session rather than Themion mesh queryables
 
-Because those checks are snapshot-based, they can race with local activity changes. The runtime reports the chosen agent honestly and may still fail later with `agent_busy` if the selected local execution path is no longer available by the time the request reaches the event loop.
+Because those checks are snapshot-based, they can race with local activity changes. The runtime reports the chosen agent honestly and may queue talk later if the selected local execution path is no longer available by the time the request reaches the event loop.
 
 ## In-memory task lifecycle tracking
 
@@ -281,7 +281,7 @@ Stylos `talk` now resolves sender identity automatically and carries exact insta
 - mandatory target `to` in exact `<hostname>:<pid>` form
 - optional `to_agent_id` on the request input, defaulting to `master`
 - optional `request_id`
-- optional `wait_for_idle_timeout_ms`
+- optional `wait_for_idle_timeout_ms`; if the wait expires and immediate admission is still unavailable, valid talk falls back to the in-memory queue
 
 When a `talk` request is accepted, the CLI does not inject the raw message directly. Instead it wraps the message in a peer-message prompt that tells the receiving agent:
 
