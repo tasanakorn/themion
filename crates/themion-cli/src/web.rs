@@ -106,11 +106,13 @@ struct WebTranscriptResponse {
 struct WebChatEntry {
     kind: &'static str,
     agent_id: Option<String>,
+    tool_call_id: Option<String>,
     source: Option<&'static str>,
     text: String,
     detail: Option<String>,
     reason: Option<String>,
     stats: Option<String>,
+    completed: bool,
 }
 
 #[derive(Serialize)]
@@ -619,6 +621,7 @@ fn publish_web_agent_event(
             });
         }
         themion_core::agent::AgentEvent::ToolStart {
+            tool_call_id,
             name,
             display_arguments_json,
             arguments_json,
@@ -627,15 +630,15 @@ fn publish_web_agent_event(
             let _ = agent_event_tx.send(WebAgentEvent {
                 agent_id,
                 event_kind: "tool".to_string(),
-                text: format!("tool start: {name} {args}"),
+                text: format!("tool start: {} {name} {args}", tool_call_id.as_deref().unwrap_or("?")),
                 at_ms,
             });
         }
-        themion_core::agent::AgentEvent::ToolEnd => {
+        themion_core::agent::AgentEvent::ToolEnd { tool_call_id } => {
             let _ = agent_event_tx.send(WebAgentEvent {
                 agent_id,
                 event_kind: "tool".to_string(),
-                text: "tool finished".to_string(),
+                text: format!("tool finished {}", tool_call_id.as_deref().unwrap_or("?")),
                 at_ms,
             });
         }
@@ -861,85 +864,145 @@ fn non_agent_source_label(source: crate::tui::NonAgentSource) -> &'static str {
 }
 
 fn build_chat_entries(entries: &[crate::tui::Entry]) -> Vec<WebChatEntry> {
-    entries
-        .iter()
-        .filter_map(|entry| match entry {
-            crate::tui::Entry::User(text) => Some(WebChatEntry {
-                kind: "user",
-                agent_id: None,
-                source: None,
-                text: text.clone(),
-                detail: None,
-                reason: None,
-                stats: None,
-            }),
-            crate::tui::Entry::Assistant { agent_id, text } => Some(WebChatEntry {
-                kind: "assistant",
-                agent_id: agent_id.clone(),
-                source: None,
-                text: text.clone(),
-                detail: None,
-                reason: None,
-                stats: None,
-            }),
-            crate::tui::Entry::ToolCall { agent_id, detail, reason } => Some(WebChatEntry {
-                kind: "tool_call",
-                agent_id: agent_id.clone(),
-                source: None,
-                text: detail.clone(),
-                detail: Some(detail.clone()),
-                reason: reason.clone(),
-                stats: None,
-            }),
-            crate::tui::Entry::ToolDone => Some(WebChatEntry {
-                kind: "tool_done",
-                agent_id: None,
-                source: None,
-                text: "tool finished".to_string(),
-                detail: None,
-                reason: None,
-                stats: None,
-            }),
-            crate::tui::Entry::Status { agent_id, source, text } => Some(WebChatEntry {
-                kind: "status",
-                agent_id: agent_id.clone(),
-                source: source.map(non_agent_source_label),
-                text: text.clone(),
-                detail: None,
-                reason: None,
-                stats: None,
-            }),
+    let mut chat_entries = Vec::new();
+    let mut last_tool_entry_index: Option<usize> = None;
+
+    for entry in entries {
+        match entry {
+            crate::tui::Entry::User(text) => {
+                last_tool_entry_index = None;
+                chat_entries.push(WebChatEntry {
+                    kind: "user",
+                    agent_id: None,
+                    tool_call_id: None,
+                    source: None,
+                    text: text.clone(),
+                    detail: None,
+                    reason: None,
+                    stats: None,
+                    completed: false,
+                });
+            }
+            crate::tui::Entry::Assistant { agent_id, text } => {
+                last_tool_entry_index = None;
+                chat_entries.push(WebChatEntry {
+                    kind: "assistant",
+                    agent_id: agent_id.clone(),
+                    tool_call_id: None,
+                    source: None,
+                    text: text.clone(),
+                    detail: None,
+                    reason: None,
+                    stats: None,
+                    completed: false,
+                });
+            }
+            crate::tui::Entry::ToolCall { agent_id, tool_call_id, detail, reason } => {
+                chat_entries.push(WebChatEntry {
+                    kind: "tool_call",
+                    agent_id: agent_id.clone(),
+                    tool_call_id: tool_call_id.clone(),
+                    source: None,
+                    text: detail.clone(),
+                    detail: Some(detail.clone()),
+                    reason: reason.clone(),
+                    stats: None,
+                    completed: false,
+                });
+                last_tool_entry_index = Some(chat_entries.len() - 1);
+            }
+            crate::tui::Entry::ToolDone { tool_call_id } => {
+                let matching_index = tool_call_id
+                    .as_ref()
+                    .and_then(|id| {
+                        chat_entries.iter().rposition(|entry| {
+                            entry.kind == "tool_call"
+                                && entry.tool_call_id.as_deref() == Some(id.as_str())
+                        })
+                    })
+                    .or_else(|| last_tool_entry_index.take());
+                if let Some(index) = matching_index {
+                    if let Some(tool_entry) = chat_entries.get_mut(index) {
+                        tool_entry.completed = true;
+                    }
+                } else {
+                    chat_entries.push(WebChatEntry {
+                        kind: "tool_done",
+                        agent_id: None,
+                        tool_call_id: tool_call_id.clone(),
+                        source: None,
+                        text: "tool finished".to_string(),
+                        detail: None,
+                        reason: None,
+                        stats: None,
+                        completed: true,
+                    });
+                }
+            }
+            crate::tui::Entry::Status { agent_id, source, text } => {
+                last_tool_entry_index = None;
+                chat_entries.push(WebChatEntry {
+                    kind: "status",
+                    agent_id: agent_id.clone(),
+                    tool_call_id: None,
+                    source: source.map(non_agent_source_label),
+                    text: text.clone(),
+                    detail: None,
+                    reason: None,
+                    stats: None,
+                    completed: false,
+                });
+            }
             #[cfg(feature = "stylos")]
-            crate::tui::Entry::RemoteEvent { agent_id, source, text } => Some(WebChatEntry {
-                kind: "remote",
-                agent_id: agent_id.clone(),
-                source: source.map(non_agent_source_label),
-                text: text.clone(),
-                detail: None,
-                reason: None,
-                stats: None,
-            }),
-            crate::tui::Entry::TurnDone { agent_id, summary, stats } => Some(WebChatEntry {
-                kind: "turn_done",
-                agent_id: agent_id.clone(),
-                source: None,
-                text: summary.clone(),
-                detail: None,
-                reason: None,
-                stats: Some(stats.clone()),
-            }),
-            crate::tui::Entry::Stats(text) => Some(WebChatEntry {
-                kind: "stats",
-                agent_id: None,
-                source: None,
-                text: text.clone(),
-                detail: None,
-                reason: None,
-                stats: None,
-            }),
-            crate::tui::Entry::Banner(_) | crate::tui::Entry::Blank => None,
-        })
-        .collect()
+            crate::tui::Entry::RemoteEvent { agent_id, source, text } => {
+                last_tool_entry_index = None;
+                chat_entries.push(WebChatEntry {
+                    kind: "remote",
+                    agent_id: agent_id.clone(),
+                    tool_call_id: None,
+                    source: source.map(non_agent_source_label),
+                    text: text.clone(),
+                    detail: None,
+                    reason: None,
+                    stats: None,
+                    completed: false,
+                });
+            }
+            crate::tui::Entry::TurnDone { agent_id, summary, stats } => {
+                last_tool_entry_index = None;
+                chat_entries.push(WebChatEntry {
+                    kind: "turn_done",
+                    agent_id: agent_id.clone(),
+                    tool_call_id: None,
+                    source: None,
+                    text: summary.clone(),
+                    detail: None,
+                    reason: None,
+                    stats: Some(stats.clone()),
+                    completed: false,
+                });
+            }
+            crate::tui::Entry::Stats(text) => {
+                last_tool_entry_index = None;
+                chat_entries.push(WebChatEntry {
+                    kind: "stats",
+                    agent_id: None,
+                    tool_call_id: None,
+                    source: None,
+                    text: text.clone(),
+                    detail: None,
+                    reason: None,
+                    stats: None,
+                    completed: false,
+                });
+            }
+            crate::tui::Entry::Banner(_) | crate::tui::Entry::Blank => {
+                last_tool_entry_index = None;
+            }
+        }
+    }
+
+    chat_entries
 }
 
 fn build_agents_response(state: &WebAppState, snapshot: &AppSnapshot) -> WebAgentsResponse {
@@ -1052,5 +1115,25 @@ mod tests {
         assert!(html.contains("/assets/app.css"));
         assert!(html.contains("/assets/themion_cli_web_ui.js"));
         assert!(html.contains(r#"type="module""#));
+    }
+
+
+    #[test]
+    fn tool_done_merges_into_previous_tool_call() {
+        let entries = vec![
+            crate::tui::Entry::ToolCall {
+                agent_id: Some("master".to_string()),
+                tool_call_id: Some("call-1".to_string()),
+                detail: "shell: df -h".to_string(),
+                reason: None,
+            },
+            crate::tui::Entry::ToolDone { tool_call_id: Some("call-1".to_string()) },
+        ];
+
+        let chat_entries = build_chat_entries(&entries);
+        assert_eq!(chat_entries.len(), 1);
+        assert_eq!(chat_entries[0].kind, "tool_call");
+        assert_eq!(chat_entries[0].agent_id.as_deref(), Some("master"));
+        assert!(chat_entries[0].completed);
     }
 }

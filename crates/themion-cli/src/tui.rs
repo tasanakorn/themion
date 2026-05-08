@@ -138,10 +138,13 @@ pub(crate) enum Entry {
     Banner(String),
     ToolCall {
         agent_id: Option<String>,
+        tool_call_id: Option<String>,
         detail: String,
         reason: Option<String>,
     },
-    ToolDone,
+    ToolDone {
+        tool_call_id: Option<String>,
+    },
     Status {
         agent_id: Option<String>,
         source: Option<NonAgentSource>,
@@ -241,7 +244,7 @@ fn runtime_recent_event_from_entry(entry: &Entry) -> Option<(&'static str, Strin
         Entry::TurnDone { summary, stats, .. } => Some(("turn", format!("{summary} — {stats}"))),
         Entry::Stats(text) => Some(("stats", text.clone())),
         Entry::Banner(text) => Some(("banner", text.clone())),
-        Entry::ToolDone => Some(("tool", "tool finished".to_string())),
+        Entry::ToolDone { .. } => Some(("tool", "tool finished".to_string())),
         Entry::Blank => None,
     }
 }
@@ -1830,6 +1833,7 @@ fn build_lines<'a>(
                 agent_id,
                 detail,
                 reason,
+                ..
             } => {
                 let mut spans = agent_tag_spans(agent_id.as_deref(), agents);
                 spans.push(Span::styled(" ", Style::default().fg(Color::Yellow)));

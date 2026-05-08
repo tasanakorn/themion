@@ -1303,7 +1303,7 @@ pub(crate) fn process_agent_event(
                 text,
             });
         }
-        themion_core::agent::AgentEvent::ToolStart { name, arguments_json, display_arguments_json } => {
+        themion_core::agent::AgentEvent::ToolStart { tool_call_id, name, arguments_json, display_arguments_json } => {
             app.runtime.streaming_idx = None;
             let display_args_json = display_arguments_json.as_deref().unwrap_or(&arguments_json);
             let (detail, reason) = crate::tui::split_tool_call_detail(&name, display_args_json);
@@ -1328,12 +1328,13 @@ pub(crate) fn process_agent_event(
             }
             app.push(crate::tui::Entry::ToolCall {
                 agent_id: crate::tui::agent_id_for_session(&app.runtime.agents, sid),
+                tool_call_id,
                 detail,
                 reason,
             });
         }
-        themion_core::agent::AgentEvent::ToolEnd => {
-            app.push(crate::tui::Entry::ToolDone);
+        themion_core::agent::AgentEvent::ToolEnd { tool_call_id } => {
+            app.push(crate::tui::Entry::ToolDone { tool_call_id });
             #[cfg(feature = "stylos")]
             if let Some(event) = app.runtime.last_sender_side_transport_event.take() {
                 app.push(crate::tui::Entry::RemoteEvent {

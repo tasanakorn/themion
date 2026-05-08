@@ -323,11 +323,14 @@ pub struct TurnStats {
 pub enum AgentEvent {
     LlmStart,
     ToolStart {
+        tool_call_id: Option<String>,
         name: String,
         arguments_json: String,
         display_arguments_json: Option<String>,
     },
-    ToolEnd,
+    ToolEnd {
+        tool_call_id: Option<String>,
+    },
     Status(String),
     AssistantChunk(String),
     AssistantText(String),
@@ -2054,6 +2057,7 @@ impl Agent {
                     &tc.function.arguments,
                 );
                 self.emit(AgentEvent::ToolStart {
+                    tool_call_id: Some(tc.id.clone()),
                     name: tc.function.name.clone(),
                     arguments_json: tc.function.arguments.clone(),
                     display_arguments_json,
@@ -2077,7 +2081,9 @@ impl Agent {
                 };
                 let result =
                     tools::call_tool(&tc.function.name, &tc.function.arguments, &tool_ctx).await;
-                self.emit(AgentEvent::ToolEnd);
+                self.emit(AgentEvent::ToolEnd {
+                    tool_call_id: Some(tc.id.clone()),
+                });
                 tool_calls += 1;
 
                 if cancellation.as_ref().is_some_and(|c| c.is_interrupted()) {

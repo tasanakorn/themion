@@ -34,11 +34,14 @@ struct WebTranscriptResponse {
 struct WebChatEntry {
     kind: String,
     agent_id: Option<String>,
+    tool_call_id: Option<String>,
     source: Option<String>,
     text: String,
     detail: Option<String>,
     reason: Option<String>,
     stats: Option<String>,
+    #[serde(default)]
+    completed: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -402,7 +405,7 @@ fn App() -> impl IntoView {
                                         >
                                             <For
                                                 each=move || payload.chat_entries.clone().into_iter()
-                                                key=|entry| format!("{}:{}:{}:{:?}", entry.kind, entry.agent_id.clone().unwrap_or_default(), entry.text, entry.stats)
+                                                key=|entry| format!("{}:{}:{}:{}:{:?}", entry.kind, entry.agent_id.clone().unwrap_or_default(), entry.tool_call_id.clone().unwrap_or_default(), entry.text, entry.stats)
                                                 children=move |entry| view! { <ChatEntryRow entry=entry /> }
                                             />
                                         </div>
@@ -503,29 +506,40 @@ fn sidebar_tab_is_active(active_tab: ViewTab, tab: ViewTab) -> bool {
     }
 }
 
-#[component]
-fn ChatEntryRow(entry: WebChatEntry) -> impl IntoView {
-    let class_name = format!("chat-row {}", entry.kind);
-    let label = match entry.kind.as_str() {
+fn chat_entry_label(entry: &WebChatEntry) -> String {
+    if let Some(agent_id) = entry.agent_id.as_ref().filter(|value| !value.is_empty()) {
+        return agent_id.clone();
+    }
+    match entry.kind.as_str() {
         "user" => "user".to_string(),
-        "assistant" => entry
-            .agent_id
-            .clone()
-            .unwrap_or_else(|| "assistant".to_string()),
-        "tool_call" => "tool".to_string(),
-        "tool_done" => "tool".to_string(),
+        "assistant" => "assistant".to_string(),
+        "tool_call" | "tool_done" => "tool".to_string(),
         "status" => entry.source.clone().unwrap_or_else(|| "status".to_string()),
         "remote" => entry.source.clone().unwrap_or_else(|| "remote".to_string()),
-        "turn_done" => entry.agent_id.clone().unwrap_or_else(|| "turn".to_string()),
+        "turn_done" => "turn".to_string(),
         "stats" => "stats".to_string(),
         "banner" => "themion".to_string(),
         _ => entry.kind.clone(),
-    };
+    }
+}
+
+fn chat_entry_kind_label(entry: &WebChatEntry) -> String {
+    match (entry.kind.as_str(), entry.completed) {
+        ("tool_call", true) => "TOOL_CALL ✓".to_string(),
+        _ => entry.kind.to_ascii_uppercase(),
+    }
+}
+
+#[component]
+fn ChatEntryRow(entry: WebChatEntry) -> impl IntoView {
+    let class_name = format!("chat-row {}", entry.kind);
+    let label = chat_entry_label(&entry);
+    let kind_label = chat_entry_kind_label(&entry);
     view! {
         <article class=class_name>
             <div class="chat-meta">
                 <span class="chat-role">{label}</span>
-                <span class="chat-kind">{entry.kind.clone()}</span>
+                <span class="chat-kind">{kind_label}</span>
             </div>
             <div class="chat-bubble">
                 {move || if entry.kind == "tool_call" {
@@ -712,6 +726,69 @@ mod tests {
         assert!(!keydown_should_submit("Enter", false, true, false, false));
         assert!(!keydown_should_submit("Enter", false, false, true, false));
         assert!(!keydown_should_submit("Enter", false, false, false, true));
+    }
+
+    #[test]
+    fn chat_entry_label_prefers_agent_id_for_status_and_remote_rows() {
+        let status = super::WebChatEntry {
+            kind: "status".to_string(),
+            agent_id: Some("smith-1".to_string()),
+            tool_call_id: None,
+            source: Some("runtime".to_string()),
+            text: "turn started".to_string(),
+            detail: None,
+            reason: None,
+            stats: None,
+            completed: false,
+        };
+        assert_eq!(super::chat_entry_label(&status), "smith-1");
+
+        let remote = super::WebChatEntry {
+            kind: "remote".to_string(),
+            agent_id: Some("smith-2".to_string()),
+            tool_call_id: None,
+            source: Some("stylos".to_string()),
+            text: "Stylos hear".to_string(),
+            detail: None,
+            reason: None,
+            stats: None,
+            completed: false,
+        };
+        assert_eq!(super::chat_entry_label(&remote), "smith-2");
+    }
+
+    #[test]
+    fn chat_entry_label_uses_source_for_non_agent_rows() {
+        let remote = super::WebChatEntry {
+            kind: "remote".to_string(),
+            agent_id: None,
+            tool_call_id: None,
+            source: Some("stylos".to_string()),
+            text: "Stylos talk".to_string(),
+            detail: None,
+            reason: None,
+            stats: None,
+            completed: false,
+        };
+        assert_eq!(super::chat_entry_label(&remote), "stylos");
+    }
+
+    #[test]
+    fn chat_entry_kind_label_is_uppercase() {
+        let mut entry = super::WebChatEntry {
+            kind: "tool_call".to_string(),
+            agent_id: Some("master".to_string()),
+            tool_call_id: Some("call-1".to_string()),
+            source: None,
+            text: "shell: df -h".to_string(),
+            detail: None,
+            reason: None,
+            stats: None,
+            completed: false,
+        };
+        assert_eq!(super::chat_entry_kind_label(&entry), "TOOL_CALL");
+        entry.completed = true;
+        assert_eq!(super::chat_entry_kind_label(&entry), "TOOL_CALL ✓");
     }
 
     #[test]
