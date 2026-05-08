@@ -11,11 +11,15 @@ mod local_prompts;
 mod login_codex;
 mod paste_burst;
 mod runtime_domains;
+mod surface_runner;
 #[cfg(feature = "stylos")]
 mod stylos;
 mod textarea;
 mod tui;
 mod tui_runner;
+mod web;
+mod web_assets;
+mod web_terminal;
 use app_state::AppState;
 use config::{Config, ProfileConfig};
 use std::collections::HashMap;
@@ -137,6 +141,7 @@ fn print_usage(program_name: &str) {
         "Usage:
   {0}                                Start TUI mode
   {0} --headless                     Start long-running headless mode
+  {0} --web [--bind ADDR]            Start minimal web mode
   {0} [--dir PATH] PROMPT            Run one non-interactive prompt
   {0} --command unified-search index [--full] [--source-kind KIND] [--dir PATH]
                                     Build or rebuild generalized unified-search indexes for the selected project or one source kind
@@ -145,6 +150,8 @@ fn print_usage(program_name: &str) {
 Options:
   --dir PATH    Override project directory
   --headless    Start explicit long-running non-TUI mode
+  --web         Start minimal web mode
+  --bind ADDR   Override web bind address (default 127.0.0.1:8420)
   --command     Run an explicit non-prompt CLI command
   --full        Rebuild generalized unified-search indexes for the selected project
   --source-kind Limit unified-search indexing to one source kind: memory, chat_message, tool_call, or tool_result
@@ -170,9 +177,11 @@ fn main() -> anyhow::Result<()> {
 
     let cfg = Config::load()?;
 
-    let (project_dir_override, headless_mode, command_mode, remaining_args) = {
+    let (project_dir_override, headless_mode, web_mode, web_bind_addr, command_mode, remaining_args) = {
         let mut dir: Option<std::path::PathBuf> = None;
         let mut headless = false;
+        let mut web = false;
+        let mut web_bind_addr: Option<String> = None;
         let mut command_mode = false;
         let mut rest = Vec::new();
         let mut i = 0;
@@ -184,6 +193,13 @@ fn main() -> anyhow::Result<()> {
                 }
             } else if args[i] == "--headless" {
                 headless = true;
+            } else if args[i] == "--web" {
+                web = true;
+            } else if args[i] == "--bind" {
+                i += 1;
+                if i < args.len() {
+                    web_bind_addr = Some(args[i].clone());
+                }
             } else if args[i] == "--command" {
                 command_mode = true;
             } else {
@@ -191,13 +207,19 @@ fn main() -> anyhow::Result<()> {
             }
             i += 1;
         }
-        (dir, headless, command_mode, rest)
+        (dir, headless, web, web_bind_addr, command_mode, rest)
     };
 
     if command_mode {
         println!("{startup_banner}");
         if headless_mode {
             anyhow::bail!("--command cannot be combined with --headless");
+        }
+        if web_mode {
+            anyhow::bail!("--command cannot be combined with --web");
+        }
+        if web_bind_addr.is_some() {
+            anyhow::bail!("--bind requires --web");
         }
         if let Some((force_full, source_kind, rest_after_command)) =
             parse_unified_search_index_command(&remaining_args)
@@ -235,6 +257,13 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
+    if headless_mode && web_mode {
+        anyhow::bail!("--headless cannot be combined with --web");
+    }
+    if web_bind_addr.is_some() && !web_mode {
+        anyhow::bail!("--bind requires --web");
+    }
+
     if headless_mode {
         println!("{startup_banner}");
         if !remaining_args.is_empty() {
@@ -245,6 +274,14 @@ fn main() -> anyhow::Result<()> {
         runtime_domains
             .core()
             .block_on(headless_runner::run(app_runtime))
+    } else if web_mode {
+        println!("{startup_banner}");
+        if !remaining_args.is_empty() {
+            anyhow::bail!("--web does not accept prompt arguments; use prompt args for non-interactive mode");
+        }
+        let bind_addr = web::parse_bind_addr(web_bind_addr.as_deref())?;
+        let app_runtime = AppState::for_headless(cfg, project_dir_override)?;
+        web::run(app_runtime, bind_addr)
     } else if !remaining_args.is_empty() {
         println!("{startup_banner}");
         let app_runtime = AppState::for_headless(cfg, project_dir_override)?;

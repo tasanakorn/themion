@@ -19,7 +19,10 @@ fn main() {
             .as_deref()
             .map(parse_dirty)
             .unwrap_or(false);
-        println!("cargo:rustc-env=THEMION_APP_VERSION_DIRTY={}", if dirty { "true" } else { "false" });
+        println!(
+            "cargo:rustc-env=THEMION_APP_VERSION_DIRTY={}",
+            if dirty { "true" } else { "false" }
+        );
         return;
     }
 
@@ -27,7 +30,10 @@ fn main() {
     match detect_git_metadata(&repo_root) {
         Some((hash, dirty)) => {
             println!("cargo:rustc-env=THEMION_APP_VERSION_HASH={hash}");
-            println!("cargo:rustc-env=THEMION_APP_VERSION_DIRTY={}", if dirty { "true" } else { "false" });
+            println!(
+                "cargo:rustc-env=THEMION_APP_VERSION_DIRTY={}",
+                if dirty { "true" } else { "false" }
+            );
         }
         None => {
             println!("cargo:rustc-env=THEMION_APP_VERSION_HASH=unknown");
@@ -79,5 +85,8 @@ fn normalize_hash(value: &str) -> Option<String> {
 }
 
 fn parse_dirty(value: &str) -> bool {
-    matches!(value.trim(), "1" | "true" | "TRUE" | "True" | "yes" | "YES" | "Yes")
+    matches!(
+        value.trim(),
+        "1" | "true" | "TRUE" | "True" | "yes" | "YES" | "Yes"
+    )
 }

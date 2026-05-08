@@ -515,6 +515,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1320,10 +1330,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0de51e6874e94e7bf76d726fc5d13ba782deca734ff60d5bb2fb2607c7406555"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 6.0.0",
  "wasip2",
  "wasip3",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -2062,6 +2074,7 @@ dependencies = [
  "cfg-if",
  "either_of",
  "futures",
+ "getrandom 0.4.2",
  "hydration_context",
  "leptos_config",
  "leptos_dom",
@@ -4507,14 +4520,17 @@ dependencies = [
 
 [[package]]
 name = "themion-cli"
-version = "0.64.0"
+version = "0.65.0"
 dependencies = [
  "anyhow",
+ "axum",
  "base64 0.22.1",
  "chrono",
  "crossterm",
  "dirs 5.0.1",
+ "futures-util",
  "hostname",
+ "portable-pty",
  "ratatui",
  "reqwest",
  "serde",
@@ -4533,8 +4549,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "themion-cli-web-ui"
+version = "0.65.0"
+dependencies = [
+ "console_error_panic_hook",
+ "gloo-net",
+ "leptos",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "themion-core"
-version = "0.64.0"
+version = "0.65.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4554,7 +4584,7 @@ dependencies = [
 
 [[package]]
 name = "themion-web"
-version = "0.64.0"
+version = "0.65.0"
 dependencies = [
  "anyhow",
  "axum",

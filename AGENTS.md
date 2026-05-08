@@ -22,6 +22,9 @@ Instructions for coding agents working in this repository.
 - `crates/themion-cli/src/`
   - terminal UI, config loading, login flows, startup wiring, and other user-facing local behavior
   - look here first for file IO, TUI event handling, and app/session orchestration
+- `crates/themion-web/`
+  - deprecated migration residue, not a target architecture for new product work
+  - read only as source material to migrate behavior into `themion-cli --web`; do not ask whether new browser implementation should live there unless the user explicitly requests reviving it
 - `docs/`
   - project docs and behavior notes; consult relevant docs before changing documented flows
   - PRDs live in `docs/prd/`; when creating or updating a PRD, follow `docs/prd/PRD_AUTHORING_GUIDE.md`
@@ -40,6 +43,7 @@ When adding code:
 - provider/backend integrations belong in `themion-core`
 - reusable runtime behavior belongs in `themion-core`
 - terminal UI, local config, and filesystem-driven user flows belong in `themion-cli`
+- new browser product work for PRD-106 belongs under the `themion-cli --web` direction; do not propose `crates/themion-web` as an implementation target unless the user explicitly asks for an exception
 
 ## Architecture expectations
 
@@ -260,6 +264,13 @@ When implementing an existing PRD, do not consider the task complete until you h
 
 - Keep docs aligned with real behavior.
 - If you change provider behavior, prompt construction, login flow, or config semantics, update the relevant docs or PRD notes when appropriate.
+
+## Response ending marker
+
+- The last line of every user-facing assistant response must be exactly one of: `TASK_FINISH`, `STOP_BUT_HAVE_TO_CONTINUE`, or `NEED_HUMAN_ACTION`.
+- Use `TASK_FINISH` only when the requested task is actually complete.
+- Use `STOP_BUT_HAVE_TO_CONTINUE` when you are pausing with remaining implementation work still required.
+- Use `NEED_HUMAN_ACTION` when progress is blocked on a user decision, approval, clarification, or another explicit human action.
 
 ## Avoid
 

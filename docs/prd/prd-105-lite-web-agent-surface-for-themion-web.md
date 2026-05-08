@@ -11,7 +11,7 @@
 - This PRD is canceled as a forward product direction.
 - The earlier direction assumed a separate `themion-web` product/runtime path.
 - The team has decided the web interface should instead plug into `themion-cli` as another local I/O surface enabled by `--web`.
-- Existing useful web work should be reused where practical, but future design and implementation should follow the new CLI-owned web-interface direction.
+- Existing `themion-web` work should now be treated as obsolete migration source material, and future design and implementation should follow the new CLI-owned web-interface direction.
 - A replacement PRD defines that new direction.
 
 ## Cancellation note
@@ -22,7 +22,7 @@ The main issue is architectural overlap. `themion-cli` already owns the local ru
 
 Future web work should treat the browser as another I/O layer for the existing `themion-cli` runtime. In the same way the TUI is a surface over runtime-owned state, the web interface should become a surface over CLI-owned runtime/app-state behavior. PTY and browser transport can still have their own adapters, but they should not imply a second product runtime.
 
-Implemented work from this PRD remains historical context and may still supply reusable UI, transport, or browser-specific pieces. However, this PRD should no longer be used as the active design basis for future web direction.
+Implemented work from this PRD remains historical context and may still supply migration material such as UI, transport, or browser-specific pieces. However, `themion-web` is obsolete as a product target, and this PRD should no longer be used as the active design basis for future web direction.
 
 ## Replacement
 

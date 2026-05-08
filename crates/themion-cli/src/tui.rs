@@ -1,5 +1,5 @@
 use crate::app_runtime::{LocalAgentManagementRequest, RuntimeCommand};
-use crate::app_state::{activity_status_value, on_tick as app_state_on_tick, publish_runtime_snapshot as app_state_publish_runtime_snapshot, AppRuntimeState, set_agent_activity as app_state_set_agent_activity, AgentActivity, AppSnapshot};
+use crate::app_state::{activity_status_value, on_tick as app_state_on_tick, publish_runtime_snapshot as app_state_publish_runtime_snapshot, push_recent_runtime_event as app_state_push_recent_runtime_event, truncate_recent_event_text as app_state_truncate_recent_event_text, AppRuntimeState, set_agent_activity as app_state_set_agent_activity, AgentActivity, AppSnapshot};
 use crate::chat_composer::{ChatComposer, InputAction};
 use crate::runtime_domains::DomainHandle;
 #[cfg(feature = "stylos")]
@@ -222,6 +222,28 @@ fn non_agent_source_spans(source: Option<NonAgentSource>) -> Vec<Span<'static>> 
         ));
     }
     spans
+}
+
+fn runtime_recent_event_from_entry(entry: &Entry) -> Option<(&'static str, String)> {
+    match entry {
+        Entry::User(text) => Some(("user", text.clone())),
+        Entry::Assistant { text, .. } => Some(("assistant", text.clone())),
+        Entry::ToolCall { detail, reason, .. } => Some((
+            "tool",
+            match reason {
+                Some(reason) => format!("{detail} — {reason}"),
+                None => detail.clone(),
+            },
+        )),
+        Entry::Status { text, .. } => Some(("status", text.clone())),
+        #[cfg(feature = "stylos")]
+        Entry::RemoteEvent { text, .. } => Some(("remote", text.clone())),
+        Entry::TurnDone { summary, stats, .. } => Some(("turn", format!("{summary} — {stats}"))),
+        Entry::Stats(text) => Some(("stats", text.clone())),
+        Entry::Banner(text) => Some(("banner", text.clone())),
+        Entry::ToolDone => Some(("tool", "tool finished".to_string())),
+        Entry::Blank => None,
+    }
 }
 
 fn center_trim(s: &str, max: usize) -> String {
@@ -926,6 +948,18 @@ impl App {
 
     fn on_tick(&mut self) {
         app_state_on_tick(self);
+        self.advance_status_animation_tick();
+    }
+
+    fn advance_status_animation_tick(&mut self) {
+        let previous = self.runtime.pending.clone();
+        self.anim_frame = self.anim_frame.wrapping_add(1);
+        if self.runtime.agent_busy && self.runtime.pending.is_some() {
+            self.runtime.pending = Some(crate::app_state::runtime_pending_str(&self.runtime, self.anim_frame));
+        }
+        if self.runtime.pending != previous {
+            self.mark_dirty_status();
+        }
     }
 
     fn mark_dirty_conversation(&mut self) {
@@ -969,8 +1003,19 @@ impl App {
 
 
     pub(crate) fn push(&mut self, entry: Entry) {
+        if let Some((kind, text)) = runtime_recent_event_from_entry(&entry) {
+            app_state_push_recent_runtime_event(
+                self,
+                kind,
+                app_state_truncate_recent_event_text(&text),
+            );
+        }
         self.entries.push(entry);
         self.mark_dirty_conversation();
+    }
+
+    pub(crate) fn replace_surface_snapshot(&mut self, snapshot: crate::app_state::AppSnapshot) {
+        self.snapshot_hub.publish(snapshot);
     }
 
     pub(crate) fn activity_status_value(&self) -> String {

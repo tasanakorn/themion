@@ -256,7 +256,7 @@ pub async fn run(mut app_runtime: AppState) -> anyhow::Result<()> {
 
     crate::app_state::start_tui_watchdog_loop(&app_runtime, ctx.runtime_tx.clone());
 
-    crate::app_state::finalize_tui_runtime_state(
+    crate::app_state::initialize_runtime_owner(
         &mut app_runtime.runtime,
         ctx.app_tx.clone(),
         ctx.runtime_tx.clone(),

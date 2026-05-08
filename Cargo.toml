@@ -3,6 +3,7 @@ members = [
     "crates/themion-core",
     "crates/themion-cli",
     "crates/themion-web",
+    "crates/themion-cli-web-ui",
 ]
 resolver = "2"
 
@@ -29,7 +30,7 @@ fastembed = { version = "5.13.3", default-features = false, features = ["hf-hub-
 tiktoken-rs = "0.11.0"
 
 [workspace.package]
-version = "0.64.0"
+version = "0.65.0"
 edition = "2021"
 
 [profile.dev]

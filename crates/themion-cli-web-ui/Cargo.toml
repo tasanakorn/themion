@@ -1,0 +1,31 @@
+[package]
+name = "themion-cli-web-ui"
+version = "0.65.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+leptos = { version = "0.8", default-features = false, features = ["csr"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+  "Document",
+  "Element",
+  "Event",
+  "HtmlElement",
+  "HtmlInputElement",
+  "HtmlTextAreaElement",
+  "Location",
+  "MessageEvent",
+  "Window",
+  "WebSocket",
+  "BinaryType",
+  "CloseEvent",
+  "ErrorEvent",
+] }
+console_error_panic_hook = "0.1"
+gloo-net = { version = "0.6", features = ["http"] }

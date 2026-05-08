@@ -114,6 +114,23 @@ pub struct AppSnapshotAgent {
     pub incoming: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppRecentEvent {
+    pub kind: String,
+    pub text: String,
+    pub at_ms: u64,
+}
+
+impl AppRecentEvent {
+    pub fn new(kind: impl Into<String>, text: impl Into<String>, at_ms: u64) -> Self {
+        Self {
+            kind: kind.into(),
+            text: text.into(),
+            at_ms,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AppSnapshot {
     pub primary_session_id: Option<Uuid>,
@@ -198,6 +215,7 @@ pub(crate) struct AppRuntimeState {
     pub agent_activity_changed_at: Option<u64>,
     pub stream_chunks: u64,
     pub stream_chars: u64,
+    pub recent_events: std::collections::VecDeque<AppRecentEvent>,
     pub activity_counters: crate::tui::ActivityCounters,
     #[cfg(feature = "stylos")]
     pub stylos: Option<crate::stylos::StylosHandle>,
@@ -244,6 +262,68 @@ pub struct DoneMentionRequest {
     pub completed_by_instance: String,
     pub completed_by_agent_id: String,
     pub result_summary: String,
+}
+
+
+impl AppRuntimeState {
+    pub(crate) fn placeholder_for_surface_transfer_from(source: &AppRuntimeState) -> Self {
+        let (local_agent_mgmt_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (runtime_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let placeholder_snapshot_hub = AppSnapshotHub::new(AppSnapshot::default());
+        Self {
+            session: source.session.clone(),
+            db: source.db.clone(),
+            project_dir: source.project_dir.clone(),
+            session_id: source.session_id,
+            background_domain: source.background_domain.clone(),
+            core_domain: source.core_domain.clone(),
+            startup_project_dir: source.startup_project_dir.clone(),
+            local_agent_mgmt_tx,
+            runtime_tx,
+            runtime_observer_publisher: crate::app_runtime::AppRuntimeObserverPublisher::new(
+                crate::app_runtime::AppSnapshotPublisher::new(placeholder_snapshot_hub),
+            ),
+            api_log_enabled: source.api_log_enabled,
+            status_model_info: source.status_model_info.clone(),
+            status_rate_limits: source.status_rate_limits.clone(),
+            last_ctx_tokens: source.last_ctx_tokens,
+            session_tokens: Default::default(),
+            agent_busy: false,
+            agents: Vec::new(),
+            workflow_state: themion_core::workflow::WorkflowState::default(),
+            pending: None,
+            running: false,
+            ctrl_c_exit_armed_until: None,
+            streaming_idx: None,
+            process_started_at: std::time::Instant::now(),
+            process_started_at_ms: 0,
+            idle_since: None,
+            watchdog_no_pending_since_by_agent: std::collections::HashMap::new(),
+            idle_status_changed_at: None,
+            agent_activity: None,
+            agent_activity_changed_at: None,
+            stream_chunks: 0,
+            stream_chars: 0,
+            recent_events: std::collections::VecDeque::new(),
+            activity_counters: Default::default(),
+            #[cfg(feature = "stylos")]
+            stylos: None,
+            #[cfg(feature = "stylos")]
+            local_instance_id: source.local_instance_id.clone(),
+            #[cfg(feature = "stylos")]
+            stylos_tool_bridge: source.stylos_tool_bridge.clone(),
+            watchdog_state: source.watchdog_state.clone(),
+            board_claims: source.board_claims.clone(),
+            #[cfg(feature = "stylos")]
+            shared_status_hub: source.shared_status_hub.clone(),
+            #[cfg(feature = "stylos")]
+            last_sender_side_transport_event: None,
+            #[cfg(feature = "stylos")]
+            incoming_prompts: Default::default(),
+            #[cfg(feature = "stylos")]
+            last_assistant_text: None,
+        }
+    }
 }
 
 impl AppState {
@@ -335,6 +415,7 @@ impl AppState {
                 agent_activity_changed_at: None,
                 stream_chunks: 0,
                 stream_chars: 0,
+                recent_events: std::collections::VecDeque::new(),
                 activity_counters: Default::default(),
                 #[cfg(feature = "stylos")]
                 stylos: None,
@@ -402,7 +483,7 @@ fn spawn_chat_message_index_worker(
     });
 }
 
-pub(crate) fn finalize_tui_runtime_state(
+pub(crate) fn initialize_runtime_owner(
     runtime: &mut AppRuntimeState,
     app_tx: mpsc::UnboundedSender<AppEvent>,
     runtime_tx: mpsc::UnboundedSender<AppRuntimeEvent>,
@@ -471,7 +552,15 @@ pub fn start_tui_watchdog_loop(
         .runtime_domains
         .tui()
         .expect("tui runtime available in TUI mode");
-    start_watchdog_task(&tui_domain, runtime_tx, app_state.runtime.watchdog_state.clone());
+    start_watchdog_loop_on_domain(&tui_domain, app_state, runtime_tx);
+}
+
+pub fn start_watchdog_loop_on_domain(
+    domain: &crate::runtime_domains::DomainHandle,
+    app_state: &AppState,
+    runtime_tx: mpsc::UnboundedSender<AppRuntimeEvent>,
+) {
+    start_watchdog_task(domain, runtime_tx, app_state.runtime.watchdog_state.clone());
 }
 
 
@@ -627,19 +716,30 @@ pub(crate) fn clear_agent_activity(app: &mut App) {
     publish_runtime_snapshot(app);
 }
 
+pub(crate) fn push_recent_runtime_event(app: &mut App, kind: impl Into<String>, text: impl Into<String>) {
+    const MAX_RECENT_EVENTS: usize = 12;
+    let event = AppRecentEvent::new(kind, text, crate::tui::unix_epoch_now_ms());
+    app.runtime.recent_events.push_back(event);
+    while app.runtime.recent_events.len() > MAX_RECENT_EVENTS {
+        app.runtime.recent_events.pop_front();
+    }
+}
+
+pub(crate) fn truncate_recent_event_text(text: &str) -> String {
+    const MAX_CHARS: usize = 160;
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= MAX_CHARS {
+        return text.to_string();
+    }
+    let kept: String = chars.into_iter().take(MAX_CHARS.saturating_sub(1)).collect();
+    format!("{kept}…")
+}
+
 pub(crate) fn on_tick(app: &mut App) {
     app.runtime.activity_counters.tick_count += 1;
     runtime_expire_ctrl_c_exit_if_needed(&mut app.runtime, std::time::Instant::now());
     app.record_runtime_snapshot();
     publish_runtime_snapshot(app);
-    let previous = app.runtime.pending.clone();
-    app.anim_frame = app.anim_frame.wrapping_add(1);
-    if app.runtime.agent_busy && app.runtime.pending.is_some() {
-        app.runtime.pending = Some(runtime_pending_str(&app.runtime, app.anim_frame));
-    }
-    if app.runtime.pending != previous {
-        app.mark_dirty_status();
-    }
 }
 
 
@@ -1687,11 +1787,13 @@ pub(crate) async fn handle_runtime_event(
         #[cfg(feature = "stylos")]
         AppRuntimeEvent::IncomingPrompt(request) => handle_incoming_prompt_event(app, request, _app_tx),
         #[cfg(feature = "stylos")]
-        AppRuntimeEvent::StylosEvent(text) => app.push(crate::tui::Entry::RemoteEvent {
-            agent_id: None,
-            source: Some(crate::tui::NonAgentSource::Stylos),
-            text,
-        }),
+        AppRuntimeEvent::StylosEvent(text) => {
+            app.push(crate::tui::Entry::RemoteEvent {
+                agent_id: None,
+                source: Some(crate::tui::NonAgentSource::Stylos),
+                text,
+            })
+        },
         AppRuntimeEvent::WatchdogTick => handle_watchdog_tick_local_event(app),
         AppRuntimeEvent::Agent(sid, ev) => {
             app.runtime.activity_counters.agent_event_count += 1;

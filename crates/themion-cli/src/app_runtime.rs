@@ -445,6 +445,9 @@ impl AppSnapshotPublisher {
 
     pub(crate) fn publish(&mut self, state: AppSnapshotBuildState<'_>) {
         let snapshot = build_app_snapshot(&self.latest, state);
+        if snapshot == self.latest {
+            return;
+        }
         self.latest = snapshot.clone();
         self.snapshot_hub.publish(snapshot);
     }
