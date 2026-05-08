@@ -1,4 +1,5 @@
 use leptos::ev::{KeyboardEvent, SubmitEvent};
+use leptos::html::Div;
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -6,7 +7,6 @@ use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use leptos::html::Div;
 use web_sys::{Event, MessageEvent, WebSocket};
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -120,7 +120,9 @@ impl SharedSocket {
             payload,
         };
         *seq += 1;
-        let _ = self.socket.send_with_str(&serde_json::to_string(&envelope).unwrap_or_default());
+        let _ = self
+            .socket
+            .send_with_str(&serde_json::to_string(&envelope).unwrap_or_default());
     }
 }
 
@@ -150,8 +152,10 @@ fn App() -> impl IntoView {
     let prompt = RwSignal::new(String::new());
     let active_agent = RwSignal::new(String::from("master"));
     let transcript_history_ref = NodeRef::<Div>::new();
+    let transcript_trailing = RwSignal::new(true);
 
-    let shared_socket = create_shared_socket(socket_state, agent_stream, shell_stream, status, transcript);
+    let shared_socket =
+        create_shared_socket(socket_state, agent_stream, shell_stream, status, transcript);
     let shared_socket_for_effect = shared_socket.clone();
     let shared_socket_for_submit = shared_socket.clone();
     let shared_socket_for_keydown = shared_socket.clone();
@@ -183,13 +187,19 @@ fn App() -> impl IntoView {
             .get()
             .map(|payload| payload.chat_entries.len())
             .unwrap_or_default();
-        if entry_count == 0 {
+        if entry_count == 0 || !transcript_trailing.get() {
             return;
         }
         if let Some(history) = transcript_history_ref.get() {
-            history.set_scroll_top(history.scroll_height());
+            schedule_scroll_transcript_to_recent(history.into());
         }
     });
+
+    let on_transcript_scroll = move |_| {
+        if let Some(history) = transcript_history_ref.get_untracked() {
+            transcript_trailing.set(transcript_history_is_trailing(&history));
+        }
+    };
 
     let on_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
@@ -198,24 +208,37 @@ fn App() -> impl IntoView {
             return;
         }
         let agent_id = active_agent.get_untracked();
-        shared_socket_for_submit.send("input", "agent", &agent_id, serde_json::json!({"prompt": text}));
+        shared_socket_for_submit.send(
+            "input",
+            "agent",
+            &agent_id,
+            serde_json::json!({"prompt": text}),
+        );
         prompt.set(String::new());
     };
 
     let on_prompt_keydown = move |ev: KeyboardEvent| {
-        if ev.key() == "Enter" && !ev.shift_key() {
+        if prompt_keydown_should_submit(&ev) {
             ev.prevent_default();
             let text = prompt.get_untracked().trim().to_string();
             if text.is_empty() {
                 return;
             }
             let agent_id = active_agent.get_untracked();
-            shared_socket_for_keydown.send("input", "agent", &agent_id, serde_json::json!({"prompt": text}));
+            shared_socket_for_keydown.send(
+                "input",
+                "agent",
+                &agent_id,
+                serde_json::json!({"prompt": text}),
+            );
             prompt.set(String::new());
         }
     };
 
-    let sidebar_button = move |tab: ViewTab, icon: &'static str, label: &'static str, hint: &'static str| {
+    let sidebar_button = move |tab: ViewTab,
+                               icon: &'static str,
+                               label: &'static str,
+                               hint: &'static str| {
         view! {
             <button
                 type="button"
@@ -372,7 +395,11 @@ fn App() -> impl IntoView {
                                 </div>
                                 {move || match transcript.get() {
                                     Some(payload) => view! {
-                                        <div class="chat-history" node_ref=transcript_history_ref>
+                                        <div
+                                            class="chat-history"
+                                            node_ref=transcript_history_ref
+                                            on:scroll=on_transcript_scroll
+                                        >
                                             <For
                                                 each=move || payload.chat_entries.clone().into_iter()
                                                 key=|entry| format!("{}:{}:{}:{:?}", entry.kind, entry.agent_id.clone().unwrap_or_default(), entry.text, entry.stats)
@@ -449,7 +476,7 @@ fn App() -> impl IntoView {
                             <h3>{move || format!("Prompt → {}", active_agent.get())}</h3>
                             <p>"Send input through the shared CLI-owned websocket."</p>
                         </div>
-                        <span class="shortcut">"Enter to send · Shift+Enter for newline"</span>
+                        <span class="shortcut">"Enter to submit · Shift+Enter for newline"</span>
                     </div>
                     <form on:submit=on_submit class="composer-form">
                         <textarea
@@ -472,7 +499,10 @@ fn ChatEntryRow(entry: WebChatEntry) -> impl IntoView {
     let class_name = format!("chat-row {}", entry.kind);
     let label = match entry.kind.as_str() {
         "user" => "user".to_string(),
-        "assistant" => entry.agent_id.clone().unwrap_or_else(|| "assistant".to_string()),
+        "assistant" => entry
+            .agent_id
+            .clone()
+            .unwrap_or_else(|| "assistant".to_string()),
         "tool_call" => "tool".to_string(),
         "tool_done" => "tool".to_string(),
         "status" => entry.source.clone().unwrap_or_else(|| "status".to_string()),
@@ -511,6 +541,36 @@ fn ChatEntryRow(entry: WebChatEntry) -> impl IntoView {
     }
 }
 
+const TRANSCRIPT_TRAILING_SCROLL_PX: i32 = 48;
+
+fn schedule_scroll_transcript_to_recent(history: web_sys::HtmlElement) {
+    if let Some(window) = web_sys::window() {
+        let callback = Closure::<dyn FnMut()>::once(move || scroll_transcript_to_recent(&history));
+        let _ = window.request_animation_frame(callback.as_ref().unchecked_ref());
+        callback.forget();
+    }
+}
+
+fn scroll_transcript_to_recent(history: &web_sys::HtmlElement) {
+    history.set_scroll_top(history.scroll_height());
+}
+
+fn transcript_history_is_trailing(history: &web_sys::HtmlElement) -> bool {
+    scroll_position_is_trailing(
+        history.scroll_top(),
+        history.client_height(),
+        history.scroll_height(),
+    )
+}
+
+fn scroll_position_is_trailing(scroll_top: i32, client_height: i32, scroll_height: i32) -> bool {
+    scroll_height - (scroll_top + client_height) <= TRANSCRIPT_TRAILING_SCROLL_PX
+}
+
+fn prompt_keydown_should_submit(ev: &KeyboardEvent) -> bool {
+    ev.key() == "Enter" && !ev.shift_key() && !ev.alt_key() && !ev.ctrl_key() && !ev.meta_key()
+}
+
 fn create_shared_socket(
     socket_state: RwSignal<String>,
     agent_stream: RwSignal<Vec<String>>,
@@ -523,7 +583,9 @@ fn create_shared_socket(
         Some("https:") => "wss:",
         _ => "ws:",
     };
-    let host = location.host().unwrap_or_else(|_| "127.0.0.1:8420".to_string());
+    let host = location
+        .host()
+        .unwrap_or_else(|_| "127.0.0.1:8420".to_string());
     let ws = WebSocket::new(&format!("{protocol}//{host}/api/ws")).expect("websocket");
     ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
 
@@ -551,13 +613,18 @@ fn create_shared_socket(
     let onmessage = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
         if let Some(text) = event.data().as_string() {
             if let Ok(envelope) = serde_json::from_str::<WebSocketEnvelope>(&text) {
-                let line = format!("seq={:?} target={} payload={}", envelope.sequence_id, envelope.target_id, envelope.payload);
+                let line = format!(
+                    "seq={:?} target={} payload={}",
+                    envelope.sequence_id, envelope.target_id, envelope.payload
+                );
                 let refresh_transcript = matches!(envelope.domain.as_str(), "agent" | "runtime");
                 match envelope.domain.as_str() {
                     "agent" => agent_stream.update(|lines| lines.push(line)),
                     "terminal" => shell_stream.update(|lines| lines.push(line)),
                     "runtime" if envelope.target_id == "status" => {
-                        if let Ok(payload) = serde_json::from_value::<WebStatusResponse>(envelope.payload.clone()) {
+                        if let Ok(payload) =
+                            serde_json::from_value::<WebStatusResponse>(envelope.payload.clone())
+                        {
                             status.set(Some(payload));
                         }
                     }
@@ -613,4 +680,40 @@ async fn fetch_agents() -> Result<WebAgentsResponse, String> {
         .json::<WebAgentsResponse>()
         .await
         .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    fn keydown_should_submit(key: &str, shift: bool, alt: bool, ctrl: bool, meta: bool) -> bool {
+        key == "Enter" && !shift && !alt && !ctrl && !meta
+    }
+
+    #[test]
+    fn plain_enter_submits_prompt() {
+        assert!(keydown_should_submit("Enter", false, false, false, false));
+    }
+
+    #[test]
+    fn shifted_enter_does_not_submit_prompt() {
+        assert!(!keydown_should_submit("Enter", true, false, false, false));
+    }
+
+    #[test]
+    fn modified_enter_does_not_submit_prompt() {
+        assert!(!keydown_should_submit("Enter", false, true, false, false));
+        assert!(!keydown_should_submit("Enter", false, false, true, false));
+        assert!(!keydown_should_submit("Enter", false, false, false, true));
+    }
+
+    #[test]
+    fn transcript_scroll_detects_trailing_mode_near_bottom() {
+        assert!(super::scroll_position_is_trailing(950, 100, 1_000));
+        assert!(super::scroll_position_is_trailing(852, 100, 1_000));
+    }
+
+    #[test]
+    fn transcript_scroll_detects_browse_mode_away_from_bottom() {
+        assert!(!super::scroll_position_is_trailing(851, 100, 1_000));
+        assert!(!super::scroll_position_is_trailing(400, 100, 1_000));
+    }
 }

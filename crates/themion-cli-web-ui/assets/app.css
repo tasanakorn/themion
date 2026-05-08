@@ -537,14 +537,20 @@ pre {
 
 /* Chat transcript modelled after the TUI conversation panel */
 .chat-panel {
+  display: flex;
+  flex-direction: column;
   min-height: 0;
+  overflow: hidden;
 }
 
 .chat-history {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 0.75rem;
-  min-height: 18rem;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 0.25rem;
 }
 
 .chat-row {
