@@ -643,3 +643,13 @@ pre {
   .chat-row { grid-template-columns: 1fr; gap: 0.35rem; }
   .chat-meta { justify-items: start; }
 }
+
+.hidden {
+  display: none !important;
+}
+
+.content-grid.terminal-empty {
+  grid-template-columns: 1fr;
+  min-height: 100%;
+  padding: 0;
+}

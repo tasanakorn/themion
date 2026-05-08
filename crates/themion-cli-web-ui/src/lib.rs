@@ -132,6 +132,7 @@ enum ViewTab {
     Transcript,
     Agents,
     Shell,
+    Terminal,
 }
 
 #[wasm_bindgen(start)]
@@ -242,7 +243,7 @@ fn App() -> impl IntoView {
         view! {
             <button
                 type="button"
-                class=move || if active_tab.get() == tab { "nav-item active" } else { "nav-item" }
+                class=move || if sidebar_tab_is_active(active_tab.get(), tab) { "nav-item active" } else { "nav-item" }
                 on:click=move |_| active_tab.set(tab)
             >
                 <span class="nav-icon">{icon}</span>
@@ -273,11 +274,9 @@ fn App() -> impl IntoView {
                     </div>
                 </div>
 
-                <nav class="sidebar-nav">
-                    {sidebar_button(ViewTab::Summary, "󰒓", "Overview", "runtime + recent events")}
-                    {sidebar_button(ViewTab::Transcript, "󰈙", "Transcript", "session event stream")}
-                    {sidebar_button(ViewTab::Agents, "󰧑", "Agents", "local roster")}
-                    {sidebar_button(ViewTab::Shell, "", "Streams", "agent + terminal socket")}
+                <nav class="sidebar-nav" aria-label="main menu">
+                    {sidebar_button(ViewTab::Transcript, "󰈙", "Agent", "chat transcript")}
+                    {sidebar_button(ViewTab::Terminal, "", "Terminal", "placeholder page")}
                 </nav>
 
                 <div class="sidebar-footer">
@@ -297,7 +296,7 @@ fn App() -> impl IntoView {
             </aside>
 
             <main class="workspace">
-                <header class="topbar">
+                <header class=move || if active_tab.get() == ViewTab::Terminal { "topbar hidden" } else { "topbar" }>
                     <div>
                         <p class="eyebrow">"themion-cli --web"</p>
                         <h2>{move || match active_tab.get() {
@@ -305,6 +304,7 @@ fn App() -> impl IntoView {
                             ViewTab::Transcript => "Transcript",
                             ViewTab::Agents => "Agents",
                             ViewTab::Shell => "Realtime Streams",
+                            ViewTab::Terminal => "Terminal",
                         }}</h2>
                     </div>
                     <div class="topbar-pills">
@@ -313,7 +313,7 @@ fn App() -> impl IntoView {
                     </div>
                 </header>
 
-                <section class="agent-tab-strip" aria-label="agent tabs">
+                <section class=move || if active_tab.get() == ViewTab::Terminal { "agent-tab-strip hidden" } else { "agent-tab-strip" } aria-label="agent tabs">
                     <For
                         each=move || status.get().map(|s| s.local_agents).unwrap_or_default().into_iter()
                         key=|agent| agent.agent_id.clone()
@@ -335,14 +335,14 @@ fn App() -> impl IntoView {
                     />
                 </section>
 
-                <section class="tab-strip" aria-label="workspace tabs">
+                <section class=move || if active_tab.get() == ViewTab::Terminal { "tab-strip hidden" } else { "tab-strip" } aria-label="workspace tabs">
                     <button type="button" class=move || if active_tab.get() == ViewTab::Summary { "tab active" } else { "tab" } on:click=move |_| active_tab.set(ViewTab::Summary)>"Overview"</button>
                     <button type="button" class=move || if active_tab.get() == ViewTab::Transcript { "tab active" } else { "tab" } on:click=move |_| active_tab.set(ViewTab::Transcript)>"Transcript"</button>
                     <button type="button" class=move || if active_tab.get() == ViewTab::Agents { "tab active" } else { "tab" } on:click=move |_| active_tab.set(ViewTab::Agents)>"Agents"</button>
                     <button type="button" class=move || if active_tab.get() == ViewTab::Shell { "tab active" } else { "tab" } on:click=move |_| active_tab.set(ViewTab::Shell)>"Streams"</button>
                 </section>
 
-                <div class="content-grid">
+                <div class=move || if active_tab.get() == ViewTab::Terminal { "content-grid terminal-empty" } else { "content-grid" }>
                     {move || match active_tab.get() {
                         ViewTab::Summary => view! {
                             <>
@@ -468,9 +468,10 @@ fn App() -> impl IntoView {
                                 </section>
                             </>
                         }.into_any(),
+                        ViewTab::Terminal => view! { <></> }.into_any(),
                     }}
                 </div>
-                <section class="composer-card composer-bottom">
+                <section class=move || if active_tab.get() == ViewTab::Terminal { "composer-card composer-bottom hidden" } else { "composer-card composer-bottom" }>
                     <div class="composer-head">
                         <div>
                             <h3>{move || format!("Prompt → {}", active_agent.get())}</h3>
@@ -491,6 +492,14 @@ fn App() -> impl IntoView {
                 </section>
             </main>
         </div>
+    }
+}
+
+fn sidebar_tab_is_active(active_tab: ViewTab, tab: ViewTab) -> bool {
+    match tab {
+        ViewTab::Transcript => active_tab != ViewTab::Terminal,
+        ViewTab::Terminal => active_tab == ViewTab::Terminal,
+        _ => active_tab == tab,
     }
 }
 
