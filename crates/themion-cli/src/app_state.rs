@@ -1475,7 +1475,7 @@ pub(crate) fn handle_shell_complete_event(
 
 pub(crate) fn submit_shell_command(app: &mut App, command: &str) {
     let command = command.trim_start().to_string();
-    app.push(Entry::User(format!("!{}", command)));
+    app.push(Entry::User { agent_id: None, text: format!("!{}", command) });
 
     if command.is_empty() {
         app.push(Entry::Assistant {
@@ -1536,7 +1536,11 @@ pub(crate) fn submit_text_default(app: &mut App, text: String) {
         .iter()
         .position(crate::app_runtime::is_interactive_agent_handle)
         .expect("interactive agent");
-    app.push(crate::tui::Entry::User(text.clone()));
+    let agent_id = app.runtime.agents[agent_index].agent_id.clone();
+    app.push(crate::tui::Entry::User {
+        agent_id: Some(agent_id),
+        text: text.clone(),
+    });
     submit_text_to_agent(app, agent_index, text);
 }
 
@@ -1559,6 +1563,28 @@ pub(crate) fn submit_text_to_agent(
         text,
         runtime_launch,
     );
+}
+
+pub(crate) fn submit_text_to_agent_id(
+    app: &mut App,
+    agent_id: &str,
+    text: String,
+) -> bool {
+    let Some(agent_index) = app
+        .runtime
+        .agents
+        .iter()
+        .position(|agent| agent.agent_id == agent_id)
+    else {
+        return false;
+    };
+    let agent_id = app.runtime.agents[agent_index].agent_id.clone();
+    app.push(crate::tui::Entry::User {
+        agent_id: Some(agent_id),
+        text: text.clone(),
+    });
+    submit_text_to_agent(app, agent_index, text);
+    true
 }
 
 #[cfg(feature = "stylos")]
@@ -1610,7 +1636,11 @@ pub(crate) fn resolve_and_submit_text(
     };
 
     if crate::app_runtime::incoming_prompt_request(&app.runtime.incoming_prompts, &app.runtime.agents[agent_index].agent_id).is_none() {
-        app.push(crate::tui::Entry::User(text.clone()));
+        let submitted_agent_id = app.runtime.agents[agent_index].agent_id.clone();
+        app.push(crate::tui::Entry::User {
+            agent_id: Some(submitted_agent_id),
+            text: text.clone(),
+        });
     }
 
     submit_text_to_agent(app, agent_index, text);

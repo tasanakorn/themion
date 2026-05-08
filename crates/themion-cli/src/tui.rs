@@ -130,7 +130,10 @@ impl NonAgentSource {
 
 #[derive(Clone)]
 pub(crate) enum Entry {
-    User(String),
+    User {
+        agent_id: Option<String>,
+        text: String,
+    },
     Assistant {
         agent_id: Option<String>,
         text: String,
@@ -229,7 +232,7 @@ fn non_agent_source_spans(source: Option<NonAgentSource>) -> Vec<Span<'static>> 
 
 fn runtime_recent_event_from_entry(entry: &Entry) -> Option<(&'static str, String)> {
     match entry {
-        Entry::User(text) => Some(("user", text.clone())),
+        Entry::User { text, .. } => Some(("user", text.clone())),
         Entry::Assistant { text, .. } => Some(("assistant", text.clone())),
         Entry::ToolCall { detail, reason, .. } => Some((
             "tool",
@@ -1457,7 +1460,7 @@ impl App {
 
         if text.starts_with('/') {
             let output = self.handle_command(&text, app_tx);
-            self.push(Entry::User(text));
+            self.push(Entry::User { agent_id: None, text });
             for line in output {
                 self.push(Entry::Assistant {
                     agent_id: None,
@@ -1777,7 +1780,7 @@ fn build_lines<'a>(
 
     for entry in entries {
         match entry {
-            Entry::User(text) => {
+            Entry::User { text, .. } => {
                 lines.push(Line::default());
                 for (i, part) in text.lines().enumerate() {
                     let prefix = if i == 0 {

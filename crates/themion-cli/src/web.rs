@@ -34,7 +34,10 @@ struct WebAppState {
 
 #[derive(Clone)]
 enum WebInputEvent {
-    SubmitPrompt(String),
+    SubmitPrompt {
+        agent_id: String,
+        prompt: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -505,7 +508,10 @@ async fn handle_websocket_envelope(
         ("input", "agent") => {
             let prompt = extract_prompt_payload(&envelope.payload)?;
             state.web_input_tx
-                .send(WebInputEvent::SubmitPrompt(prompt))
+                .send(WebInputEvent::SubmitPrompt {
+                    agent_id: envelope.target_id.clone(),
+                    prompt,
+                })
                 .map_err(|_| anyhow!("web input channel closed"))?;
             outbound_tx.send(WebSocketEnvelope {
                 kind: "ack".to_string(),
@@ -782,8 +788,8 @@ fn start_web_surface_loop(
                         update_web_chat_entries(&chat_entries, &app.entries);
                     }
                     maybe_web_input = rx.recv() => {
-                        let Some(WebInputEvent::SubmitPrompt(prompt)) = maybe_web_input else { break; };
-                        app.submit_text(prompt, &app_tx);
+                        let Some(WebInputEvent::SubmitPrompt { agent_id, prompt }) = maybe_web_input else { break; };
+                        submit_web_prompt(&mut app, agent_id, prompt, &app_tx);
                         update_web_chat_entries(&chat_entries, &app.entries);
                         if app.dirty.any() {
                             app.request_draw(&ctx.frame_requester);
@@ -796,6 +802,32 @@ fn start_web_surface_loop(
         tx
     };
     web_input_tx
+}
+
+
+fn submit_web_prompt(
+    app: &mut crate::tui::App,
+    agent_id: String,
+    prompt: String,
+    app_tx: &mpsc::UnboundedSender<crate::tui::AppEvent>,
+) {
+    let text = prompt.trim().to_string();
+    if text.is_empty() {
+        return;
+    }
+
+    if text == "/exit" || text == "/quit" || text.starts_with('/') || text.starts_with('!') {
+        app.submit_text(text, app_tx);
+        return;
+    }
+
+    if !crate::app_state::submit_text_to_agent_id(app, &agent_id, text) {
+        app.push(crate::tui::Entry::Status {
+            agent_id: None,
+            source: Some(crate::tui::NonAgentSource::Runtime),
+            text: format!("web prompt rejected: target agent {agent_id} not found"),
+        });
+    }
 }
 
 fn build_status_response(state: &WebAppState, snapshot: &AppSnapshot) -> WebStatusResponse {
@@ -869,11 +901,11 @@ fn build_chat_entries(entries: &[crate::tui::Entry]) -> Vec<WebChatEntry> {
 
     for entry in entries {
         match entry {
-            crate::tui::Entry::User(text) => {
+            crate::tui::Entry::User { agent_id, text } => {
                 last_tool_entry_index = None;
                 chat_entries.push(WebChatEntry {
                     kind: "user",
-                    agent_id: None,
+                    agent_id: agent_id.clone(),
                     tool_call_id: None,
                     source: None,
                     text: text.clone(),

@@ -728,6 +728,24 @@ mod tests {
         assert!(!keydown_should_submit("Enter", false, false, false, true));
     }
 
+
+    #[test]
+    fn user_chat_entry_label_shows_target_agent() {
+        let entry = super::WebChatEntry {
+            kind: "user".to_string(),
+            agent_id: Some("master".to_string()),
+            tool_call_id: None,
+            source: None,
+            text: "hello".to_string(),
+            detail: None,
+            reason: None,
+            stats: None,
+            completed: false,
+        };
+        assert_eq!(super::chat_entry_label(&entry), "master");
+        assert_eq!(super::chat_entry_kind_label(&entry), "USER");
+    }
+
     #[test]
     fn chat_entry_label_prefers_agent_id_for_status_and_remote_rows() {
         let status = super::WebChatEntry {

@@ -596,7 +596,11 @@ pre {
 }
 
 .chat-row.user .chat-role {
-  color: #67e8f9;
+  color: #c084fc;
+}
+
+.chat-row.user .chat-kind {
+  color: #f0abfc;
 }
 
 .chat-row.assistant .chat-bubble {
