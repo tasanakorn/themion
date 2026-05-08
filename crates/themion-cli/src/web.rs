@@ -223,9 +223,16 @@ pub fn run(mut app_state: AppState, bind_addr: SocketAddr) -> anyhow::Result<()>
     let web_runtime = runtime_domains.core();
     web_runtime.block_on(async move {
         let (agent_event_tx, _) = broadcast::channel::<WebAgentEvent>(256);
+        #[cfg(feature = "stylos")]
+        {
+            let (runtime_tx, _runtime_rx) = tokio::sync::mpsc::unbounded_channel();
+            crate::app_state::start_shared_runtime_services(&mut app_state, &runtime_tx).await?;
+        }
         let chat_entries = Arc::new(std::sync::Mutex::new(Vec::<WebChatEntry>::new()));
         let web_input_tx = start_web_surface_loop(&mut app_state, agent_event_tx.clone(), chat_entries.clone());
         let terminal_service = start_terminal_runtime().await?;
+        #[cfg(feature = "stylos")]
+        let stylos = app_state.runtime.stylos.take();
         let app = router(WebAppState {
             app_state: Arc::new(app_state),
             bind_addr,
@@ -239,9 +246,14 @@ pub fn run(mut app_state: AppState, bind_addr: SocketAddr) -> anyhow::Result<()>
             .await
             .with_context(|| format!("failed to bind web server on {bind_addr}"))?;
         println!("themion web mode listening on http://{bind_addr}");
-        axum::serve(listener, app)
+        let serve_result = axum::serve(listener, app)
             .await
-            .context("web server exited unexpectedly")
+            .context("web server exited unexpectedly");
+        #[cfg(feature = "stylos")]
+        if let Some(stylos) = stylos {
+            stylos.shutdown().await;
+        }
+        serve_result
     })
 }
 

@@ -44,6 +44,17 @@ fn emit_event<T: Serialize>(event: &str, data: T) -> anyhow::Result<()> {
 }
 
 pub async fn run(app_runtime: AppState) -> anyhow::Result<()> {
+    #[cfg(feature = "stylos")]
+    let mut app_runtime = app_runtime;
+    #[cfg(not(feature = "stylos"))]
+    let app_runtime = app_runtime;
+
+    #[cfg(feature = "stylos")]
+    {
+        let (runtime_tx, _runtime_rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::app_state::start_shared_runtime_services(&mut app_runtime, &runtime_tx).await?;
+    }
+
     let project_dir = app_runtime.runtime.project_dir.display().to_string();
     emit_event(
         "headless_started",
@@ -62,6 +73,11 @@ pub async fn run(app_runtime: AppState) -> anyhow::Result<()> {
         },
     )?;
 
+    #[cfg(feature = "stylos")]
+    if let Some(stylos) = app_runtime.runtime.stylos.take() {
+        stylos.shutdown().await;
+    }
+
     emit_event(
         "headless_stopped",
         ShutdownData {
@@ -72,14 +88,32 @@ pub async fn run(app_runtime: AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn run_non_interactive(_app_runtime: AppState, _prompt: String) -> anyhow::Result<()> {
+pub async fn run_non_interactive(app_runtime: AppState, _prompt: String) -> anyhow::Result<()> {
+    #[cfg(feature = "stylos")]
+    let mut app_runtime = app_runtime;
+    #[cfg(not(feature = "stylos"))]
+    let _app_runtime = app_runtime;
+
+    #[cfg(feature = "stylos")]
+    {
+        let (runtime_tx, _runtime_rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::app_state::start_shared_runtime_services(&mut app_runtime, &runtime_tx).await?;
+    }
+
     emit_event(
         "headless_result",
         DummyResultData {
             status: "ok",
             note: "dummy non-interactive JSON output placeholder",
         },
-    )
+    )?;
+
+    #[cfg(feature = "stylos")]
+    if let Some(stylos) = app_runtime.runtime.stylos.take() {
+        stylos.shutdown().await;
+    }
+
+    Ok(())
 }
 
 #[cfg(feature = "semantic-memory")]

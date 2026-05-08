@@ -1838,7 +1838,7 @@ pub fn open_history_db(interactive: bool) -> Arc<DbHandle> {
 #[cfg(feature = "stylos")]
 
 #[cfg(feature = "stylos")]
-pub(crate) async fn start_tui_runtime_services(
+pub(crate) async fn start_shared_runtime_services(
     app_state: &mut AppState,
     runtime_tx: &mpsc::UnboundedSender<AppRuntimeEvent>,
 ) -> anyhow::Result<()> {

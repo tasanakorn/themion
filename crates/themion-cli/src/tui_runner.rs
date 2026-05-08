@@ -246,7 +246,7 @@ pub async fn run(mut app_runtime: AppState) -> anyhow::Result<()> {
     let mut ctx = RunnerContext::build(&runtime_domains);
 
     #[cfg(feature = "stylos")]
-    crate::app_state::start_tui_runtime_services(&mut app_runtime, &ctx.runtime_tx).await?;
+    crate::app_state::start_shared_runtime_services(&mut app_runtime, &ctx.runtime_tx).await?;
 
     let snapshot_hub = app_runtime.snapshot_hub.clone();
     let initial_snapshot = snapshot_hub.current();

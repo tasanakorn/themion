@@ -1,4 +1,4 @@
-use leptos::ev::SubmitEvent;
+use leptos::ev::{KeyboardEvent, SubmitEvent};
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -6,6 +6,7 @@ use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use leptos::html::Div;
 use web_sys::{Event, MessageEvent, WebSocket};
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -148,9 +149,12 @@ fn App() -> impl IntoView {
     let shell_stream = RwSignal::new(Vec::<String>::new());
     let prompt = RwSignal::new(String::new());
     let active_agent = RwSignal::new(String::from("master"));
+    let transcript_history_ref = NodeRef::<Div>::new();
 
     let shared_socket = create_shared_socket(socket_state, agent_stream, shell_stream, status, transcript);
     let shared_socket_for_effect = shared_socket.clone();
+    let shared_socket_for_submit = shared_socket.clone();
+    let shared_socket_for_keydown = shared_socket.clone();
 
     Effect::new(move |_| {
         let shared = shared_socket_for_effect.clone();
@@ -174,6 +178,19 @@ fn App() -> impl IntoView {
         });
     });
 
+    Effect::new(move |_| {
+        let entry_count = transcript
+            .get()
+            .map(|payload| payload.chat_entries.len())
+            .unwrap_or_default();
+        if entry_count == 0 {
+            return;
+        }
+        if let Some(history) = transcript_history_ref.get() {
+            history.set_scroll_top(history.scroll_height());
+        }
+    });
+
     let on_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
         let text = prompt.get_untracked().trim().to_string();
@@ -181,8 +198,21 @@ fn App() -> impl IntoView {
             return;
         }
         let agent_id = active_agent.get_untracked();
-        shared_socket.send("input", "agent", &agent_id, serde_json::json!({"prompt": text}));
+        shared_socket_for_submit.send("input", "agent", &agent_id, serde_json::json!({"prompt": text}));
         prompt.set(String::new());
+    };
+
+    let on_prompt_keydown = move |ev: KeyboardEvent| {
+        if ev.key() == "Enter" && !ev.shift_key() {
+            ev.prevent_default();
+            let text = prompt.get_untracked().trim().to_string();
+            if text.is_empty() {
+                return;
+            }
+            let agent_id = active_agent.get_untracked();
+            shared_socket_for_keydown.send("input", "agent", &agent_id, serde_json::json!({"prompt": text}));
+            prompt.set(String::new());
+        }
     };
 
     let sidebar_button = move |tab: ViewTab, icon: &'static str, label: &'static str, hint: &'static str| {
@@ -342,7 +372,7 @@ fn App() -> impl IntoView {
                                 </div>
                                 {move || match transcript.get() {
                                     Some(payload) => view! {
-                                        <div class="chat-history">
+                                        <div class="chat-history" node_ref=transcript_history_ref>
                                             <For
                                                 each=move || payload.chat_entries.clone().into_iter()
                                                 key=|entry| format!("{}:{}:{}:{:?}", entry.kind, entry.agent_id.clone().unwrap_or_default(), entry.text, entry.stats)
@@ -419,12 +449,13 @@ fn App() -> impl IntoView {
                             <h3>{move || format!("Prompt → {}", active_agent.get())}</h3>
                             <p>"Send input through the shared CLI-owned websocket."</p>
                         </div>
-                        <span class="shortcut">"⌘ ↵"</span>
+                        <span class="shortcut">"Enter to send · Shift+Enter for newline"</span>
                     </div>
                     <form on:submit=on_submit class="composer-form">
                         <textarea
                             prop:value=move || prompt.get()
                             on:input=move |ev| prompt.set(event_target_value(&ev))
+                            on:keydown=on_prompt_keydown
                             rows="3"
                             placeholder="Ask the active agent…"
                         />
@@ -435,7 +466,6 @@ fn App() -> impl IntoView {
         </div>
     }
 }
-
 
 #[component]
 fn ChatEntryRow(entry: WebChatEntry) -> impl IntoView {

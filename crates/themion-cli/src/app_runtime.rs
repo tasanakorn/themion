@@ -342,12 +342,12 @@ pub(crate) fn wire_stylos_event_streams(
     handle: &mut crate::stylos::StylosHandle,
     runtime_tx: &mpsc::UnboundedSender<AppRuntimeEvent>,
 ) {
-    let tui_domain = runtime_domains
+    let surface_domain = runtime_domains
         .tui()
-        .expect("tui runtime available in TUI mode");
+        .unwrap_or_else(|| runtime_domains.core());
     if let Some(mut cmd_rx) = handle.take_cmd_rx() {
         let runtime_tx_cmd = runtime_tx.clone();
-        tui_domain.spawn(async move {
+        surface_domain.spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
                 let _ = runtime_tx_cmd.send(AppRuntimeEvent::StylosCmd(cmd));
             }
@@ -355,7 +355,7 @@ pub(crate) fn wire_stylos_event_streams(
     }
     if let Some(mut prompt_rx) = handle.take_prompt_rx() {
         let runtime_tx_prompt = runtime_tx.clone();
-        tui_domain.spawn(async move {
+        surface_domain.spawn(async move {
             while let Some(prompt) = prompt_rx.recv().await {
                 let _ = runtime_tx_prompt.send(AppRuntimeEvent::IncomingPrompt(prompt));
             }
@@ -363,7 +363,7 @@ pub(crate) fn wire_stylos_event_streams(
     }
     if let Some(mut event_rx) = handle.take_event_rx() {
         let runtime_tx_event = runtime_tx.clone();
-        tui_domain.spawn(async move {
+        surface_domain.spawn(async move {
             while let Some(event) = event_rx.recv().await {
                 let _ = runtime_tx_event.send(AppRuntimeEvent::StylosEvent(event));
             }
