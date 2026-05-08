@@ -483,6 +483,11 @@ pre {
 .agent-tab {
   display: grid;
   gap: 0.1rem;
+  grid-template-areas:
+    "label"
+    "id"
+    "status"
+    "role";
   min-width: 8rem;
   border: 1px solid rgba(148, 163, 184, 0.14);
   border-radius: 0.18rem;
@@ -501,19 +506,46 @@ pre {
 }
 
 .agent-tab-label {
+  grid-area: label;
   overflow: hidden;
   color: #e5edf8;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.agent-tab code,
+.agent-tab code {
+  grid-area: id;
+}
+
+.agent-tab small:last-child {
+  grid-area: status;
+}
+
 .agent-tab small {
   overflow: hidden;
   color: #8fa1ba;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 0.7rem;
+}
+
+.agent-tab-roles {
+  grid-area: role;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem;
+  margin-top: 0.2rem;
+}
+
+.agent-tab-role {
+  justify-self: start;
+  padding: 0.02rem 0.3rem;
+  border: 1px solid rgba(125, 211, 252, 0.24);
+  border-radius: 999px;
+  background: rgba(14, 165, 233, 0.1);
+  color: #7dd3fc;
+  font-size: 0.58rem;
+  line-height: 1.15;
 }
 
 .content-grid {

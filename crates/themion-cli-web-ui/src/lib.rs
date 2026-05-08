@@ -323,6 +323,11 @@ fn App() -> impl IntoView {
                         children=move |agent| {
                             let agent_id = agent.agent_id.clone();
                             let subscribe_agent_id = agent.agent_id.clone();
+                            let role_chips = if agent.roles.is_empty() {
+                                vec!["-".to_string()]
+                            } else {
+                                agent.roles.clone()
+                            };
                             view! {
                                 <button
                                     type="button"
@@ -332,6 +337,15 @@ fn App() -> impl IntoView {
                                     <span class="agent-tab-label">{agent.label}</span>
                                     <code>{agent.agent_id}</code>
                                     <small>{if agent.busy { "busy" } else { "idle" }}</small>
+                                    <div class="agent-tab-roles">
+                                        <For
+                                            each=move || role_chips.clone().into_iter()
+                                            key=|role| role.clone()
+                                            children=move |role| view! {
+                                                <small class="agent-tab-role">{role}</small>
+                                            }
+                                        />
+                                    </div>
                                 </button>
                             }
                         }
