@@ -1,6 +1,6 @@
 use crate::config::{save_profiles, Config};
 use crate::tui::{AppEvent, App, Entry, FrameRequester};
-use crate::app_runtime::{start_watchdog_task, WatchdogRuntimeState};
+use crate::app_runtime::{start_watchdog_task, AppRuntimeObserverPublisher, AppSnapshotPublisher, WatchdogRuntimeState};
 use crate::runtime_domains::RuntimeDomains;
 use crate::Session;
 use std::path::PathBuf;
@@ -485,11 +485,11 @@ fn spawn_chat_message_index_worker(
     });
 }
 
-pub(crate) fn initialize_runtime_owner(
+fn initialize_runtime_owner(
     runtime: &mut AppRuntimeState,
     app_tx: mpsc::UnboundedSender<AppEvent>,
     runtime_tx: mpsc::UnboundedSender<AppRuntimeEvent>,
-    runtime_observer_publisher: crate::app_runtime::AppRuntimeObserverPublisher,
+    runtime_observer_publisher: AppRuntimeObserverPublisher,
 ) {
     runtime.local_agent_mgmt_tx = app_tx.clone();
     runtime.runtime_tx = runtime_tx;
@@ -546,23 +546,32 @@ pub fn start_tick_loop<T, F>(
 }
 
 
-pub fn start_tui_watchdog_loop(
-    app_state: &AppState,
-    runtime_tx: mpsc::UnboundedSender<AppRuntimeEvent>,
-) {
-    let tui_domain = app_state
-        .runtime_domains
-        .tui()
-        .expect("tui runtime available in TUI mode");
-    start_watchdog_loop_on_domain(&tui_domain, app_state, runtime_tx);
-}
 
-pub fn start_watchdog_loop_on_domain(
-    domain: &crate::runtime_domains::DomainHandle,
-    app_state: &AppState,
+
+pub(crate) async fn bootstrap_runtime_owner(
+    app_state: &mut AppState,
+    app_tx: mpsc::UnboundedSender<AppEvent>,
     runtime_tx: mpsc::UnboundedSender<AppRuntimeEvent>,
-) {
-    start_watchdog_task(domain, runtime_tx, app_state.runtime.watchdog_state.clone());
+    watchdog_domain: crate::runtime_domains::DomainHandle,
+) -> anyhow::Result<()> {
+    #[cfg(feature = "stylos")]
+    start_shared_runtime_services(app_state, &runtime_tx).await?;
+
+    let snapshot_publisher = AppSnapshotPublisher::new(app_state.snapshot_hub.clone());
+    let runtime_observer_publisher = AppRuntimeObserverPublisher::new(snapshot_publisher);
+
+    initialize_runtime_owner(
+        &mut app_state.runtime,
+        app_tx,
+        runtime_tx.clone(),
+        runtime_observer_publisher,
+    );
+    start_watchdog_task(
+        &watchdog_domain,
+        runtime_tx,
+        app_state.runtime.watchdog_state.clone(),
+    );
+    Ok(())
 }
 
 
@@ -1186,6 +1195,27 @@ fn schedule_queued_talk_drain(app: &App, agent_id: &str) {
 }
 
 #[cfg(feature = "stylos")]
+fn queue_counts_by_agent(app: &App) -> std::collections::HashMap<String, usize> {
+    app.runtime
+        .stylos
+        .as_ref()
+        .map(|stylos| {
+            app.runtime
+                .agents
+                .iter()
+                .filter_map(|agent| {
+                    let count = stylos
+                        .query_context()
+                        .talk_queue()
+                        .count_for_agent(&agent.agent_id);
+                    (count > 0).then_some((agent.agent_id.clone(), count))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "stylos")]
 fn drain_one_queued_talk_for_agent(
     app: &mut App,
     agent_id: String,
@@ -1652,6 +1682,29 @@ fn process_incoming_prompt_request(
     request: crate::local_prompts::IncomingPromptRequest,
     _app_tx: &mpsc::UnboundedSender<crate::tui::AppEvent>,
 ) {
+    #[cfg(feature = "stylos")]
+    if matches!(request.source, crate::local_prompts::IncomingPromptSource::WatchdogBoardNote)
+        && app.runtime
+            .stylos
+            .as_ref()
+            .map(|stylos| stylos.query_context().talk_queue().count_for_agent(
+                request.agent_id.as_deref().unwrap_or("interactive"),
+            ) > 0)
+            .unwrap_or(false)
+    {
+        if let Some(note_id) = crate::board_runtime::board_note_id_from_prompt(&request.prompt) {
+            crate::board_runtime::release_board_note_claim(&app.runtime.board_claims, note_id);
+        }
+        app.push(crate::tui::Entry::RemoteEvent {
+            agent_id: request.agent_id.clone(),
+            source: Some(crate::tui::NonAgentSource::Runtime),
+            text: format!(
+                "watchdog deferred {} because queued Stylos talk has priority",
+                crate::app_runtime::stylos_note_display_identifier(&request.prompt)
+            ),
+        });
+        return;
+    }
     let outcome = crate::app_runtime::plan_incoming_prompt(
         &crate::app_runtime::build_local_agent_status_entries(&app.runtime.agents, &app.runtime.incoming_prompts),
         &app.runtime.board_claims,
@@ -1791,6 +1844,8 @@ fn current_local_instance_id(_app: &App) -> String {
 }
 
 fn handle_watchdog_tick_local_event(app: &mut App) {
+    #[cfg(feature = "stylos")]
+    let queued_talk_by_agent = queue_counts_by_agent(app);
     let agent_statuses = crate::app_runtime::build_local_agent_status_entries_local(&app.runtime.agents);
     let mut candidate_ids = agent_statuses
         .iter()
@@ -1823,12 +1878,7 @@ fn handle_watchdog_tick_local_event(app: &mut App) {
             continue;
         }
         #[cfg(feature = "stylos")]
-        if app.runtime
-            .stylos
-            .as_ref()
-            .map(|stylos| stylos.query_context().talk_queue().count_for_agent(&agent_id) > 0)
-            .unwrap_or(false)
-        {
+        if queued_talk_by_agent.get(&agent_id).copied().unwrap_or(0) > 0 {
             schedule_queued_talk_drain(app, &agent_id);
             return;
         }
@@ -1838,6 +1888,10 @@ fn handle_watchdog_tick_local_event(app: &mut App) {
             {
                 continue;
             }
+        }
+        #[cfg(feature = "stylos")]
+        if queued_talk_by_agent.values().any(|count| *count > 0) {
+            continue;
         }
         let Some(request) = crate::board_runtime::resolve_pending_board_note_injection(
             &app.runtime.db,

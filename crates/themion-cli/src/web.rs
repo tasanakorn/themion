@@ -1,5 +1,5 @@
 use crate::app_state::{AppRuntimeState, AppSnapshot, AppState};
-use crate::surface_runner::{build_surface_app, handle_surface_app_event, handle_surface_runtime_event, start_snapshot_watch_loop, SurfaceRunnerContext};
+use crate::surface_runner::{handle_surface_app_event, handle_surface_runtime_event, start_snapshot_watch_loop, SurfaceRunnerContext};
 use anyhow::{anyhow, Context};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -228,13 +228,8 @@ pub fn run(mut app_state: AppState, bind_addr: SocketAddr) -> anyhow::Result<()>
     let web_runtime = runtime_domains.core();
     web_runtime.block_on(async move {
         let (agent_event_tx, _) = broadcast::channel::<WebAgentEvent>(256);
-        #[cfg(feature = "stylos")]
-        {
-            let (runtime_tx, _runtime_rx) = tokio::sync::mpsc::unbounded_channel();
-            crate::app_state::start_shared_runtime_services(&mut app_state, &runtime_tx).await?;
-        }
         let chat_entries = Arc::new(std::sync::Mutex::new(Vec::<WebChatEntry>::new()));
-        let web_input_tx = start_web_surface_loop(&mut app_state, agent_event_tx.clone(), chat_entries.clone());
+        let web_input_tx = start_web_surface_loop(&mut app_state, agent_event_tx.clone(), chat_entries.clone()).await?;
         let terminal_service = start_terminal_runtime().await?;
         #[cfg(feature = "stylos")]
         let stylos = app_state.runtime.stylos.take();
@@ -758,15 +753,31 @@ fn binary_asset_response(body: &[u8], content_type: &'static str) -> Response {
     asset_response(body, content_type)
 }
 
-fn start_web_surface_loop(
+async fn start_web_surface_loop(
     app_state: &mut AppState,
     agent_event_tx: broadcast::Sender<WebAgentEvent>,
     chat_entries: Arc<std::sync::Mutex<Vec<WebChatEntry>>>,
-) -> mpsc::UnboundedSender<WebInputEvent> {
+) -> anyhow::Result<mpsc::UnboundedSender<WebInputEvent>> {
     let runtime_domains = app_state.runtime_domains.clone();
     let mut ctx = SurfaceRunnerContext::build(&runtime_domains);
     start_snapshot_watch_loop(&runtime_domains, &app_state.snapshot_hub, &ctx.app_tx);
-    let mut app = build_surface_app(app_state, &ctx);
+
+    let snapshot_hub = app_state.snapshot_hub.clone();
+    let initial_snapshot = snapshot_hub.current();
+
+    crate::app_state::bootstrap_runtime_owner(
+        app_state,
+        ctx.app_tx.clone(),
+        ctx.runtime_tx.clone(),
+        ctx.domain.clone(),
+    ).await?;
+
+    let placeholder_runtime =
+        crate::app_state::AppRuntimeState::placeholder_for_surface_transfer_from(&app_state.runtime);
+    let mut app = crate::tui::App::new(
+        std::mem::replace(&mut app_state.runtime, placeholder_runtime),
+        initial_snapshot,
+    );
     update_web_chat_entries(&chat_entries, &app.entries);
     let web_input_tx = {
         let (tx, mut rx) = mpsc::unbounded_channel::<WebInputEvent>();
@@ -801,7 +812,7 @@ fn start_web_surface_loop(
         });
         tx
     };
-    web_input_tx
+    Ok(web_input_tx)
 }
 
 

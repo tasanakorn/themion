@@ -1819,7 +1819,7 @@ pub(crate) fn resolve_incoming_prompt_disposition(
     let sender_agent = request.from_agent_id.as_deref().unwrap_or("unknown");
     let target_instance = request.to.as_deref().unwrap_or("unknown target");
     let target_agent = request.to_agent_id.as_deref().unwrap_or(target.as_str());
-    let is_note = request.prompt.starts_with("type=stylos_note ");
+    let is_note = crate::local_prompts::is_board_note_prompt(&request.prompt);
 
     let Some(agent_index) = agents.iter().position(|h| h.agent_id == target) else {
         return IncomingPromptDisposition::MissingTarget {
@@ -1953,7 +1953,7 @@ pub(crate) fn resolve_submit_target(
             let sender_agent = request.from_agent_id.as_deref().unwrap_or("unknown");
             let target_instance = request.to.as_deref().unwrap_or("unknown target");
             let target_agent = request.to_agent_id.as_deref().unwrap_or(target_agent_id);
-            let log_text = if request.prompt.starts_with("type=stylos_note ") {
+            let log_text = if crate::local_prompts::is_board_note_prompt(&request.prompt) {
                 let note_identifier = stylos_note_display_identifier(&request.prompt);
                 format!(
                     "Board note intake {} from={} from_agent_id={} to={} to_agent_id={} rejected: target agent missing locally",

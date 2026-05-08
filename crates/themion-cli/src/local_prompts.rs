@@ -73,3 +73,8 @@ pub fn build_board_note_prompt(
         ),
     }
 }
+
+#[cfg(feature = "stylos")]
+pub fn is_board_note_prompt(prompt: &str) -> bool {
+    prompt.starts_with(NOTE_PREFIX)
+}

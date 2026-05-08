@@ -1,5 +1,4 @@
-use crate::app_runtime::{AppRuntimeObserverPublisher, AppSnapshotPublisher};
-use crate::app_state::{AppRuntimeEvent, AppState};
+use crate::app_state::AppRuntimeEvent;
 use crate::runtime_domains::{DomainHandle, RuntimeDomains};
 use crate::tui::{App, AppEvent, FrameRequester};
 use crate::tui_runner::create_frame_requester;
@@ -58,27 +57,6 @@ pub(crate) fn start_tick_loop_on_domain<T, F>(
     });
 }
 
-pub(crate) fn build_surface_app(app_state: &mut AppState, ctx: &SurfaceRunnerContext) -> App {
-    let snapshot_hub = app_state.snapshot_hub.clone();
-    let initial_snapshot = snapshot_hub.current();
-    let snapshot_publisher = AppSnapshotPublisher::new(snapshot_hub);
-    let runtime_observer_publisher = AppRuntimeObserverPublisher::new(snapshot_publisher);
-
-    crate::app_state::initialize_runtime_owner(
-        &mut app_state.runtime,
-        ctx.app_tx.clone(),
-        ctx.runtime_tx.clone(),
-        runtime_observer_publisher,
-    );
-    crate::app_state::start_watchdog_loop_on_domain(&ctx.domain, app_state, ctx.runtime_tx.clone());
-
-    let placeholder_runtime =
-        crate::app_state::AppRuntimeState::placeholder_for_surface_transfer_from(&app_state.runtime);
-    App::new(
-        std::mem::replace(&mut app_state.runtime, placeholder_runtime),
-        initial_snapshot,
-    )
-}
 
 pub(crate) fn start_snapshot_watch_loop(
     runtime_domains: &Arc<RuntimeDomains>,

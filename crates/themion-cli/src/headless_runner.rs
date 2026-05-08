@@ -43,17 +43,16 @@ fn emit_event<T: Serialize>(event: &str, data: T) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn run(app_runtime: AppState) -> anyhow::Result<()> {
-    #[cfg(feature = "stylos")]
-    let mut app_runtime = app_runtime;
-    #[cfg(not(feature = "stylos"))]
-    let app_runtime = app_runtime;
-
-    #[cfg(feature = "stylos")]
-    {
-        let (runtime_tx, _runtime_rx) = tokio::sync::mpsc::unbounded_channel();
-        crate::app_state::start_shared_runtime_services(&mut app_runtime, &runtime_tx).await?;
-    }
+pub async fn run(mut app_runtime: AppState) -> anyhow::Result<()> {
+    let (app_tx, _app_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (runtime_tx, _runtime_rx) = tokio::sync::mpsc::unbounded_channel();
+    let watchdog_domain = app_runtime.runtime.background_domain();
+    crate::app_state::bootstrap_runtime_owner(
+        &mut app_runtime,
+        app_tx,
+        runtime_tx,
+        watchdog_domain,
+    ).await?;
 
     let project_dir = app_runtime.runtime.project_dir.display().to_string();
     emit_event(
@@ -88,17 +87,16 @@ pub async fn run(app_runtime: AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn run_non_interactive(app_runtime: AppState, _prompt: String) -> anyhow::Result<()> {
-    #[cfg(feature = "stylos")]
-    let mut app_runtime = app_runtime;
-    #[cfg(not(feature = "stylos"))]
-    let _app_runtime = app_runtime;
-
-    #[cfg(feature = "stylos")]
-    {
-        let (runtime_tx, _runtime_rx) = tokio::sync::mpsc::unbounded_channel();
-        crate::app_state::start_shared_runtime_services(&mut app_runtime, &runtime_tx).await?;
-    }
+pub async fn run_non_interactive(mut app_runtime: AppState, _prompt: String) -> anyhow::Result<()> {
+    let (app_tx, _app_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (runtime_tx, _runtime_rx) = tokio::sync::mpsc::unbounded_channel();
+    let watchdog_domain = app_runtime.runtime.background_domain();
+    crate::app_state::bootstrap_runtime_owner(
+        &mut app_runtime,
+        app_tx,
+        runtime_tx,
+        watchdog_domain,
+    ).await?;
 
     emit_event(
         "headless_result",

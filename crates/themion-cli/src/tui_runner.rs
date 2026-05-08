@@ -1,4 +1,3 @@
-use crate::app_runtime::{AppRuntimeObserverPublisher, AppSnapshotPublisher};
 use crate::app_state::{start_tick_loop, AppRuntimeEvent, AppState};
 use crate::runtime_domains::{DomainHandle, RuntimeDomains};
 use crate::tui::{dispatch_terminal_event, draw, App, AppEvent, FrameRequester};
@@ -245,23 +244,16 @@ pub async fn run(mut app_runtime: AppState) -> anyhow::Result<()> {
     let runtime_domains = app_runtime.runtime_domains.clone();
     let mut ctx = RunnerContext::build(&runtime_domains);
 
-    #[cfg(feature = "stylos")]
-    crate::app_state::start_shared_runtime_services(&mut app_runtime, &ctx.runtime_tx).await?;
-
     let snapshot_hub = app_runtime.snapshot_hub.clone();
     let initial_snapshot = snapshot_hub.current();
-    let snapshot_publisher = AppSnapshotPublisher::new(snapshot_hub.clone());
-    let runtime_observer_publisher = AppRuntimeObserverPublisher::new(snapshot_publisher);
     start_snapshot_watch_loop(&runtime_domains, &snapshot_hub, &ctx.app_tx);
 
-    crate::app_state::start_tui_watchdog_loop(&app_runtime, ctx.runtime_tx.clone());
-
-    crate::app_state::initialize_runtime_owner(
-        &mut app_runtime.runtime,
+    crate::app_state::bootstrap_runtime_owner(
+        &mut app_runtime,
         ctx.app_tx.clone(),
         ctx.runtime_tx.clone(),
-        runtime_observer_publisher,
-    );
+        runtime_domains.tui().expect("tui runtime available in TUI mode"),
+    ).await?;
 
     let mut app = build_app(app_runtime.runtime, initial_snapshot);
 
