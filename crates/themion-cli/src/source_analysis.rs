@@ -5,7 +5,8 @@ use std::fs;
 use std::path::Path;
 use themion_core::tools::{
     SourceExtractSymbolsResult, SourceExtractedSymbol, SourceOutlineEdge, SourceOutlineFile,
-    SourceOutlineImport, SourceOutlineResult, SourceOutlineSymbol, SourceSymbolSpan,
+    SourceOutlineImport, SourceOutlineNormalImport, SourceOutlineNormalResult,
+    SourceOutlineNormalSymbol, SourceOutlineResult, SourceOutlineSymbol, SourceSymbolSpan,
 };
 use tree_sitter_language_pack::{
     detect_language_from_extension, detect_language_from_path, ImportInfo, ProcessConfig,
@@ -27,8 +28,14 @@ pub(crate) fn handle_source_analysis_request(
                 .get("path")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow::anyhow!("missing path"))?;
+            let detail = parse_source_outline_detail(args.get("detail"))?;
             let result = source_outline(project_dir, path)?;
-            Ok(serde_json::to_string(&result)?)
+            match detail {
+                SourceOutlineDetail::Full => Ok(serde_json::to_string(&result)?),
+                SourceOutlineDetail::Normal => {
+                    Ok(serde_json::to_string(&source_outline_normal(result))?)
+                }
+            }
         }
         "source_extract_symbols" => {
             let path = args
@@ -39,6 +46,26 @@ pub(crate) fn handle_source_analysis_request(
             Ok(serde_json::to_string(&result)?)
         }
         other => Err(anyhow::anyhow!("unknown source analysis action: {other}")),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceOutlineDetail {
+    Normal,
+    Full,
+}
+
+fn parse_source_outline_detail(value: Option<&Value>) -> Result<SourceOutlineDetail> {
+    let Some(value) = value else {
+        return Ok(SourceOutlineDetail::Full);
+    };
+    let detail = value
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("source_outline detail must be a string"))?;
+    match detail {
+        "normal" => Ok(SourceOutlineDetail::Normal),
+        "full" => Ok(SourceOutlineDetail::Full),
+        other => anyhow::bail!("invalid source_outline detail: {other}; expected normal or full"),
     }
 }
 
@@ -141,6 +168,60 @@ fn source_outline(project_dir: &Path, path_arg: &str) -> Result<SourceOutlineRes
         parse_error,
         warnings,
     })
+}
+
+fn source_outline_normal(outline: SourceOutlineResult) -> SourceOutlineNormalResult {
+    SourceOutlineNormalResult {
+        language: outline.language,
+        path: outline.path,
+        detail: "normal".to_string(),
+        symbols: outline
+            .symbols
+            .into_iter()
+            .map(|symbol| {
+                SourceOutlineNormalSymbol(
+                    symbol.kind,
+                    symbol.name,
+                    span_array(&symbol.span),
+                    symbol.parent_name,
+                )
+            })
+            .collect(),
+        imports: outline
+            .imports
+            .into_iter()
+            .map(|import| {
+                SourceOutlineNormalImport(import_display_text(&import), import.span.start_line)
+            })
+            .collect(),
+        parse_error: outline.parse_error,
+        warnings: outline.warnings,
+    }
+}
+
+fn span_array(span: &SourceSymbolSpan) -> [usize; 4] {
+    [
+        span.start_line,
+        span.start_byte,
+        span.end_line,
+        span.end_byte,
+    ]
+}
+
+fn import_display_text(import: &SourceOutlineImport) -> String {
+    let mut text = import.module.clone();
+    if !import.items.is_empty() {
+        text.push_str("::{");
+        text.push_str(&import.items.join(","));
+        text.push('}');
+    } else if import.is_wildcard {
+        text.push_str("::*");
+    }
+    if let Some(alias) = import.alias.as_deref() {
+        text.push_str(" as ");
+        text.push_str(alias);
+    }
+    text
 }
 
 fn flatten_structure_items(
@@ -322,12 +403,16 @@ fn top() {}
 "#,
         );
         let project_dir = dir_guard.path();
-        let outline = source_outline(project_dir, relative.to_str().unwrap()).expect("outline source");
+        let outline =
+            source_outline(project_dir, relative.to_str().unwrap()).expect("outline source");
 
         assert_eq!(outline.language, "rust");
         assert_eq!(outline.file.id, "file:sample.rs");
         assert!(outline.symbols.iter().any(|symbol| symbol.name == "top"));
-        assert!(outline.imports.iter().any(|import| import.module.contains("std::fs")));
+        assert!(outline
+            .imports
+            .iter()
+            .any(|import| import.module.contains("std::fs")));
 
         let ids = valid_node_ids(&outline.file, &outline.symbols, &outline.imports);
         assert!(outline
@@ -347,10 +432,132 @@ fn top() {}
     }
 
     #[test]
+    fn source_outline_detail_defaults_to_full_shape() {
+        let (dir_guard, relative) = write_temp_source("fn top() {}\n");
+        let args = serde_json::json!({ "path": relative.to_str().unwrap() });
+        let text = handle_source_analysis_request(dir_guard.path(), "source_outline", args)
+            .expect("outline source");
+        let value: serde_json::Value = serde_json::from_str(&text).expect("json outline");
+
+        assert_eq!(value["language"], "rust");
+        assert!(value.get("file").is_some());
+        assert!(value.get("edges").is_some());
+        assert!(value.get("detail").is_none());
+    }
+
+    #[test]
+    fn source_outline_full_detail_keeps_full_shape() {
+        let (dir_guard, relative) = write_temp_source("fn top() {}\n");
+        let args = serde_json::json!({ "path": relative.to_str().unwrap(), "detail": "full" });
+        let text = handle_source_analysis_request(dir_guard.path(), "source_outline", args)
+            .expect("outline source");
+        let value: serde_json::Value = serde_json::from_str(&text).expect("json outline");
+
+        assert_eq!(value["language"], "rust");
+        assert!(value.get("file").is_some());
+        assert!(value.get("edges").is_some());
+        assert!(value.get("detail").is_none());
+    }
+
+    #[test]
+    fn source_outline_normal_detail_uses_compact_arrays() {
+        let (dir_guard, relative) = write_temp_source(
+            r#"
+use std::fs;
+
+mod inner {
+    pub fn nested() {}
+}
+"#,
+        );
+        let args = serde_json::json!({ "path": relative.to_str().unwrap(), "detail": "normal" });
+        let text = handle_source_analysis_request(dir_guard.path(), "source_outline", args)
+            .expect("outline source");
+        let value: serde_json::Value = serde_json::from_str(&text).expect("json outline");
+
+        assert_eq!(value["detail"], "normal");
+        assert!(value.get("file").is_none());
+        assert!(value.get("edges").is_none());
+        assert!(value["symbols"].as_array().unwrap().iter().any(|row| {
+            row.as_array().is_some_and(|items| {
+                items.len() == 4
+                    && items[0] == "function"
+                    && items[1] == "nested"
+                    && items[3] == "inner"
+            })
+        }));
+        assert!(value["imports"].as_array().unwrap().iter().any(|row| {
+            row.as_array().is_some_and(|items| {
+                items.len() == 2 && items[0].as_str().unwrap().contains("std::fs")
+            })
+        }));
+    }
+
+    #[test]
+    fn source_outline_rejects_invalid_detail() {
+        let (dir_guard, relative) = write_temp_source("fn top() {}\n");
+        let args = serde_json::json!({ "path": relative.to_str().unwrap(), "detail": "compact" });
+        let err = handle_source_analysis_request(dir_guard.path(), "source_outline", args)
+            .expect_err("invalid detail should fail");
+
+        assert!(err
+            .to_string()
+            .contains("invalid source_outline detail: compact"));
+    }
+
+    #[test]
+    fn normal_projection_preserves_parse_error_and_warnings() {
+        let outline = SourceOutlineResult {
+            language: "rust".to_string(),
+            path: "sample.rs".to_string(),
+            file: SourceOutlineFile {
+                id: "file:sample.rs".to_string(),
+                kind: "file".to_string(),
+                path: "sample.rs".to_string(),
+            },
+            symbols: vec![SourceOutlineSymbol {
+                id: "symbol:sample.rs:function:top:1:0".to_string(),
+                name: "top".to_string(),
+                kind: "function".to_string(),
+                parent_id: None,
+                parent_name: None,
+                span: SourceSymbolSpan {
+                    start_line: 1,
+                    start_byte: 0,
+                    end_line: 1,
+                    end_byte: 11,
+                },
+            }],
+            imports: Vec::new(),
+            edges: Vec::new(),
+            parse_error: Some("parse reported 1 error(s)".to_string()),
+            warnings: vec!["symbols truncated at 500".to_string()],
+        };
+
+        let value = serde_json::to_value(source_outline_normal(outline)).expect("serialize normal");
+
+        assert_eq!(value["parse_error"], "parse reported 1 error(s)");
+        assert_eq!(value["warnings"][0], "symbols truncated at 500");
+    }
+
+    #[test]
+    fn normal_projection_is_smaller_than_full_projection() {
+        let (dir_guard, relative) =
+            write_temp_source("use std::fs;\nmod inner { pub fn nested() {} }\nfn top() {}\n");
+        let outline =
+            source_outline(dir_guard.path(), relative.to_str().unwrap()).expect("outline source");
+        let full_text = serde_json::to_string(&outline).expect("serialize full");
+        let normal_text =
+            serde_json::to_string(&source_outline_normal(outline)).expect("serialize normal");
+
+        assert!(normal_text.len() < full_text.len());
+    }
+
+    #[test]
     fn source_outline_omits_absent_optional_fields() {
         let (dir_guard, relative) = write_temp_source("fn top() {}\n");
-        let outline = source_outline(dir_guard.path(), relative.to_str().unwrap())
-            .expect("outline source");
+        let outline =
+            source_outline(dir_guard.path(), relative.to_str().unwrap()).expect("outline source");
         let value = serde_json::to_value(outline).expect("serialize outline");
 
         assert!(value.get("parse_error").is_none());

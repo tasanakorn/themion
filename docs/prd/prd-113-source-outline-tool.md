@@ -395,6 +395,8 @@ Implemented in v0.71.0. The landed slice adds the `source_outline` tool contract
 
 The implemented outline returns graph-ready file, symbol, import, and edge records. It applies the PRD bounds of 500 symbols, 200 imports, and 1000 edges, omits absent optional fields, and keeps existing tool-error behavior for hard failures such as unreadable files or undetected languages.
 
+PRD-116 extends this implemented tool in v0.72.0 with compact detail levels. The PRD-113 full result shape remains available and remains the default when `detail` is omitted; callers can request `detail: "normal"` for compact navigation output.
+
 Validation run for this slice:
 
 - `cargo test -p themion-cli source_analysis`

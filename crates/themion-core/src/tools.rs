@@ -477,6 +477,25 @@ pub struct SourceOutlineResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceOutlineNormalResult {
+    pub language: String,
+    pub path: String,
+    pub detail: String,
+    pub symbols: Vec<SourceOutlineNormalSymbol>,
+    pub imports: Vec<SourceOutlineNormalImport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parse_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceOutlineNormalSymbol(pub String, pub String, pub [usize; 4], pub Option<String>);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceOutlineNormalImport(pub String, pub usize);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceOutlineFile {
     pub id: String,
     pub kind: String,
@@ -794,11 +813,12 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "source_outline",
-                "description": "Detect language and return a bounded one-file outline with symbols, imports, and simple edges.",
+                "description": "Detect language and return a bounded one-file outline. Use detail=normal for compact navigation or full for graph-ready IDs and edges.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "Source file path to analyze" }
+                        "path": { "type": "string", "description": "Source file path to analyze" },
+                        "detail": { "type": "string", "enum": ["normal", "full"], "description": "Output detail. Default: full for compatibility. Use normal for compact navigation." }
                     },
                     "required": ["path"]
                 }
