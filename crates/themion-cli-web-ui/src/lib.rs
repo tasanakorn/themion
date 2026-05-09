@@ -131,10 +131,9 @@ impl SharedSocket {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ViewTab {
-    Summary,
+    Status,
     Transcript,
     Agents,
-    Shell,
     Terminal,
 }
 
@@ -158,8 +157,14 @@ fn App() -> impl IntoView {
     let transcript_history_ref = NodeRef::<Div>::new();
     let transcript_trailing = RwSignal::new(true);
 
-    let shared_socket =
-        create_shared_socket(socket_state, agent_stream, shell_stream, status, transcript);
+    let shared_socket = create_shared_socket(
+        socket_state,
+        agent_stream,
+        shell_stream,
+        status,
+        transcript,
+        agents,
+    );
     let shared_socket_for_effect = shared_socket.clone();
     let shared_socket_for_submit = shared_socket.clone();
     let shared_socket_for_keydown = shared_socket.clone();
@@ -184,6 +189,27 @@ fn App() -> impl IntoView {
             transcript.set(transcript_payload);
             agents.set(agents_payload);
         });
+    });
+
+    Effect::new(move |_| {
+        let status_payload = status.get();
+        let current_agent = active_agent.get();
+        if let Some(payload) = status_payload {
+            let available = payload.local_agents.iter().any(|agent| agent.agent_id == current_agent);
+            if !available {
+                let next_agent = payload
+                    .primary_agent_id
+                    .clone()
+                    .or_else(|| payload.local_agents.first().map(|agent| agent.agent_id.clone()))
+                    .unwrap_or_else(|| "master".to_string());
+                active_agent.set(next_agent);
+            }
+        }
+    });
+
+    Effect::new(move |_| {
+        let selected = active_agent.get();
+        shared_socket.send("subscribe", "agent", &selected, serde_json::json!({}));
     });
 
     Effect::new(move |_| {
@@ -303,10 +329,9 @@ fn App() -> impl IntoView {
                     <div>
                         <p class="eyebrow">"themion-cli --web"</p>
                         <h2>{move || match active_tab.get() {
-                            ViewTab::Summary => "Overview",
+                            ViewTab::Status => "Status",
                             ViewTab::Transcript => "Transcript",
                             ViewTab::Agents => "Agents",
-                            ViewTab::Shell => "Realtime Streams",
                             ViewTab::Terminal => "Terminal",
                         }}</h2>
                     </div>
@@ -353,15 +378,14 @@ fn App() -> impl IntoView {
                 </section>
 
                 <section class=move || if active_tab.get() == ViewTab::Terminal { "tab-strip hidden" } else { "tab-strip" } aria-label="workspace tabs">
-                    <button type="button" class=move || if active_tab.get() == ViewTab::Summary { "tab active" } else { "tab" } on:click=move |_| active_tab.set(ViewTab::Summary)>"Overview"</button>
                     <button type="button" class=move || if active_tab.get() == ViewTab::Transcript { "tab active" } else { "tab" } on:click=move |_| active_tab.set(ViewTab::Transcript)>"Transcript"</button>
+                    <button type="button" class=move || if active_tab.get() == ViewTab::Status { "tab active" } else { "tab" } on:click=move |_| active_tab.set(ViewTab::Status)>"Status"</button>
                     <button type="button" class=move || if active_tab.get() == ViewTab::Agents { "tab active" } else { "tab" } on:click=move |_| active_tab.set(ViewTab::Agents)>"Agents"</button>
-                    <button type="button" class=move || if active_tab.get() == ViewTab::Shell { "tab active" } else { "tab" } on:click=move |_| active_tab.set(ViewTab::Shell)>"Streams"</button>
                 </section>
 
                 <div class=move || if active_tab.get() == ViewTab::Terminal { "content-grid terminal-empty" } else { "content-grid" }>
                     {move || match active_tab.get() {
-                        ViewTab::Summary => view! {
+                        ViewTab::Status => view! {
                             <>
                                 <section class="panel hero-panel">
                                     <div class="panel-title">
@@ -466,24 +490,6 @@ fn App() -> impl IntoView {
                                     None => view! { <p class="muted">"Loading agents…"</p> }.into_any(),
                                 }}
                             </section>
-                        }.into_any(),
-                        ViewTab::Shell => view! {
-                            <>
-                                <section class="panel stream-panel">
-                                    <div class="panel-title">
-                                        <h3>"Agent stream"</h3>
-                                        <span class="badge subtle">"domain=agent"</span>
-                                    </div>
-                                    <pre>{move || agent_stream.get().join("\n")}</pre>
-                                </section>
-                                <section class="panel stream-panel">
-                                    <div class="panel-title">
-                                        <h3>"Terminal stream"</h3>
-                                        <span class="badge subtle">"domain=terminal"</span>
-                                    </div>
-                                    <pre>{move || shell_stream.get().join("\n")}</pre>
-                                </section>
-                            </>
                         }.into_any(),
                         ViewTab::Terminal => view! { <></> }.into_any(),
                     }}
@@ -614,6 +620,7 @@ fn create_shared_socket(
     shell_stream: RwSignal<Vec<String>>,
     status: RwSignal<Option<WebStatusResponse>>,
     transcript: RwSignal<Option<WebTranscriptResponse>>,
+    agents: RwSignal<Option<WebAgentsResponse>>,
 ) -> SharedSocket {
     let location = web_sys::window().expect("window").location();
     let protocol = match location.protocol().ok().as_deref() {
@@ -655,6 +662,7 @@ fn create_shared_socket(
                     envelope.sequence_id, envelope.target_id, envelope.payload
                 );
                 let refresh_transcript = matches!(envelope.domain.as_str(), "agent" | "runtime");
+                let refresh_agents = envelope.domain == "runtime";
                 match envelope.domain.as_str() {
                     "agent" => agent_stream.update(|lines| lines.push(line)),
                     "terminal" => shell_stream.update(|lines| lines.push(line)),
@@ -668,9 +676,18 @@ fn create_shared_socket(
                     _ => {}
                 }
                 if refresh_transcript {
+                    let transcript = transcript;
                     leptos::task::spawn_local(async move {
                         if let Ok(payload) = fetch_transcript().await {
                             transcript.set(Some(payload));
+                        }
+                    });
+                }
+                if refresh_agents {
+                    let agents = agents;
+                    leptos::task::spawn_local(async move {
+                        if let Ok(payload) = fetch_agents().await {
+                            agents.set(Some(payload));
                         }
                     });
                 }
