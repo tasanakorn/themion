@@ -117,6 +117,9 @@ pub struct AppSnapshotAgent {
     pub roles: Vec<String>,
     pub busy: bool,
     pub incoming: bool,
+    pub activity_status: Option<String>,
+    pub activity_label: Option<String>,
+    pub activity_changed_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -218,6 +221,8 @@ pub(crate) struct AppRuntimeState {
     pub idle_status_changed_at: Option<u64>,
     pub agent_activity: Option<AgentActivity>,
     pub agent_activity_changed_at: Option<u64>,
+    pub agent_activity_by_session: std::collections::HashMap<Uuid, AgentActivity>,
+    pub agent_activity_changed_at_by_session: std::collections::HashMap<Uuid, u64>,
     pub stream_chunks: u64,
     pub stream_chars: u64,
     pub recent_events: std::collections::VecDeque<AppRecentEvent>,
@@ -306,6 +311,8 @@ impl AppRuntimeState {
             idle_status_changed_at: None,
             agent_activity: None,
             agent_activity_changed_at: None,
+            agent_activity_by_session: std::collections::HashMap::new(),
+            agent_activity_changed_at_by_session: std::collections::HashMap::new(),
             stream_chunks: 0,
             stream_chars: 0,
             recent_events: std::collections::VecDeque::new(),
@@ -371,6 +378,9 @@ impl AppState {
                 roles: vec!["master".to_string(), "interactive".to_string()],
                 busy: false,
                 incoming: false,
+                activity_status: None,
+                activity_label: None,
+                activity_changed_at_ms: None,
             }],
             #[cfg(feature = "stylos")]
             stylos_status: Some("off".to_string()),
@@ -421,6 +431,8 @@ impl AppState {
                 idle_status_changed_at: Some(process_started_at_ms),
                 agent_activity: None,
                 agent_activity_changed_at: None,
+                agent_activity_by_session: std::collections::HashMap::new(),
+                agent_activity_changed_at_by_session: std::collections::HashMap::new(),
                 stream_chunks: 0,
                 stream_chars: 0,
                 recent_events: std::collections::VecDeque::new(),
@@ -721,15 +733,30 @@ pub(crate) fn runtime_expire_ctrl_c_exit_if_needed(
 }
 
 pub(crate) fn set_agent_activity(app: &mut App, activity: AgentActivity) {
+    set_agent_activity_for_session(app, app.runtime.session_id, activity);
+}
+
+pub(crate) fn set_agent_activity_for_session(app: &mut App, sid: Uuid, activity: AgentActivity) {
     let activity_changed = app
         .runtime
-        .agent_activity
-        .as_ref()
+        .agent_activity_by_session
+        .get(&sid)
         .map(|current| std::mem::discriminant(current) != std::mem::discriminant(&activity))
         .unwrap_or(true);
-    app.runtime.agent_activity = Some(activity);
+    app.runtime
+        .agent_activity_by_session
+        .insert(sid, activity.clone());
+    if sid == app.runtime.session_id {
+        app.runtime.agent_activity = Some(activity);
+    }
     if activity_changed {
-        app.runtime.agent_activity_changed_at = Some(crate::tui::unix_epoch_now_ms());
+        let changed_at = crate::tui::unix_epoch_now_ms();
+        app.runtime
+            .agent_activity_changed_at_by_session
+            .insert(sid, changed_at);
+        if sid == app.runtime.session_id {
+            app.runtime.agent_activity_changed_at = Some(changed_at);
+        }
     }
     app.runtime.idle_since = None;
     app.runtime.watchdog_no_pending_since_by_agent.clear();
@@ -740,12 +767,22 @@ pub(crate) fn set_agent_activity(app: &mut App, activity: AgentActivity) {
 }
 
 pub(crate) fn clear_agent_activity(app: &mut App) {
-    app.runtime.agent_activity = None;
-    app.runtime.agent_activity_changed_at = None;
-    app.runtime.idle_since = Some(std::time::Instant::now());
+    clear_agent_activity_for_session(app, app.runtime.session_id);
+}
+
+pub(crate) fn clear_agent_activity_for_session(app: &mut App, sid: Uuid) {
+    app.runtime.agent_activity_by_session.remove(&sid);
+    app.runtime.agent_activity_changed_at_by_session.remove(&sid);
+    if sid == app.runtime.session_id {
+        app.runtime.agent_activity = None;
+        app.runtime.agent_activity_changed_at = None;
+    }
+    if app.runtime.agent_activity_by_session.is_empty() {
+        app.runtime.idle_since = Some(std::time::Instant::now());
+        app.runtime.idle_status_changed_at = Some(crate::tui::unix_epoch_now_ms());
+        app.runtime.pending = None;
+    }
     app.runtime.watchdog_no_pending_since_by_agent.clear();
-    app.runtime.idle_status_changed_at = Some(crate::tui::unix_epoch_now_ms());
-    app.runtime.pending = None;
     app.mark_dirty_status();
     publish_runtime_snapshot(app);
 }
@@ -1203,6 +1240,8 @@ pub(crate) fn publish_runtime_snapshot(app: &mut App) {
                     crate::app_runtime::AppRuntimeSnapshotPublishState {
                         agent_busy: app.runtime.agent_busy,
                         activity_status: activity_status.clone(),
+                        agent_activity_by_session: &app.runtime.agent_activity_by_session,
+                        agent_activity_changed_at_by_session: &app.runtime.agent_activity_changed_at_by_session,
                         stylos_status: Some(stylos_status),
                         watchdog_state: &app.runtime.watchdog_state,
                         incoming_prompts: &app.runtime.incoming_prompts,
@@ -1213,6 +1252,8 @@ pub(crate) fn publish_runtime_snapshot(app: &mut App) {
                     crate::app_runtime::AppRuntimeSnapshotPublishState::new(
                         app.runtime.agent_busy,
                         activity_status.clone(),
+                        &app.runtime.agent_activity_by_session,
+                        &app.runtime.agent_activity_changed_at_by_session,
                     )
                 }
             },
@@ -1351,7 +1392,7 @@ pub(crate) fn process_agent_event(
             {
                 app.runtime.last_assistant_text = None;
             }
-            set_agent_activity(app, AgentActivity::WaitingForModel);
+            set_agent_activity_for_session(app, sid, AgentActivity::WaitingForModel);
             app.runtime.streaming_idx = None;
         }
         themion_core::agent::AgentEvent::AssistantChunk(chunk) => {
@@ -1368,7 +1409,7 @@ pub(crate) fn process_agent_event(
             }
             app.runtime.stream_chunks += 1;
             app.runtime.stream_chars += chunk.chars().count() as u64;
-            set_agent_activity(app, AgentActivity::StreamingResponse);
+            set_agent_activity_for_session(app, sid, AgentActivity::StreamingResponse);
             let agent_id = crate::tui::agent_id_for_session(&app.runtime.agents, sid);
             match app.runtime.streaming_idx {
                 Some(i) => {
@@ -1392,7 +1433,7 @@ pub(crate) fn process_agent_event(
                 app.runtime.last_assistant_text = Some(text.clone());
             }
             app.runtime.streaming_idx = None;
-            clear_agent_activity(app);
+            clear_agent_activity_for_session(app, sid);
             app.push(crate::tui::Entry::Assistant {
                 agent_id: crate::tui::agent_id_for_session(&app.runtime.agents, sid),
                 text,
@@ -1411,7 +1452,7 @@ pub(crate) fn process_agent_event(
                 Some(reason) => format!("{detail} — {reason}"),
                 None => detail.clone(),
             };
-            set_agent_activity(app, AgentActivity::RunningTool(activity_detail));
+            set_agent_activity_for_session(app, sid, AgentActivity::RunningTool(activity_detail));
             #[cfg(feature = "stylos")]
             {
                 app.runtime.last_sender_side_transport_event = app
@@ -1443,7 +1484,7 @@ pub(crate) fn process_agent_event(
                     text: event.text,
                 });
             }
-            set_agent_activity(app, AgentActivity::WaitingAfterTool);
+            set_agent_activity_for_session(app, sid, AgentActivity::WaitingAfterTool);
         }
         themion_core::agent::AgentEvent::Status(text) => {
             app.push(crate::tui::Entry::Status {
@@ -1480,8 +1521,8 @@ pub(crate) fn process_agent_event(
                 }
             }
             app.runtime.streaming_idx = None;
-            set_agent_activity(app, AgentActivity::Finishing);
-            clear_agent_activity(app);
+            set_agent_activity_for_session(app, sid, AgentActivity::Finishing);
+            clear_agent_activity_for_session(app, sid);
             let interrupted = app.runtime.workflow_state.status
                 == themion_core::workflow::WorkflowStatus::Interrupted;
             let stats_text = crate::format_stats(&stats);

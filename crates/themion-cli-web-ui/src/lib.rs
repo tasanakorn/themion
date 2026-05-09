@@ -60,6 +60,9 @@ struct WebAgentStatus {
     roles: Vec<String>,
     busy: bool,
     incoming: bool,
+    activity_status: Option<String>,
+    activity_label: Option<String>,
+    activity_changed_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -489,17 +492,20 @@ fn App() -> impl IntoView {
                                 </div>
                                 {move || match transcript.get() {
                                     Some(payload) => view! {
-                                        <div
-                                            class="chat-history"
-                                            node_ref=transcript_history_ref
-                                            on:scroll=on_transcript_scroll
-                                        >
-                                            <For
-                                                each=move || payload.chat_entries.clone().into_iter()
-                                                key=|entry| format!("{}:{}:{}:{}:{:?}", entry.kind, entry.agent_id.clone().unwrap_or_default(), entry.tool_call_id.clone().unwrap_or_default(), entry.text, entry.stats)
-                                                children=move |entry| view! { <ChatEntryRow entry=entry /> }
-                                            />
-                                        </div>
+                                        <>
+                                            <div
+                                                class="chat-history"
+                                                node_ref=transcript_history_ref
+                                                on:scroll=on_transcript_scroll
+                                            >
+                                                <For
+                                                    each=move || payload.chat_entries.clone().into_iter()
+                                                    key=|entry| format!("{}:{}:{}:{}:{:?}", entry.kind, entry.agent_id.clone().unwrap_or_default(), entry.tool_call_id.clone().unwrap_or_default(), entry.text, entry.stats)
+                                                    children=move |entry| view! { <ChatEntryRow entry=entry /> }
+                                                />
+                                            </div>
+                                            {move || view! { <ActivityStrip agents=active_agent_activities(status.get(), agents.get()) /> }}
+                                        </>
                                     }.into_any(),
                                     None => view! { <p class="muted">"Loading transcript…"</p> }.into_any(),
                                 }}
@@ -571,12 +577,98 @@ fn App() -> impl IntoView {
     }
 }
 
+fn active_agent_activities(
+    status: Option<WebStatusResponse>,
+    agents: Option<WebAgentsResponse>,
+) -> Vec<WebAgentStatus> {
+    let source_agents = agents
+        .map(|payload| payload.local_agents)
+        .or_else(|| status.map(|payload| payload.local_agents))
+        .unwrap_or_default();
+    source_agents
+        .into_iter()
+        .filter(|agent| agent.activity_status.as_deref().is_some_and(activity_status_is_active))
+        .collect()
+}
+
 fn sidebar_tab_is_active(active_tab: ViewTab, tab: ViewTab) -> bool {
     match tab {
         ViewTab::Transcript => active_tab != ViewTab::Terminal,
         ViewTab::Terminal => active_tab == ViewTab::Terminal,
         _ => active_tab == tab,
     }
+}
+
+fn activity_status_is_active(status: &str) -> bool {
+    !matches!(status, "" | "idle" | "nap")
+}
+
+fn activity_label_from_status(status: &str) -> String {
+    if status.starts_with("streaming") {
+        return "Receiving response".to_string();
+    }
+    match status {
+        "preparing" => "Preparing request".to_string(),
+        "waiting-model" => "Waiting for model".to_string(),
+        "running-tool" => "Running tool".to_string(),
+        "waiting-after-tool" => "Waiting for model".to_string(),
+        "finalizing" => "Finalizing".to_string(),
+        "idle" => "Idle".to_string(),
+        "nap" => "Idle for a while".to_string(),
+        other => sentence_case_status(other),
+    }
+}
+
+fn sentence_case_status(status: &str) -> String {
+    let normalized = status.replace(['-', '_'], " ");
+    let mut chars = normalized.chars();
+    match chars.next() {
+        Some(first) => format!("{}{}", first.to_uppercase(), chars.collect::<String>()),
+        None => "Unknown".to_string(),
+    }
+}
+
+fn agent_activity_display_label(agent: &WebAgentStatus) -> String {
+    agent
+        .activity_label
+        .clone()
+        .or_else(|| agent.activity_status.as_deref().map(activity_label_from_status))
+        .unwrap_or_else(|| "Active".to_string())
+}
+
+#[component]
+fn ActivityStrip(agents: Vec<WebAgentStatus>) -> impl IntoView {
+    if agents.is_empty() {
+        return view! { <div class="activity-strip hidden"></div> }.into_any();
+    }
+    view! {
+        <div class="activity-strip" aria-label="active agents">
+            <For
+                each=move || agents.clone().into_iter()
+                key=|agent| agent.agent_id.clone()
+                children=move |agent| {
+                    let agent_label = if agent.label.is_empty() {
+                        agent.agent_id.clone()
+                    } else {
+                        agent.label.clone()
+                    };
+                    let status_label = agent_activity_display_label(&agent);
+                    let title = agent
+                        .activity_changed_at_ms
+                        .map(|at_ms| format!("activity changed at {at_ms}ms"))
+                        .unwrap_or_else(|| "active agent".to_string());
+                    view! {
+                        <div class="activity-chip active" title=title>
+                            <span class="activity-pulse" aria-hidden="true"></span>
+                            <span class="activity-agent">{agent_label}</span>
+                            <span class="activity-separator">"·"</span>
+                            <span class="activity-label">{status_label}</span>
+                        </div>
+                    }
+                }
+            />
+        </div>
+    }.into_any()
 }
 
 fn chat_entry_label(entry: &WebChatEntry) -> String {
@@ -795,6 +887,23 @@ mod tests {
         key == "Enter" && !shift && !alt && !ctrl && !meta
     }
 
+    fn agent_status(
+        agent_id: &str,
+        activity_status: Option<&str>,
+        activity_label: Option<&str>,
+    ) -> super::WebAgentStatus {
+        super::WebAgentStatus {
+            agent_id: agent_id.to_string(),
+            label: agent_id.to_string(),
+            roles: Vec::new(),
+            busy: activity_status.is_some(),
+            incoming: false,
+            activity_status: activity_status.map(str::to_string),
+            activity_label: activity_label.map(str::to_string),
+            activity_changed_at_ms: Some(123),
+        }
+    }
+
     #[test]
     fn plain_enter_submits_prompt() {
         assert!(keydown_should_submit("Enter", false, false, false, false));
@@ -890,6 +999,35 @@ mod tests {
         assert_eq!(super::chat_entry_kind_label(&entry), "TOOL_CALL");
         entry.completed = true;
         assert_eq!(super::chat_entry_kind_label(&entry), "TOOL_CALL ✓");
+    }
+
+    #[test]
+    fn activity_status_labels_are_human_readable() {
+        assert_eq!(super::activity_label_from_status("waiting-model"), "Waiting for model");
+        assert_eq!(super::activity_label_from_status("streaming c:3 ch:42"), "Receiving response");
+        assert_eq!(super::activity_label_from_status("running-tool"), "Running tool");
+        assert_eq!(super::activity_label_from_status("unknown-state"), "Unknown state");
+    }
+
+    #[test]
+    fn active_agent_activities_filters_idle_agents_and_keeps_all_active() {
+        let status = super::WebStatusResponse {
+            bind_addr: String::new(),
+            project_dir: String::new(),
+            session_id: String::new(),
+            primary_agent_id: Some("master".to_string()),
+            busy: true,
+            activity_status: Some("waiting-model".to_string()),
+            local_agents: vec![
+                agent_status("master", Some("waiting-model"), None),
+                agent_status("smith-1", Some("running-tool"), Some("running tool… shell")),
+                agent_status("smith-2", Some("idle"), None),
+            ],
+            runtime: Default::default(),
+            recent_events: Vec::new(),
+        };
+        let active = super::active_agent_activities(Some(status), None);
+        assert_eq!(active.iter().map(|agent| agent.agent_id.as_str()).collect::<Vec<_>>(), vec!["master", "smith-1"]);
     }
 
     #[test]

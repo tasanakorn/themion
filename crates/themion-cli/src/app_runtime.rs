@@ -402,6 +402,8 @@ pub(crate) fn wire_stylos_event_streams(
 
 pub(crate) struct AppSnapshotBuildState<'a> {
     pub agents: &'a [crate::tui::AgentHandle],
+    pub agent_activity_by_session: &'a std::collections::HashMap<Uuid, crate::app_state::AgentActivity>,
+    pub agent_activity_changed_at_by_session: &'a std::collections::HashMap<Uuid, u64>,
     #[cfg(feature = "stylos")]
     pub incoming_prompts: &'a IncomingPromptState,
     pub agent_busy: bool,
@@ -441,6 +443,18 @@ pub(crate) fn build_app_snapshot(
                 incoming: state.incoming_prompts.contains_key(&handle.agent_id),
                 #[cfg(not(feature = "stylos"))]
                 incoming: false,
+                activity_status: state
+                    .agent_activity_by_session
+                    .get(&handle.session_id)
+                    .map(|activity| activity.status_bar(0, 0)),
+                activity_label: state
+                    .agent_activity_by_session
+                    .get(&handle.session_id)
+                    .map(|activity| activity.label(0, 0)),
+                activity_changed_at_ms: state
+                    .agent_activity_changed_at_by_session
+                    .get(&handle.session_id)
+                    .copied(),
             })
             .collect(),
         #[cfg(feature = "stylos")]
@@ -502,6 +516,8 @@ impl AppRuntimeObserverPublisher {
 
         self.snapshot_publisher.publish(AppSnapshotBuildState {
             agents: &*agents,
+            agent_activity_by_session: snapshot.agent_activity_by_session,
+            agent_activity_changed_at_by_session: snapshot.agent_activity_changed_at_by_session,
             #[cfg(feature = "stylos")]
             incoming_prompts: snapshot.incoming_prompts,
             agent_busy: snapshot.agent_busy,
@@ -551,6 +567,8 @@ pub(crate) struct AppRuntimeObserverPublishState<'a> {
 pub(crate) struct AppRuntimeSnapshotPublishState<'a> {
     pub agent_busy: bool,
     pub activity_status: String,
+    pub agent_activity_by_session: &'a std::collections::HashMap<Uuid, crate::app_state::AgentActivity>,
+    pub agent_activity_changed_at_by_session: &'a std::collections::HashMap<Uuid, u64>,
     #[cfg(feature = "stylos")]
     pub stylos_status: Option<String>,
     #[cfg(feature = "stylos")]
@@ -563,10 +581,17 @@ pub(crate) struct AppRuntimeSnapshotPublishState<'a> {
 
 #[cfg(not(feature = "stylos"))]
 impl<'a> AppRuntimeSnapshotPublishState<'a> {
-    pub(crate) fn new(agent_busy: bool, activity_status: String) -> Self {
+    pub(crate) fn new(
+        agent_busy: bool,
+        activity_status: String,
+        agent_activity_by_session: &'a std::collections::HashMap<Uuid, crate::app_state::AgentActivity>,
+        agent_activity_changed_at_by_session: &'a std::collections::HashMap<Uuid, u64>,
+    ) -> Self {
         Self {
             agent_busy,
             activity_status,
+            agent_activity_by_session,
+            agent_activity_changed_at_by_session,
             _marker: std::marker::PhantomData,
         }
     }

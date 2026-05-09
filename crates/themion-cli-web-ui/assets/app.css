@@ -585,6 +585,64 @@ pre {
   padding-right: 0.25rem;
 }
 
+.activity-strip {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.45rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+  padding-top: 0.45rem;
+}
+
+.activity-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  max-width: 100%;
+  border: 1px solid rgba(56, 189, 248, 0.26);
+  border-radius: 999px;
+  background: rgba(14, 165, 233, 0.12);
+  color: #bae6fd;
+  padding: 0.2rem 0.45rem;
+  font-size: 0.72rem;
+}
+
+.activity-agent {
+  overflow: hidden;
+  max-width: 9rem;
+  color: #e0f2fe;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-separator {
+  color: #7dd3fc;
+}
+
+.activity-label {
+  overflow: hidden;
+  max-width: 18rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-pulse {
+  width: 0.46rem;
+  height: 0.46rem;
+  border-radius: 999px;
+  background: #38bdf8;
+  box-shadow: 0 0 0 rgba(56, 189, 248, 0.5);
+  animation: activity-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes activity-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.45); opacity: 0.55; }
+  50% { box-shadow: 0 0 0 0.28rem rgba(56, 189, 248, 0.08); opacity: 1; }
+  100% { box-shadow: 0 0 0 0 rgba(56, 189, 248, 0); opacity: 0.55; }
+}
+
 .chat-row {
   display: grid;
   grid-template-columns: 6.25rem minmax(0, 1fr);

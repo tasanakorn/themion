@@ -133,6 +133,9 @@ struct WebAgentStatus {
     roles: Vec<String>,
     busy: bool,
     incoming: bool,
+    activity_status: Option<String>,
+    activity_label: Option<String>,
+    activity_changed_at_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -917,6 +920,9 @@ fn build_status_response(state: &WebAppState, snapshot: &AppSnapshot) -> WebStat
                 roles: agent.roles.clone(),
                 busy: agent.busy,
                 incoming: agent.incoming,
+                activity_status: agent.activity_status.clone(),
+                activity_label: agent.activity_label.clone(),
+                activity_changed_at_ms: agent.activity_changed_at_ms,
             })
             .collect(),
         runtime: build_runtime_summary(&state.app_state.runtime),
@@ -1134,6 +1140,9 @@ fn build_agents_response(state: &WebAppState, snapshot: &AppSnapshot) -> WebAgen
                 roles: agent.roles.clone(),
                 busy: agent.busy,
                 incoming: agent.incoming,
+                activity_status: agent.activity_status.clone(),
+                activity_label: agent.activity_label.clone(),
+                activity_changed_at_ms: agent.activity_changed_at_ms,
             })
             .collect(),
     }
