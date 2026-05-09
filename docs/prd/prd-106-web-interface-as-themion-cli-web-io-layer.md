@@ -260,7 +260,7 @@ Implementation status note:
 - browser-side page state, websocket handling, and UI updates for the SPA entry path are now Rust/WASM-owned instead of handwritten page-local JavaScript
 - the SPA still reads runtime-owned snapshots from `/api/status`, while `/api/agents` and `/api/transcript` remain available as runtime-owned JSON endpoints during the migration
 - `/transcript`, `/agents`, and `/shell` still exist as migration-era routes, but new browser product direction now centers on the SPA entry route served by `themion-cli`
-- the generated SPA browser assets are embedded and served by `crates/themion-cli/src/web_assets.rs`, keeping the server/runtime owner in `themion-cli`
+- the SPA browser assets are generated during the `themion-cli` Cargo build, embedded from build output by `crates/themion-cli/src/web_assets.rs`, and served from the single CLI binary so generated JS/WASM assets are not committed as source
 - richer browser interaction, broader route migration, and a more complete websocket/UI surface remain future phases
 
 Recommended Phase 1 review checklist:

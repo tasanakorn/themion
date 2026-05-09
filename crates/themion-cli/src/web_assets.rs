@@ -1,9 +1,17 @@
-const SPA_HTML: &str = include_str!("../web-assets/index.html");
-const SPA_CSS: &str = include_str!("../web-assets/app.css");
-const SPA_JS: &str = include_str!("../web-assets/themion_cli_web_ui.js");
-const SPA_WASM: &[u8] = include_bytes!("../web-assets/themion_cli_web_ui_bg.wasm");
-const JETBRAINS_MONO_NERD_FONT: &[u8] =
-    include_bytes!("../web-assets/fonts/JetBrainsMonoNerdFont-Regular.ttf");
+const SPA_HTML: &str = include_str!(concat!(env!("OUT_DIR"), "/web-assets/index.html"));
+const SPA_CSS: &str = include_str!(concat!(env!("OUT_DIR"), "/web-assets/app.css"));
+const SPA_JS: &str = include_str!(concat!(
+    env!("OUT_DIR"),
+    "/web-assets/themion_cli_web_ui.js"
+));
+const SPA_WASM: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/web-assets/themion_cli_web_ui_bg.wasm"
+));
+const JETBRAINS_MONO_NERD_FONT: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/web-assets/fonts/JetBrainsMonoNerdFont-Regular.ttf"
+));
 
 pub fn spa_html() -> &'static str {
     SPA_HTML

@@ -220,7 +220,7 @@ pub fn run(mut app_state: AppState, bind_addr: SocketAddr) -> anyhow::Result<()>
     let missing_assets = crate::web_assets::missing_spa_assets();
     if !missing_assets.is_empty() {
         anyhow::bail!(
-            "themion --web is missing embedded SPA assets: {}. Rebuild them with scripts/build_web_assets.sh",
+            "themion --web is missing embedded SPA assets: {}. Rebuild them with cargo build -p themion-cli",
             missing_assets.join(", ")
         );
     }

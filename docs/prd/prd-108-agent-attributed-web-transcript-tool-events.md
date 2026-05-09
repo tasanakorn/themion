@@ -117,7 +117,7 @@ stylos_request_talk ...
 - Render uppercase kind labels.
 - Render merged completed tool calls as `TOOL_CALL ✓`.
 - Use `tool_call_id` in list keys.
-- Rebuild embedded web assets served by `themion-cli --web`.
+- Rebuild embedded web assets served by `themion-cli --web` through the `themion-cli` Cargo build.
 
 ## Edge Cases
 
@@ -131,6 +131,6 @@ stylos_request_talk ...
 - `cargo test -p themion-cli-web-ui` → verify web label and kind rendering helpers.
 - `cargo test -p themion-cli web::tests::tool_done_merges_into_previous_tool_call` → verify web projection merges completion into the matching tool call.
 - `cargo check -p themion-core -p themion-cli` → verify default builds after event shape changes.
-- `scripts/build_web_assets.sh` → verify and regenerate embedded web assets.
+- `cargo build -p themion-cli` → verify the Cargo-integrated web asset pipeline regenerates and embeds the browser assets.
 - `cargo check -p themion-core --all-features` → verify core all-features build.
 - `cargo check -p themion-cli --all-features` → verify CLI all-features build.
