@@ -21,6 +21,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
     Frame, Terminal,
 };
+use std::collections::VecDeque;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use themion_core::agent::{Agent, TurnCancellation};
 use themion_core::client_codex::ApiCallRateLimitReport;
@@ -180,6 +181,9 @@ pub(crate) enum Entry {
         stats: String,
     },
     Stats(String),
+    TranscriptOmitted {
+        omitted_entries: usize,
+    },
     Blank,
 }
 
@@ -198,6 +202,7 @@ enum ReviewMode {
 
 const TOOL_DETAIL_MAX_CHARS: usize = 60;
 const TOOL_DETAIL_CENTER_TRIM_MARKER: &str = "󱑼";
+pub(crate) const LIVE_TRANSCRIPT_ENTRY_LIMIT: usize = 1_000;
 const CONTEXT_HISTORY_TURN_DISPLAY_MAX_AGE: usize = 10;
 
 fn agent_tag_color(index: usize) -> Color {
@@ -245,6 +250,53 @@ fn non_agent_source_spans(source: Option<NonAgentSource>) -> Vec<Span<'static>> 
     spans
 }
 
+fn live_transcript_real_entry_count(entries: &[Entry]) -> usize {
+    entries
+        .iter()
+        .filter(|entry| !matches!(entry, Entry::TranscriptOmitted { .. }))
+        .count()
+}
+
+fn trim_live_transcript_entries_window(
+    entries: &mut Vec<Entry>,
+    omitted_entries: &mut usize,
+    streaming_idx: &mut Option<usize>,
+) -> bool {
+    let real_entry_count = live_transcript_real_entry_count(entries);
+    if real_entry_count <= LIVE_TRANSCRIPT_ENTRY_LIMIT {
+        return false;
+    }
+
+    let remove_real_count = real_entry_count - LIVE_TRANSCRIPT_ENTRY_LIMIT;
+    *omitted_entries = omitted_entries.saturating_add(remove_real_count);
+
+    let old_streaming_idx = *streaming_idx;
+    let mut new_entries = VecDeque::with_capacity(LIVE_TRANSCRIPT_ENTRY_LIMIT + 1);
+    new_entries.push_back(Entry::TranscriptOmitted {
+        omitted_entries: *omitted_entries,
+    });
+
+    let mut remaining_to_drop = remove_real_count;
+    let mut new_streaming_idx = None;
+    for (old_index, entry) in entries.drain(..).enumerate() {
+        if matches!(entry, Entry::TranscriptOmitted { .. }) {
+            continue;
+        }
+        if remaining_to_drop > 0 {
+            remaining_to_drop -= 1;
+            continue;
+        }
+        if old_streaming_idx == Some(old_index) {
+            new_streaming_idx = Some(new_entries.len());
+        }
+        new_entries.push_back(entry);
+    }
+
+    *entries = new_entries.into();
+    *streaming_idx = new_streaming_idx;
+    true
+}
+
 fn runtime_recent_event_from_entry(entry: &Entry) -> Option<(&'static str, String)> {
     match entry {
         Entry::User { text, .. } => Some(("user", text.clone())),
@@ -261,6 +313,7 @@ fn runtime_recent_event_from_entry(entry: &Entry) -> Option<(&'static str, Strin
         Entry::RemoteEvent { text, .. } => Some(("remote", text.clone())),
         Entry::TurnDone { summary, stats, .. } => Some(("turn", format!("{summary} — {stats}"))),
         Entry::Stats(text) => Some(("stats", text.clone())),
+        Entry::TranscriptOmitted { .. } => None,
         Entry::Banner(text) => Some(("banner", text.clone())),
         Entry::ToolDone { .. } => Some(("tool", "tool finished".to_string())),
         Entry::Blank => None,
@@ -822,6 +875,7 @@ pub(crate) struct TimedRuntimeDelta {
 
 pub struct App {
     pub(crate) entries: Vec<Entry>,
+    live_transcript_omitted_entries: usize,
     composer: ChatComposer,
     scroll_offset: usize,
     navigation_mode: NavigationMode,
@@ -879,6 +933,7 @@ impl App {
 
         let mut app = Self {
             entries: initial_entries,
+            live_transcript_omitted_entries: 0,
             composer: ChatComposer::new(),
             scroll_offset: 0,
             navigation_mode: NavigationMode::FollowTail,
@@ -1027,7 +1082,31 @@ impl App {
             );
         }
         self.entries.push(entry);
+        self.trim_live_transcript_entries();
         self.mark_dirty_conversation();
+    }
+
+    pub(crate) fn reset_live_transcript_window(&mut self) {
+        self.entries.clear();
+        self.live_transcript_omitted_entries = 0;
+        self.runtime.streaming_idx = None;
+        self.scroll_offset = 0;
+        self.review_scroll_offset = 0;
+        self.navigation_mode = NavigationMode::FollowTail;
+        self.mark_dirty_conversation();
+    }
+
+    fn trim_live_transcript_entries(&mut self) {
+        if trim_live_transcript_entries_window(
+            &mut self.entries,
+            &mut self.live_transcript_omitted_entries,
+            &mut self.runtime.streaming_idx,
+        ) {
+            self.scroll_offset = self.scroll_offset.min(self.entries.len().saturating_sub(1));
+            self.review_scroll_offset = self
+                .review_scroll_offset
+                .min(self.entries.len().saturating_sub(1));
+        }
     }
 
     pub(crate) fn replace_surface_snapshot(&mut self, snapshot: crate::app_state::AppSnapshot) {
@@ -1938,6 +2017,15 @@ fn build_lines<'a>(
                     Style::default().fg(Color::DarkGray),
                 )]));
             }
+            Entry::TranscriptOmitted { omitted_entries } => {
+                lines.push(Line::from(vec![Span::styled(
+                    format!(
+                        "  older transcript entries omitted: {}",
+                        format_count(*omitted_entries)
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                )]));
+            }
             Entry::Blank => {
                 lines.push(Line::default());
             }
@@ -2274,6 +2362,99 @@ pub(crate) fn unix_epoch_now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod transcript_buffer_tests {
+    use super::*;
+
+    #[test]
+    fn live_transcript_trim_keeps_latest_entries_and_one_marker() {
+        let mut entries = (0..=LIVE_TRANSCRIPT_ENTRY_LIMIT)
+            .map(|i| Entry::Assistant {
+                agent_id: None,
+                text: format!("entry-{i}"),
+            })
+            .collect::<Vec<_>>();
+        let mut omitted = 0;
+        let mut streaming_idx = None;
+
+        assert!(trim_live_transcript_entries_window(
+            &mut entries,
+            &mut omitted,
+            &mut streaming_idx,
+        ));
+
+        assert_eq!(omitted, 1);
+        assert_eq!(entries.len(), LIVE_TRANSCRIPT_ENTRY_LIMIT + 1);
+        assert_eq!(
+            live_transcript_real_entry_count(&entries),
+            LIVE_TRANSCRIPT_ENTRY_LIMIT
+        );
+        assert!(matches!(
+            entries.first(),
+            Some(Entry::TranscriptOmitted { omitted_entries: 1 })
+        ));
+        assert!(matches!(
+            entries.get(1),
+            Some(Entry::Assistant { text, .. }) if text == "entry-1"
+        ));
+    }
+
+    #[test]
+    fn live_transcript_trim_updates_existing_marker_count() {
+        let mut entries = vec![Entry::TranscriptOmitted { omitted_entries: 5 }];
+        entries.extend((0..=LIVE_TRANSCRIPT_ENTRY_LIMIT).map(|i| Entry::User {
+            agent_id: None,
+            text: format!("entry-{i}"),
+        }));
+        let mut omitted = 5;
+        let mut streaming_idx = None;
+
+        assert!(trim_live_transcript_entries_window(
+            &mut entries,
+            &mut omitted,
+            &mut streaming_idx,
+        ));
+
+        assert_eq!(omitted, 6);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::TranscriptOmitted { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            entries.first(),
+            Some(Entry::TranscriptOmitted { omitted_entries: 6 })
+        ));
+    }
+
+    #[test]
+    fn live_transcript_trim_preserves_streaming_entry_index_when_kept() {
+        let mut entries = (0..=LIVE_TRANSCRIPT_ENTRY_LIMIT)
+            .map(|i| Entry::Assistant {
+                agent_id: None,
+                text: format!("entry-{i}"),
+            })
+            .collect::<Vec<_>>();
+        let mut omitted = 0;
+        let old_streaming_text = format!("entry-{}", LIVE_TRANSCRIPT_ENTRY_LIMIT);
+        let mut streaming_idx = Some(LIVE_TRANSCRIPT_ENTRY_LIMIT);
+
+        assert!(trim_live_transcript_entries_window(
+            &mut entries,
+            &mut omitted,
+            &mut streaming_idx,
+        ));
+
+        let new_idx = streaming_idx.expect("streaming idx kept");
+        assert!(matches!(
+            entries.get(new_idx),
+            Some(Entry::Assistant { text, .. }) if text == &old_streaming_text
+        ));
+    }
 }
 
 #[cfg(all(test, feature = "stylos"))]

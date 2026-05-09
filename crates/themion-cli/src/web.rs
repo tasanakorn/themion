@@ -1115,6 +1115,20 @@ fn build_chat_entries(entries: &[crate::tui::Entry]) -> Vec<WebChatEntry> {
                     completed: false,
                 });
             }
+            crate::tui::Entry::TranscriptOmitted { omitted_entries } => {
+                last_tool_entry_index = None;
+                chat_entries.push(WebChatEntry {
+                    kind: "transcript_omitted",
+                    agent_id: None,
+                    tool_call_id: None,
+                    source: None,
+                    text: format!("older transcript entries omitted: {}", omitted_entries),
+                    detail: None,
+                    reason: None,
+                    stats: None,
+                    completed: false,
+                });
+            }
             crate::tui::Entry::Banner(_) | crate::tui::Entry::Blank => {
                 last_tool_entry_index = None;
             }
@@ -1243,6 +1257,20 @@ mod tests {
         assert!(html.contains("/assets/app.css"));
         assert!(html.contains("/assets/themion_cli_web_ui.js"));
         assert!(html.contains(r#"type="module""#));
+    }
+
+    #[test]
+    fn transcript_omitted_entry_projects_to_web_marker() {
+        let entries = vec![crate::tui::Entry::TranscriptOmitted {
+            omitted_entries: 42,
+        }];
+
+        let chat_entries = build_chat_entries(&entries);
+
+        assert_eq!(chat_entries.len(), 1);
+        assert_eq!(chat_entries[0].kind, "transcript_omitted");
+        assert_eq!(chat_entries[0].text, "older transcript entries omitted: 42");
+        assert!(!chat_entries[0].completed);
     }
 
     #[test]

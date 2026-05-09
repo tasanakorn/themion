@@ -1140,6 +1140,8 @@ pub(crate) fn handle_runtime_command(
         | crate::app_runtime::RuntimeCommand::ConfigProfileSet { .. }
         | crate::app_runtime::RuntimeCommand::SetApiLogEnabled { .. }
         | crate::app_runtime::RuntimeCommand::ClearContext => {
+            let is_clear_context =
+                matches!(command, crate::app_runtime::RuntimeCommand::ClearContext);
             let outcome = crate::app_runtime::execute_runtime_command(
                 command,
                 crate::app_runtime::RuntimeCommandContext {
@@ -1162,6 +1164,9 @@ pub(crate) fn handle_runtime_command(
                 &mut app.runtime.last_ctx_tokens,
                 outcome,
             );
+            if is_clear_context && application.had_effect {
+                app.reset_live_transcript_window();
+            }
             if application.had_effect {
                 publish_runtime_snapshot(app);
             }

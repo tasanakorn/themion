@@ -751,6 +751,28 @@ pre {
   padding: 0.18rem 0.32rem;
 }
 
+.chat-row.transcript-omitted {
+  opacity: 0.6;
+  font-size: 0.78rem;
+}
+
+.chat-row.transcript-omitted .chat-meta {
+  padding-top: 0;
+}
+
+.chat-row.transcript-omitted .chat-role,
+.chat-row.transcript-omitted .chat-kind {
+  color: #64748b;
+}
+
+.chat-row.transcript-omitted .chat-bubble {
+  border-style: dashed;
+  border-color: rgba(148, 163, 184, 0.16);
+  background: rgba(15, 23, 42, 0.2);
+  color: #94a3b8;
+  padding: 0.18rem 0.32rem;
+}
+
 .chat-row.turn_done .chat-bubble {
   border-color: rgba(168, 85, 247, 0.18);
   background: rgba(59, 7, 100, 0.16);

@@ -683,6 +683,7 @@ fn chat_entry_label(entry: &WebChatEntry) -> String {
         "remote" => entry.source.clone().unwrap_or_else(|| "remote".to_string()),
         "turn_done" => "turn".to_string(),
         "stats" => "stats".to_string(),
+        "transcript_omitted" => "transcript".to_string(),
         "banner" => "themion".to_string(),
         _ => entry.kind.clone(),
     }
@@ -691,13 +692,18 @@ fn chat_entry_label(entry: &WebChatEntry) -> String {
 fn chat_entry_kind_label(entry: &WebChatEntry) -> String {
     match (entry.kind.as_str(), entry.completed) {
         ("tool_call", true) => "TOOL_CALL ✓".to_string(),
+        ("transcript_omitted", _) => "OMITTED".to_string(),
         _ => entry.kind.to_ascii_uppercase(),
     }
 }
 
 #[component]
 fn ChatEntryRow(entry: WebChatEntry) -> impl IntoView {
-    let class_name = format!("chat-row {}", entry.kind);
+    let class_name = if entry.kind == "transcript_omitted" {
+        "chat-row transcript-omitted".to_string()
+    } else {
+        format!("chat-row {}", entry.kind)
+    };
     let label = chat_entry_label(&entry);
     let kind_label = chat_entry_kind_label(&entry);
     view! {
@@ -981,6 +987,24 @@ mod tests {
             completed: false,
         };
         assert_eq!(super::chat_entry_label(&remote), "stylos");
+    }
+
+    #[test]
+    fn transcript_omitted_entry_has_clear_label() {
+        let entry = super::WebChatEntry {
+            kind: "transcript_omitted".to_string(),
+            agent_id: None,
+            tool_call_id: None,
+            source: None,
+            text: "older transcript entries omitted: 42".to_string(),
+            detail: None,
+            reason: None,
+            stats: None,
+            completed: false,
+        };
+
+        assert_eq!(super::chat_entry_label(&entry), "transcript");
+        assert_eq!(super::chat_entry_kind_label(&entry), "OMITTED");
     }
 
     #[test]
