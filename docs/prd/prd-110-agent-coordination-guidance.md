@@ -162,7 +162,7 @@ The TUI may display outcomes, but it must not own channel-choice or coordination
 
 ## Implementation Notes
 
-Implemented in v0.68.0. The landed slice updates model-facing role and board/coordination guidance in `themion-core`, keeps tool schema wording concise while clarifying board notes versus volatile inbox messages, documents the channel-choice ladder in runtime and architecture docs, and preserves TUI/runtime ownership boundaries. No new board, inbox, or task primitive was added.
+Implemented in v0.68.0. The landed slice updates model-facing role and board/coordination guidance in `themion-core`, keeps tool schema wording concise while clarifying board notes versus volatile inbox messages, documents the channel-choice ladder in runtime and architecture docs, and preserves TUI/runtime ownership boundaries. No new board, inbox, or task primitive was added. PRD-111 later removed Stylos task requests; the remaining channel-choice guidance is board notes for durable work and inbox messages for volatile coordination.
 
 ## Migration
 

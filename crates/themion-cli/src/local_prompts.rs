@@ -17,7 +17,6 @@ pub struct IncomingPromptRequest {
     pub prompt: String,
     pub source: IncomingPromptSource,
     pub agent_id: Option<String>,
-    pub task_id: Option<String>,
     pub request_id: Option<String>,
     pub from: Option<String>,
     pub from_agent_id: Option<String>,

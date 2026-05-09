@@ -51,14 +51,6 @@ pub(crate) fn incoming_prompt_request<'a>(
 }
 
 #[cfg(feature = "stylos")]
-pub(crate) fn take_incoming_prompt_request(
-    incoming_prompts: &mut IncomingPromptState,
-    agent_id: &str,
-) -> Option<crate::local_prompts::IncomingPromptRequest> {
-    incoming_prompts.remove(agent_id)
-}
-
-#[cfg(feature = "stylos")]
 pub(crate) fn set_incoming_prompt_request(
     incoming_prompts: &mut IncomingPromptState,
     agent_id: String,
@@ -1706,44 +1698,6 @@ fn delete_local_agent(
     .to_string())
 }
 
-#[cfg(feature = "stylos")]
-pub(crate) fn publish_stylos_task_running(
-    background_domain: &DomainHandle,
-    query_context: crate::stylos::StylosQueryContext,
-    task_id: String,
-) {
-    background_domain.spawn(async move {
-        query_context.task_registry().set_running(&task_id).await;
-    });
-}
-
-#[cfg(feature = "stylos")]
-pub(crate) fn publish_stylos_task_completed(
-    background_domain: &DomainHandle,
-    query_context: crate::stylos::StylosQueryContext,
-    task_id: String,
-    result_text: Option<String>,
-) {
-    background_domain.spawn(async move {
-        query_context
-            .task_registry()
-            .set_completed(&task_id, result_text, None)
-            .await;
-    });
-}
-
-#[cfg(feature = "stylos")]
-pub(crate) fn publish_stylos_task_failed(
-    background_domain: &DomainHandle,
-    query_context: crate::stylos::StylosQueryContext,
-    task_id: String,
-    reason: String,
-) {
-    background_domain.spawn(async move {
-        query_context.task_registry().set_failed(&task_id, reason).await;
-    });
-}
-
 #[derive(Default)]
 #[cfg_attr(not(feature = "stylos"), allow(dead_code))]
 pub(crate) struct WatchdogRuntimeState {
@@ -1788,12 +1742,10 @@ pub(crate) enum IncomingPromptDisposition {
     MissingTarget {
         log_agent_id: Option<String>,
         log_text: String,
-        failed_task_id: Option<String>,
     },
     BusyTarget {
         log_agent_id: Option<String>,
         log_text: String,
-        failed_task_id: Option<String>,
     },
     Accepted {
         agent_index: usize,
@@ -1828,7 +1780,6 @@ pub(crate) fn resolve_incoming_prompt_disposition(
                 "Stylos incoming message from={} from_agent_id={} to={} to_agent_id={} rejected: target agent missing locally",
                 sender, sender_agent, target_instance, target_agent
             ),
-            failed_task_id: request.task_id.clone(),
         };
     };
 
@@ -1851,7 +1802,6 @@ pub(crate) fn resolve_incoming_prompt_disposition(
         return IncomingPromptDisposition::BusyTarget {
             log_agent_id: Some(target),
             log_text,
-            failed_task_id: request.task_id.clone(),
         };
     }
 
@@ -1886,8 +1836,6 @@ pub(crate) fn resolve_incoming_prompt_disposition(
 #[cfg(feature = "stylos")]
 pub(crate) struct SubmitTargetFailureEffect {
     pub log_text: String,
-    pub failed_task_id: Option<String>,
-    pub failure_reason: &'static str,
 }
 
 #[cfg(feature = "stylos")]
@@ -1896,13 +1844,10 @@ pub(crate) fn submit_target_failure_effect(
 ) -> Option<SubmitTargetFailureEffect> {
     match resolution {
         SubmitTargetResolution::MissingIncomingPromptTarget {
-            failed_task_id,
             log_text,
             ..
         } => Some(SubmitTargetFailureEffect {
             log_text: log_text.clone(),
-            failed_task_id: failed_task_id.clone(),
-            failure_reason: "target_agent_missing",
         }),
         _ => None,
     }
@@ -1914,7 +1859,6 @@ pub(crate) enum SubmitTargetResolution {
     IncomingPromptTarget { agent_index: usize },
     MissingIncomingPromptTarget {
         active_agent_index: usize,
-        failed_task_id: Option<String>,
         log_text: String,
     },
 }
@@ -1967,8 +1911,7 @@ pub(crate) fn resolve_submit_target(
             };
             SubmitTargetResolution::MissingIncomingPromptTarget {
                 active_agent_index,
-                failed_task_id: request.task_id.clone(),
-                log_text,
+                    log_text,
             }
         }
     }
@@ -2105,7 +2048,6 @@ pub(crate) fn incoming_prompt_apply_plan(
 pub(crate) struct IncomingPromptOutcome {
     pub log_agent_id: Option<String>,
     pub log_text: String,
-    pub task_failure: Option<String>,
     pub accepted_agent_index: Option<usize>,
     pub accepted_prompt: Option<String>,
     pub accepted_request: Option<crate::local_prompts::IncomingPromptRequest>,
@@ -2122,11 +2064,9 @@ pub(crate) fn plan_incoming_prompt(
         IncomingPromptDisposition::MissingTarget {
             log_agent_id,
             log_text,
-            failed_task_id,
         } => IncomingPromptOutcome {
             log_agent_id,
             log_text,
-            task_failure: failed_task_id.map(|task_id| format!("{task_id}:target_agent_missing")),
             accepted_agent_index: None,
             accepted_prompt: None,
             accepted_request: None,
@@ -2135,11 +2075,9 @@ pub(crate) fn plan_incoming_prompt(
         IncomingPromptDisposition::BusyTarget {
             log_agent_id,
             log_text,
-            failed_task_id,
         } => IncomingPromptOutcome {
             log_agent_id,
             log_text,
-            task_failure: failed_task_id.map(|task_id| format!("{task_id}:agent_busy")),
             accepted_agent_index: None,
             accepted_prompt: None,
             accepted_request: None,
@@ -2155,7 +2093,6 @@ pub(crate) fn plan_incoming_prompt(
         } => IncomingPromptOutcome {
             log_agent_id,
             log_text,
-            task_failure: None,
             accepted_agent_index: Some(agent_index),
             accepted_prompt: Some(prompt),
             accepted_request: Some(request),

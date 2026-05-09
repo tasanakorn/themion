@@ -83,7 +83,6 @@ Themion now injects compact guidance that teaches agents to choose the lightest 
 3. when extra capacity or role separation helps, `master` may create or choose a local worker agent
 4. use durable board notes for delegated work another agent must complete, resume, or report later
 5. use `stylos_send_message` only for short volatile coordination, clarification, participant-facing state updates, urgent nudges, or final wrap-up with no durable result
-6. use Stylos task requests when the sender needs a task id plus status/result polling
 
 Delegated board notes should state the task, expected output, constraints, and return path. If the result must be durable, the note should ask the worker to update the note result or create a done mention through the board workflow. Inbox messages are not a durable task queue and should not be the only record for work that needs completion tracking.
 
@@ -238,7 +237,7 @@ In the current implementation:
 
 - Stylos queryables are registered in `crates/themion-cli/src/stylos.rs` and their long-lived serving/publishing/subscription tasks now run on the CLI-owned `network` runtime domain
 - query handlers read the current exported process snapshot from a snapshot provider owned by the Stylos runtime path rather than by `tui.rs`
-- accepted volatile message, durable `notes/request`, and `tasks/request` queries are converted into inbox items, `IncomingPromptRequest` values, or persisted note records and sent over an in-process/local-runtime path
+- accepted volatile message and durable `notes/request` queries are converted into inbox items or persisted note records and sent over an in-process/local-runtime path
 - CLI-local incoming-prompt admission and rejection policy belongs in `crates/themion-cli/src/app_runtime.rs`, not in `tui.rs`
 - CLI-local board-note coordination for pending note injection and note-completion follow-up belongs in `crates/themion-cli/src/board_runtime.rs`, not in `tui.rs`
 - TUI should not be a Stylos/watchdog policy endpoint; it should receive runtime/app-state outcomes and render them, while human-originated input flows the other direction as intents
@@ -258,25 +257,16 @@ That includes:
 - `free` discovery using exported `activity_status`
 - `stylos_send_message` acceptance requiring the requested agent to be present; valid messages queue in the receiver's volatile inbox unless that target inbox is full
 - message inbox delivery happens through the runtime/watchdog drain path; the send-message query handler does not inject peer-message prompts directly
-- `tasks/request` candidate selection using the exported agent list, role metadata, git-repo metadata, and current activity state
 - Zenoh-level `stylos_query_nodes` using `session.info()` from the active local Stylos session rather than Themion mesh queryables
 
 Because those checks are snapshot-based, they can race with local activity changes. The runtime reports the chosen agent honestly and leaves accepted peer messages in the inbox until the watchdog/runtime drain path can hand them to the local agent.
 
-## In-memory task lifecycle tracking
+## Removed Stylos task request system
 
-`crates/themion-cli/src/stylos.rs` maintains an in-memory `TaskRegistry` for accepted remote tasks.
+PRD-111 removed the Stylos task request/status/result API. Themion no longer exposes `stylos_request_task`, `stylos_query_task_status`, or `stylos_query_task_result`, and new builds no longer register `query/tasks/request`, `query/tasks/status`, or `query/tasks/result` queryables. There is no compatibility responder for those old topics.
 
-Current lifecycle behavior:
+Durable delegated work should use board notes. Short volatile coordination should use `stylos_send_message`. Generic Tokio/runtime tasks are unrelated to this removed Stylos API and remain part of the runtime model.
 
-- `tasks/request` allocates a stable `task_id` and inserts a `queued` entry
-- when the bridged local turn actually begins, the registry updates that task to `running`
-- when the turn finishes, the CLI-local Stylos task registry records the terminal assistant result and marks the task `completed`; the TUI only observes and renders the outcome when present
-- if the request cannot be delivered or arrives while the selected local execution path is already busy, the registry marks the task `failed` with a machine-readable reason such as `agent_busy`
-- `tasks/status` reads the current registry entry without blocking
-- `tasks/result` can wait for a terminal state up to a bounded timeout, then returns either the finished result or the current non-terminal state with `timed_out = true`
-
-The registry is intentionally process-local and non-durable in this first release. Process restart drops pending remote work and prior task records.
 
 ## Remote execution targeting in the current slice
 

@@ -15,7 +15,7 @@ use stylos::{
 };
 use themion_core::client_codex::ApiCallRateLimitReport;
 use themion_core::workflow::WorkflowState;
-use tokio::sync::{mpsc, Notify, RwLock};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::app_runtime::{SharedStylosStatusHub, StylosSnapshotProvider};
@@ -32,8 +32,6 @@ use crate::Session;
 
 const GIT_STATUS_TTL: Duration = Duration::from_secs(30);
 
-const TASK_RETENTION: Duration = Duration::from_secs(30 * 60);
-const MAX_WAIT_TIMEOUT_MS: u64 = 60_000;
 const DISCOVERY_QUERY_TIMEOUT_MS: u64 = 1_500;
 pub(crate) const MAX_INBOX_MESSAGES_PER_AGENT: usize = 16;
 pub(crate) const INBOX_MESSAGE_TTL_MS: u64 = 600_000;
@@ -210,29 +208,17 @@ fn update_atomic_max(slot: &AtomicU64, value: u64) {
 
 #[derive(Clone)]
 pub struct StylosQueryContext {
-    prompt_tx: mpsc::UnboundedSender<IncomingPromptRequest>,
     event_tx: mpsc::UnboundedSender<String>,
-    task_registry: TaskRegistry,
     message_inbox: MessageInbox,
     notes_db: Arc<themion_core::db::DbHandle>,
     local_instance: String,
 }
 
 impl StylosQueryContext {
-    pub fn submit_incoming_prompt(&self, request: IncomingPromptRequest) -> Result<(), String> {
-        self.prompt_tx
-            .send(request)
-            .map_err(|_| "prompt queue unavailable".to_string())
-    }
-
     pub fn submit_event(&self, event: String) -> Result<(), String> {
         self.event_tx
             .send(event)
             .map_err(|_| "event queue unavailable".to_string())
-    }
-
-    pub fn task_registry(&self) -> &TaskRegistry {
-        &self.task_registry
     }
 
     pub fn notes_db(&self) -> &Arc<themion_core::db::DbHandle> {
@@ -344,55 +330,6 @@ impl StylosToolBridge {
                 serde_json::to_value(
                     self.query_instance::<NoteReply, _>(&instance, "notes/request", Some(&req))
                         .await?,
-                )?
-            }
-            "stylos_request_task" => {
-                let instance = required_string(&args, "instance")?;
-                let req = TaskRequestPayload {
-                    task: required_string(&args, "task")?,
-                    preferred_agent_id: optional_string(&args, "preferred_agent_id"),
-                    required_roles: args
-                        .get("required_roles")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok()),
-                    require_git_repo: args.get("require_git_repo").and_then(|v| v.as_bool()),
-                    request_id: optional_string(&args, "request_id"),
-                };
-                serde_json::to_value(
-                    self.query_instance::<TaskRequestReply, _>(
-                        &instance,
-                        "tasks/request",
-                        Some(&req),
-                    )
-                    .await?,
-                )?
-            }
-            "stylos_query_task_status" => {
-                let instance = required_string(&args, "instance")?;
-                let req = TaskLookupRequest {
-                    task_id: required_string(&args, "task_id")?,
-                };
-                serde_json::to_value(
-                    self.query_instance::<TaskLookupReply, _>(
-                        &instance,
-                        "tasks/status",
-                        Some(&req),
-                    )
-                    .await?,
-                )?
-            }
-            "stylos_query_task_result" => {
-                let instance = required_string(&args, "instance")?;
-                let req = TaskResultRequest {
-                    task_id: required_string(&args, "task_id")?,
-                    wait_timeout_ms: args.get("wait_timeout_ms").and_then(|v| v.as_u64()),
-                };
-                serde_json::to_value(
-                    self.query_instance::<TaskLookupReply, _>(
-                        &instance,
-                        "tasks/result",
-                        Some(&req),
-                    )
-                    .await?,
                 )?
             }
             _ => anyhow::bail!("unknown stylos tool: {name}"),
@@ -579,7 +516,7 @@ pub struct StylosHandle {
 
 impl StylosHandle {
     pub fn off() -> Self {
-        let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
+        let (_prompt_tx, prompt_rx) = mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let notes_db = themion_core::db::DbHandle::open_in_memory().expect("in-memory notes db");
         Self {
@@ -592,9 +529,7 @@ impl StylosHandle {
             prompt_rx: Some(prompt_rx),
             event_rx: Some(event_rx),
             query_context: StylosQueryContext {
-                prompt_tx,
                 event_tx,
-                task_registry: TaskRegistry::new(),
                 message_inbox: MessageInbox::default(),
                 notes_db,
                 local_instance: String::new(),
@@ -935,155 +870,6 @@ struct NoteReply {
     reason: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct TaskRequestPayload {
-    task: String,
-    preferred_agent_id: Option<String>,
-    required_roles: Option<Vec<String>>,
-    require_git_repo: Option<bool>,
-    request_id: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct TaskRequestReply {
-    accepted: bool,
-    agent_id: Option<String>,
-    request_id: Option<String>,
-    task_id: Option<String>,
-    note: Option<String>,
-    reason: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct TaskLookupRequest {
-    task_id: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct TaskResultRequest {
-    task_id: String,
-    wait_timeout_ms: Option<u64>,
-}
-
-#[derive(Clone, Debug)]
-pub struct TaskRegistry {
-    inner: Arc<RwLock<HashMap<String, TaskEntry>>>,
-    notify: Arc<Notify>,
-}
-
-#[derive(Clone, Debug)]
-struct TaskEntry {
-    task_id: String,
-    state: String,
-    agent_id: String,
-    result: Option<String>,
-    reason: Option<String>,
-    updated_at: Instant,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct TaskLookupReply {
-    found: bool,
-    task_id: String,
-    state: Option<String>,
-    agent_id: Option<String>,
-    result: Option<String>,
-    reason: Option<String>,
-    timed_out: Option<bool>,
-}
-
-impl TaskRegistry {
-    pub fn new() -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(HashMap::new())),
-            notify: Arc::new(Notify::new()),
-        }
-    }
-
-    pub async fn insert_queued(&self, task_id: String, agent_id: String) {
-        self.inner.write().await.insert(
-            task_id.clone(),
-            TaskEntry {
-                task_id,
-                state: "queued".to_string(),
-                agent_id,
-                result: None,
-                reason: None,
-                updated_at: Instant::now(),
-            },
-        );
-        self.notify.notify_waiters();
-    }
-
-    pub async fn set_running(&self, task_id: &str) {
-        if let Some(entry) = self.inner.write().await.get_mut(task_id) {
-            entry.state = "running".to_string();
-            entry.updated_at = Instant::now();
-        }
-        self.notify.notify_waiters();
-    }
-
-    pub async fn set_failed(&self, task_id: &str, reason: String) {
-        self.set_completed(task_id, None, Some(reason)).await;
-    }
-
-    async fn get(&self, task_id: &str) -> Option<TaskEntry> {
-        self.expire_old().await;
-        self.inner.read().await.get(task_id).cloned()
-    }
-
-    pub async fn set_completed(
-        &self,
-        task_id: &str,
-        result: Option<String>,
-        reason: Option<String>,
-    ) {
-        if let Some(entry) = self.inner.write().await.get_mut(task_id) {
-            entry.state = if reason.is_some() {
-                "failed".to_string()
-            } else {
-                "completed".to_string()
-            };
-            entry.result = result;
-            entry.reason = reason;
-            entry.updated_at = Instant::now();
-        }
-        self.notify.notify_waiters();
-    }
-
-    async fn expire_old(&self) {
-        self.inner
-            .write()
-            .await
-            .retain(|_, entry| entry.updated_at.elapsed() < TASK_RETENTION);
-    }
-
-    async fn wait_for_terminal(&self, task_id: &str, timeout_ms: u64) -> Option<TaskEntry> {
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        loop {
-            if let Some(entry) = self.get(task_id).await {
-                if matches!(
-                    entry.state.as_str(),
-                    "completed" | "failed" | "rejected" | "expired"
-                ) {
-                    return Some(entry);
-                }
-            } else {
-                return None;
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return self.get(task_id).await;
-            }
-            let remaining = deadline.saturating_duration_since(now);
-            let notified = self.notify.notified();
-            if tokio::time::timeout(remaining, notified).await.is_err() {
-                return self.get(task_id).await;
-            }
-        }
-    }
-}
-
 pub async fn start(
     settings: &StylosConfig,
     session: &Session,
@@ -1162,18 +948,15 @@ async fn start_inner(
     );
 
     let ct = CancellationToken::new();
-    let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
+    let (_prompt_tx, prompt_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
-    let task_registry = TaskRegistry::new();
     let message_inbox = MessageInbox::default();
     let activity_counters = Arc::new(StylosActivityCounters::default());
     let snapshot_provider = shared_status_hub
         .unwrap_or_else(SharedStylosStatusHub::new)
         .provider();
     let query_context = StylosQueryContext {
-        prompt_tx,
         event_tx,
-        task_registry: task_registry.clone(),
         message_inbox: message_inbox.clone(),
         notes_db,
         local_instance: key_instance.clone(),
@@ -1235,18 +1018,6 @@ async fn start_inner(
         "stylos/{}/themion/instances/{}/query/notes/request",
         realm, key_instance
     );
-    let q_task_request_key = format!(
-        "stylos/{}/themion/instances/{}/query/tasks/request",
-        realm, key_instance
-    );
-    let q_task_status_key = format!(
-        "stylos/{}/themion/instances/{}/query/tasks/status",
-        realm, key_instance
-    );
-    let q_task_result_key = format!(
-        "stylos/{}/themion/instances/{}/query/tasks/result",
-        realm, key_instance
-    );
     let info = ThemionInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         instance: key_instance.clone(),
@@ -1256,7 +1027,7 @@ async fn start_inner(
         model: session.model.clone(),
     };
     let query_status_provider = snapshot_provider.clone();
-    let query_context_for_task = query_context.clone();
+    let query_context_for_delivery = query_context.clone();
     let query_instance = key_instance.clone();
     let query_session_id = session.id.to_string();
     let query_activity_counters = activity_counters.clone();
@@ -1286,18 +1057,6 @@ async fn start_inner(
             Err(_) => return,
         };
         let note_queryable = match q_session.declare_queryable(&q_note_key).await {
-            Ok(q) => q,
-            Err(_) => return,
-        };
-        let task_request_queryable = match q_session.declare_queryable(&q_task_request_key).await {
-            Ok(q) => q,
-            Err(_) => return,
-        };
-        let task_status_queryable = match q_session.declare_queryable(&q_task_status_key).await {
-            Ok(q) => q,
-            Err(_) => return,
-        };
-        let task_result_queryable = match q_session.declare_queryable(&q_task_result_key).await {
             Ok(q) => q,
             Err(_) => return,
         };
@@ -1358,7 +1117,7 @@ async fn start_inner(
                 res = message_queryable.recv_async() => match res {
                     Ok(query) => {
                         let query_started = Instant::now();
-                        let reply = handle_send_message_query(&query_status_provider, &query_context_for_task, parse_cbor_payload::<MessageRequest>(&query)).await;
+                        let reply = handle_send_message_query(&query_status_provider, &query_context_for_delivery, parse_cbor_payload::<MessageRequest>(&query)).await;
                         let _ = reply_cbor(query, q_message_key.clone(), &reply).await;
                         query_activity_counters.record_query_request(query_started.elapsed());
                     }
@@ -1367,35 +1126,8 @@ async fn start_inner(
                 res = note_queryable.recv_async() => match res {
                     Ok(query) => {
                         let query_started = Instant::now();
-                        let reply = handle_note_delivery_query(&query_status_provider, &query_context_for_task, parse_cbor_payload::<NoteRequest>(&query)).await;
+                        let reply = handle_note_delivery_query(&query_status_provider, &query_context_for_delivery, parse_cbor_payload::<NoteRequest>(&query)).await;
                         let _ = reply_cbor(query, q_note_key.clone(), &reply).await;
-                        query_activity_counters.record_query_request(query_started.elapsed());
-                    }
-                    Err(_) => break,
-                },
-                res = task_request_queryable.recv_async() => match res {
-                    Ok(query) => {
-                        let query_started = Instant::now();
-                        let reply = handle_task_request_query(&query_status_provider, &query_context_for_task, parse_cbor_payload::<TaskRequestPayload>(&query)).await;
-                        let _ = reply_cbor(query, q_task_request_key.clone(), &reply).await;
-                        query_activity_counters.record_query_request(query_started.elapsed());
-                    }
-                    Err(_) => break,
-                },
-                res = task_status_queryable.recv_async() => match res {
-                    Ok(query) => {
-                        let query_started = Instant::now();
-                        let reply = handle_task_status_query(&query_context_for_task, parse_cbor_payload::<TaskLookupRequest>(&query)).await;
-                        let _ = reply_cbor(query, q_task_status_key.clone(), &reply).await;
-                        query_activity_counters.record_query_request(query_started.elapsed());
-                    }
-                    Err(_) => break,
-                },
-                res = task_result_queryable.recv_async() => match res {
-                    Ok(query) => {
-                        let query_started = Instant::now();
-                        let reply = handle_task_result_query(&query_context_for_task, parse_cbor_payload::<TaskResultRequest>(&query)).await;
-                        let _ = reply_cbor(query, q_task_result_key.clone(), &reply).await;
                         query_activity_counters.record_query_request(query_started.elapsed());
                     }
                     Err(_) => break,
@@ -1755,195 +1487,6 @@ async fn handle_note_delivery_query(
     }
 }
 
-async fn handle_task_request_query(
-    snapshot_provider: &StylosSnapshotProvider,
-    query_context: &StylosQueryContext,
-    req: Option<TaskRequestPayload>,
-) -> TaskRequestReply {
-    let Some(req) = req else {
-        return TaskRequestReply {
-            accepted: false,
-            agent_id: None,
-            request_id: None,
-            task_id: None,
-            note: None,
-            reason: Some("invalid_request".to_string()),
-        };
-    };
-    let Some(snapshot) = current_snapshot(snapshot_provider).await else {
-        return TaskRequestReply {
-            accepted: false,
-            agent_id: None,
-            request_id: req.request_id,
-            task_id: None,
-            note: None,
-            reason: Some("snapshot_unavailable".to_string()),
-        };
-    };
-
-    let mut candidates: Vec<_> = snapshot
-        .agents
-        .into_iter()
-        .filter(|agent| matches!(agent.activity_status.as_str(), "idle" | "nap"))
-        .collect();
-
-    if let Some(preferred) = req.preferred_agent_id.as_ref() {
-        candidates.retain(|agent| &agent.agent_id == preferred);
-    }
-    if let Some(required_roles) = req.required_roles.as_ref() {
-        candidates.retain(|agent| {
-            required_roles
-                .iter()
-                .all(|role| agent.roles.iter().any(|r| r == role))
-        });
-    }
-    if req.require_git_repo.unwrap_or(false) {
-        candidates.retain(|agent| agent.project_dir_is_git_repo);
-    }
-    candidates.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
-
-    let Some(agent) = candidates.into_iter().next() else {
-        return TaskRequestReply {
-            accepted: false,
-            agent_id: None,
-            request_id: req.request_id,
-            task_id: None,
-            note: None,
-            reason: Some("no_available_agent".to_string()),
-        };
-    };
-
-    let task_id = format!("task-{}", Uuid::new_v4());
-    query_context
-        .task_registry()
-        .insert_queued(task_id.clone(), agent.agent_id.clone())
-        .await;
-    let submit_result = query_context.submit_incoming_prompt(IncomingPromptRequest {
-        prompt: req.task,
-        source: IncomingPromptSource::RemoteStylos,
-        agent_id: Some(agent.agent_id.clone()),
-        task_id: Some(task_id.clone()),
-        request_id: req.request_id.clone(),
-        from: None,
-        from_agent_id: None,
-        to: None,
-        to_agent_id: None,
-    });
-    if let Err(reason) = submit_result {
-        query_context
-            .task_registry()
-            .set_completed(&task_id, None, Some(reason.clone()))
-            .await;
-        return TaskRequestReply {
-            accepted: false,
-            agent_id: Some(agent.agent_id),
-            request_id: req.request_id,
-            task_id: Some(task_id),
-            note: None,
-            reason: Some(reason),
-        };
-    }
-
-    TaskRequestReply {
-        accepted: true,
-        agent_id: Some(agent.agent_id),
-        request_id: req.request_id,
-        task_id: Some(task_id),
-        note: Some("queued for local delivery".to_string()),
-        reason: None,
-    }
-}
-
-async fn handle_task_status_query(
-    query_context: &StylosQueryContext,
-    req: Option<TaskLookupRequest>,
-) -> TaskLookupReply {
-    let Some(req) = req else {
-        return TaskLookupReply {
-            found: false,
-            task_id: String::new(),
-            state: None,
-            agent_id: None,
-            result: None,
-            reason: Some("invalid_request".to_string()),
-            timed_out: None,
-        };
-    };
-    match query_context.task_registry().get(&req.task_id).await {
-        Some(entry) => TaskLookupReply {
-            found: true,
-            task_id: entry.task_id,
-            state: Some(entry.state),
-            agent_id: Some(entry.agent_id),
-            result: entry.result,
-            reason: entry.reason,
-            timed_out: None,
-        },
-        None => TaskLookupReply {
-            found: false,
-            task_id: req.task_id,
-            state: None,
-            agent_id: None,
-            result: None,
-            reason: Some("not_found".to_string()),
-            timed_out: None,
-        },
-    }
-}
-
-async fn handle_task_result_query(
-    query_context: &StylosQueryContext,
-    req: Option<TaskResultRequest>,
-) -> TaskLookupReply {
-    let Some(req) = req else {
-        return TaskLookupReply {
-            found: false,
-            task_id: String::new(),
-            state: None,
-            agent_id: None,
-            result: None,
-            reason: Some("invalid_request".to_string()),
-            timed_out: None,
-        };
-    };
-    let wait_timeout_ms = req.wait_timeout_ms.unwrap_or(0).min(MAX_WAIT_TIMEOUT_MS);
-    let entry = if wait_timeout_ms == 0 {
-        query_context.task_registry().get(&req.task_id).await
-    } else {
-        query_context
-            .task_registry()
-            .wait_for_terminal(&req.task_id, wait_timeout_ms)
-            .await
-    };
-    match entry {
-        Some(entry) => {
-            let timed_out = wait_timeout_ms > 0
-                && !matches!(
-                    entry.state.as_str(),
-                    "completed" | "failed" | "rejected" | "expired"
-                );
-            TaskLookupReply {
-                found: true,
-                task_id: entry.task_id,
-                state: Some(entry.state),
-                agent_id: Some(entry.agent_id),
-                result: entry.result,
-                reason: entry.reason,
-                timed_out: Some(timed_out),
-            }
-        }
-        None => TaskLookupReply {
-            found: false,
-            task_id: req.task_id,
-            state: None,
-            agent_id: None,
-            result: None,
-            reason: Some("not_found".to_string()),
-            timed_out: None,
-        },
-    }
-}
-
 async fn current_snapshot(
     snapshot_provider: &StylosSnapshotProvider,
 ) -> Option<StylosStatusSnapshot> {
@@ -2138,8 +1681,7 @@ impl InboxMessage {
             prompt,
             source: IncomingPromptSource::RemoteStylos,
             agent_id: Some(self.to_agent_id.clone()),
-            task_id: None,
-            request_id: self.request_id.clone(),
+                request_id: self.request_id.clone(),
             from: Some(self.from_instance),
             from_agent_id: self.from_agent_id,
             to: Some(self.to_instance),
@@ -2310,16 +1852,6 @@ mod tests {
             Some("github.com/example/themion"),
             normalize_git_remote("github.com/example/themion").as_deref(),
         ));
-    }
-
-    #[tokio::test]
-    async fn task_registry_wait_returns_current_state_after_timeout() {
-        let registry = TaskRegistry::new();
-        registry
-            .insert_queued("task-1".to_string(), "agent-1".to_string())
-            .await;
-        let entry = registry.wait_for_terminal("task-1", 10).await.unwrap();
-        assert_eq!(entry.state, "queued");
     }
 
     #[test]

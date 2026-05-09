@@ -972,15 +972,6 @@ fn stylos_tool_definitions() -> Vec<Value> {
                 "request_id":{"type":"string"}
             },"required":["instance","message"]
         })),
-        stylos_tool("stylos_request_task", "Submit a task request when you need task status or result polling.", json!({
-            "type":"object","properties":{"instance":{"type":"string"},"task":{"type":"string"},"preferred_agent_id":{"type":"string"},"required_roles":{"type":"array","items":{"type":"string"}},"require_git_repo":{"type":"boolean"},"request_id":{"type":"string"}},"required":["instance","task"]
-        })),
-        stylos_tool("stylos_query_task_status", "Query a submitted task state.", json!({
-            "type":"object","properties":{"instance":{"type":"string"},"task_id":{"type":"string"}},"required":["instance","task_id"]
-        })),
-        stylos_tool("stylos_query_task_result", "Wait for or retrieve a task result.", json!({
-            "type":"object","properties":{"instance":{"type":"string"},"task_id":{"type":"string"},"wait_timeout_ms":{"type":"integer"}},"required":["instance","task_id"]
-        })),
     ]
 }
 
@@ -1483,10 +1474,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
         | "stylos_query_agents_git"
         | "stylos_query_nodes"
         | "stylos_query_status"
-        | "stylos_send_message"
-        | "stylos_request_task"
-        | "stylos_query_task_status"
-        | "stylos_query_task_result" => {
+        | "stylos_send_message" => {
             let invoker = ctx
                 .stylos_tool_invoker
                 .as_ref()

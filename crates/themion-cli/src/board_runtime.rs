@@ -82,7 +82,6 @@ fn build_injection_request(note: &BoardNote, trigger: IncomingPromptSource) -> I
         prompt,
         source: trigger,
         agent_id: Some(note.to_agent_id.clone()),
-        task_id: None,
         request_id: None,
         from: note.from_instance.clone(),
         from_agent_id: note.from_agent_id.clone(),

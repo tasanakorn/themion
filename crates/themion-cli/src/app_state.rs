@@ -1327,23 +1327,6 @@ pub(crate) fn process_agent_event(
         themion_core::agent::AgentEvent::LlmStart => {
             #[cfg(feature = "stylos")]
             {
-                let agent_index = app.runtime.agents.iter().position(|h| h.session_id == sid);
-                if let (Some(agent_index), Some(handle)) =
-                    (agent_index, app.runtime.stylos.as_ref())
-                {
-                    if let Some(remote) = crate::app_runtime::incoming_prompt_request(
-                        &app.runtime.incoming_prompts,
-                        &app.runtime.agents[agent_index].agent_id,
-                    ) {
-                        if let Some(task_id) = remote.task_id.clone() {
-                            crate::app_runtime::publish_stylos_task_running(
-                                &app.runtime.background_domain,
-                                handle.query_context(),
-                                task_id,
-                            );
-                        }
-                    }
-                }
             }
             runtime_reset_stream_counters(&mut app.runtime);
             #[cfg(feature = "stylos")]
@@ -1476,24 +1459,6 @@ pub(crate) fn process_agent_event(
             {
                 if let Some(agent_index) = completed_agent_index {
                     maybe_emit_done_mention_for_completed_note(app, agent_index, app_tx);
-                }
-                if let (Some(agent_index), Some(handle)) =
-                    (completed_agent_index, app.runtime.stylos.as_ref())
-                {
-                    if let Some(remote) = crate::app_runtime::take_incoming_prompt_request(
-                        &mut app.runtime.incoming_prompts,
-                        &app.runtime.agents[agent_index].agent_id,
-                    ) {
-                        if let Some(task_id) = remote.task_id {
-                            let result_text = app.runtime.last_assistant_text.clone();
-                            crate::app_runtime::publish_stylos_task_completed(
-                                &app.runtime.background_domain,
-                                handle.query_context(),
-                                task_id,
-                                result_text,
-                            );
-                        }
-                    }
                 }
             }
             app.runtime.streaming_idx = None;
@@ -1735,16 +1700,6 @@ pub(crate) fn resolve_and_submit_text(
                 source: Some(crate::tui::NonAgentSource::Board),
                 text: effect.log_text,
             });
-            if let (Some(handle), Some(task_id)) =
-                (app.runtime.stylos.as_ref(), effect.failed_task_id)
-            {
-                crate::app_runtime::publish_stylos_task_failed(
-                    &app.runtime.background_domain,
-                    handle.query_context(),
-                    task_id,
-                    effect.failure_reason.to_string(),
-                );
-            }
             crate::app_runtime::clear_active_incoming_prompt(
                 &app.runtime.agents,
                 &mut app.runtime.incoming_prompts,
@@ -1902,21 +1857,7 @@ fn process_incoming_prompt_request(
     });
     let apply_plan = match crate::app_runtime::incoming_prompt_apply_plan(outcome) {
         Ok(apply_plan) => apply_plan,
-        Err(outcome) => {
-            if let Some(task_failure) = outcome.task_failure {
-                if let (Some(handle), Some((task_id, reason))) =
-                    (app.runtime.stylos.as_ref(), task_failure.split_once(':'))
-                {
-                    crate::app_runtime::publish_stylos_task_failed(
-                        &app.runtime.background_domain,
-                        handle.query_context(),
-                        task_id.to_string(),
-                        reason.to_string(),
-                    );
-                }
-            }
-            return;
-        }
+        Err(_outcome) => return,
     };
     crate::app_runtime::apply_active_incoming_prompt(
         &app.runtime.agents,
