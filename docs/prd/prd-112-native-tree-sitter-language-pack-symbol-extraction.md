@@ -203,6 +203,8 @@ Partially implemented in v0.70.0. The landed first slice adds the `source_extrac
 
 Not yet implemented in this slice: richer language-specific symbol normalization, explicit grammar cache/status reporting, broader docs beyond the PRD/docs index status updates, or any cross-file/project-wide analysis features.
 
+PRD-113 supersedes this PRD as the preferred source-analysis tool direction in v0.71.0. The PRD-112 parser foundation remains in use, while `source_outline` is now preferred for one-file app analysis because it adds file metadata, imports, and graph-ready edges. `source_extract_symbols` remains available as a symbol-only compatibility view.
+
 ## Implementation checklist
 
 - [x] add `tree-sitter-language-pack` as the supported runtime parser backend

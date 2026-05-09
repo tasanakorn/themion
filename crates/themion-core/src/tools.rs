@@ -462,6 +462,62 @@ pub struct SourceExtractSymbolsResult {
     pub parse_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceOutlineResult {
+    pub language: String,
+    pub path: String,
+    pub file: SourceOutlineFile,
+    pub symbols: Vec<SourceOutlineSymbol>,
+    pub imports: Vec<SourceOutlineImport>,
+    pub edges: Vec<SourceOutlineEdge>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parse_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceOutlineFile {
+    pub id: String,
+    pub kind: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceOutlineSymbol {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_name: Option<String>,
+    pub span: SourceSymbolSpan,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceOutlineImport {
+    pub id: String,
+    pub module: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    pub is_wildcard: bool,
+    pub span: SourceSymbolSpan,
+    pub resolved: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceOutlineEdge {
+    pub from: String,
+    pub to: String,
+    pub relation: String,
+    pub confidence: String,
+}
+
 type SourceAnalysisToolFuture = Pin<Box<dyn Future<Output = Result<String>> + Send>>;
 pub type SourceAnalysisToolInvoker =
     Arc<dyn Fn(String, Value) -> SourceAnalysisToolFuture + Send + Sync>;
@@ -724,7 +780,21 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "source_extract_symbols",
-                "description": "Detect language from a file path, obtain a parser, and return bounded symbols for one source file.",
+                "description": "Detect language and return bounded symbols for one source file. Symbol-only view; prefer source_outline for app analysis and tracing.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Source file path to analyze" }
+                    },
+                    "required": ["path"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "source_outline",
+                "description": "Detect language and return a bounded one-file outline with symbols, imports, and simple edges.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1506,7 +1576,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             )?;
             Ok(serde_json::to_string(&hashtags)?)
         }
-        "source_extract_symbols" => {
+        "source_extract_symbols" | "source_outline" => {
             let invoker = ctx
                 .source_analysis_tool_invoker
                 .as_ref()
