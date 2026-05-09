@@ -74,6 +74,21 @@ This keeps reusable harness behavior in core while allowing the CLI to publish p
 
 Each core `Agent` also receives a CLI-provided local role context derived from its runtime descriptor. The prompt includes a separate compact role-context section with the active `agent_id`, optional alias, resolved role list, a short known-role glossary, and detailed action guidance only for the active agent's own roles. Dynamically created agents with omitted or empty roles resolve to `executor`; they do not inherit `master` or `interactive` from the predefined agent.
 
+## Agent coordination channel guidance
+
+Themion now injects compact guidance that teaches agents to choose the lightest channel that is durable enough for the work:
+
+1. answer directly for simple requests that do not need tracking
+2. create a self-note when the current agent needs durable tracking for non-trivial or branching work
+3. when extra capacity or role separation helps, `master` may create or choose a local worker agent
+4. use durable board notes for delegated work another agent must complete, resume, or report later
+5. use `stylos_send_message` only for short volatile coordination, clarification, participant-facing state updates, urgent nudges, or final wrap-up with no durable result
+6. use Stylos task requests when the sender needs a task id plus status/result polling
+
+Delegated board notes should state the task, expected output, constraints, and return path. If the result must be durable, the note should ask the worker to update the note result or create a done mention through the board workflow. Inbox messages are not a durable task queue and should not be the only record for work that needs completion tracking.
+
+For multi-agent activity, the guidance tells the coordinator to own authoritative state, use stable activity/turn/note identifiers, state participants and response channels, separate state updates from discussion, broadcast only meaningful state transitions, define completion/timeout/late-input rules up front, and end with a clear final outcome.
+
 ## CLI-local runtime domains
 
 `themion-cli` now owns explicit Tokio runtime construction through a CLI-local runtime topology helper.
@@ -223,7 +238,7 @@ In the current implementation:
 
 - Stylos queryables are registered in `crates/themion-cli/src/stylos.rs` and their long-lived serving/publishing/subscription tasks now run on the CLI-owned `network` runtime domain
 - query handlers read the current exported process snapshot from a snapshot provider owned by the Stylos runtime path rather than by `tui.rs`
-- accepted `talk`, durable `notes/request`, and `tasks/request` queries are converted into `IncomingPromptRequest` values or persisted note records and sent over an in-process/local-runtime path
+- accepted volatile message, durable `notes/request`, and `tasks/request` queries are converted into inbox items, `IncomingPromptRequest` values, or persisted note records and sent over an in-process/local-runtime path
 - CLI-local incoming-prompt admission and rejection policy belongs in `crates/themion-cli/src/app_runtime.rs`, not in `tui.rs`
 - CLI-local board-note coordination for pending note injection and note-completion follow-up belongs in `crates/themion-cli/src/board_runtime.rs`, not in `tui.rs`
 - TUI should not be a Stylos/watchdog policy endpoint; it should receive runtime/app-state outcomes and render them, while human-originated input flows the other direction as intents

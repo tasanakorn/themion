@@ -1687,6 +1687,8 @@ mod tests {
 
         let with_meta = TurnMeta {
             app_version: Some("0.36.0".to_string()),
+            app_version_hash: Some("abc1234".to_string()),
+            app_version_dirty: Some(false),
             profile: Some("codex".to_string()),
             provider: Some("openai-codex".to_string()),
             model: Some("gpt-5.4".to_string()),

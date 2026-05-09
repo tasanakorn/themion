@@ -792,7 +792,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "board_create_note",
-                "description": "Create a durable board note. For ordinary self-notes, prefer the magic local target to_instance=local and to_agent_id=master. SELF is also accepted when local identity resolution is available.",
+                "description": "Create a durable board note for tracked self-work or delegated work. Include expected result and return path when delegating.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -964,7 +964,7 @@ fn stylos_tool_definitions() -> Vec<Value> {
         stylos_tool("stylos_query_status", "Query one instance for current process and agent status.", json!({
             "type":"object","properties":{"instance":{"type":"string"},"agent_id":{"type":"string"},"role":{"type":"string"}},"required":["instance"]
         })),
-        stylos_tool("stylos_send_message", "Send a short user-style message to one target agent. Valid known targets queue in the receiver volatile inbox.", json!({
+        stylos_tool("stylos_send_message", "Send a short volatile message to one target agent. Use board notes for delegated work that needs tracking.", json!({
             "type":"object","properties":{
                 "instance":{"type":"string","description":"Target instance in <hostname>:<pid> form."},
                 "to_agent_id":{"type":"string","description":"Target agent id. Default: master."},
@@ -972,7 +972,7 @@ fn stylos_tool_definitions() -> Vec<Value> {
                 "request_id":{"type":"string"}
             },"required":["instance","message"]
         })),
-        stylos_tool("stylos_request_task", "Submit a task request for local agent routing.", json!({
+        stylos_tool("stylos_request_task", "Submit a task request when you need task status or result polling.", json!({
             "type":"object","properties":{"instance":{"type":"string"},"task":{"type":"string"},"preferred_agent_id":{"type":"string"},"required_roles":{"type":"array","items":{"type":"string"}},"require_git_repo":{"type":"boolean"},"request_id":{"type":"string"}},"required":["instance","task"]
         })),
         stylos_tool("stylos_query_task_status", "Query a submitted task state.", json!({
