@@ -436,6 +436,36 @@ pub struct SystemInspectionResult {
     pub issues: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceSymbolSpan {
+    pub start_line: usize,
+    pub start_byte: usize,
+    pub end_line: usize,
+    pub end_byte: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceExtractedSymbol {
+    pub name: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_name: Option<String>,
+    pub span: SourceSymbolSpan,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceExtractSymbolsResult {
+    pub language: String,
+    pub path: String,
+    pub symbols: Vec<SourceExtractedSymbol>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parse_error: Option<String>,
+}
+
+type SourceAnalysisToolFuture = Pin<Box<dyn Future<Output = Result<String>> + Send>>;
+pub type SourceAnalysisToolInvoker =
+    Arc<dyn Fn(String, Value) -> SourceAnalysisToolFuture + Send + Sync>;
+
 pub struct ToolCtx {
     pub db: Arc<DbHandle>,
     pub session_id: Uuid,
@@ -451,6 +481,7 @@ pub struct ToolCtx {
     #[cfg(feature = "stylos")]
     pub stylos_enabled: bool,
     pub local_agent_tool_invoker: Option<LocalAgentToolInvoker>,
+    pub source_analysis_tool_invoker: Option<SourceAnalysisToolInvoker>,
     pub system_inspection: Option<SystemInspectionResult>,
 }
 
@@ -686,6 +717,20 @@ pub fn tool_definitions() -> Value {
                         ,"reason": { "type": "string", "description": "Optional reason." }
                     },
                     "required": ["command"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "source_extract_symbols",
+                "description": "Detect language from a file path, obtain a parser, and return bounded symbols for one source file.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Source file path to analyze" }
+                    },
+                    "required": ["path"]
                 }
             }
         }),
@@ -1460,6 +1505,13 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 args["limit"].as_u64().map(|n| n as u32).unwrap_or(50),
             )?;
             Ok(serde_json::to_string(&hashtags)?)
+        }
+        "source_extract_symbols" => {
+            let invoker = ctx
+                .source_analysis_tool_invoker
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("source analysis tools unavailable"))?;
+            invoker(name.to_string(), args).await
         }
         "local_agent_create" | "local_agent_delete" => {
             let invoker = ctx

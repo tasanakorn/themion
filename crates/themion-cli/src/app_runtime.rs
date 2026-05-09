@@ -1,11 +1,10 @@
+#[cfg(feature = "stylos")]
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
-#[cfg(feature = "stylos")]
-use std::collections::HashMap;
 
 use std::time::Duration;
-
 
 use themion_core::agent::{Agent, TurnCancellation};
 use themion_core::client_codex::ApiCallRateLimitReport;
@@ -19,25 +18,28 @@ use themion_core::ModelInfo;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-use crate::tui::AppEvent;
-#[cfg(feature = "stylos")]
-use crate::board_runtime::{board_note_id_from_prompt, release_board_note_claim, LocalBoardClaimRegistry};
 use crate::app_state::{AppRuntimeEvent, AppSnapshot, AppSnapshotAgent, AppSnapshotHub};
+#[cfg(feature = "stylos")]
+use crate::board_runtime::{
+    board_note_id_from_prompt, release_board_note_claim, LocalBoardClaimRegistry,
+};
 use crate::config::save_profiles;
 use crate::runtime_domains::DomainHandle;
 #[cfg(feature = "stylos")]
 use crate::runtime_domains::RuntimeDomains;
+use crate::tui::AppEvent;
 use crate::Session;
 
 #[cfg(feature = "stylos")]
 use crate::stylos::StylosStatusSnapshot;
 
 #[cfg(feature = "stylos")]
-pub(crate) type StylosSnapshotFuture = std::pin::Pin<Box<dyn std::future::Future<Output = StylosStatusSnapshot> + Send>>;
+pub(crate) type StylosSnapshotFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = StylosStatusSnapshot> + Send>>;
 
 #[cfg(feature = "stylos")]
-pub(crate) type StylosSnapshotProvider = std::sync::Arc<dyn Fn() -> StylosSnapshotFuture + Send + Sync>;
-
+pub(crate) type StylosSnapshotProvider =
+    std::sync::Arc<dyn Fn() -> StylosSnapshotFuture + Send + Sync>;
 
 #[cfg(feature = "stylos")]
 pub(crate) type IncomingPromptState = HashMap<String, crate::local_prompts::IncomingPromptRequest>;
@@ -138,10 +140,40 @@ pub(crate) fn stylos_tool_invoker(
 }
 
 #[derive(Debug)]
+pub(crate) struct SourceAnalysisRequest {
+    pub(crate) action: String,
+    pub(crate) args: serde_json::Value,
+    pub(crate) reply_tx: tokio::sync::oneshot::Sender<anyhow::Result<String>>,
+}
+
 pub(crate) struct LocalAgentManagementRequest {
     pub(crate) action: String,
     pub(crate) args: serde_json::Value,
     pub(crate) reply_tx: tokio::sync::oneshot::Sender<anyhow::Result<String>>,
+}
+
+pub(crate) fn build_source_analysis_tool_invoker(
+    app_tx: mpsc::UnboundedSender<AppEvent>,
+) -> themion_core::tools::SourceAnalysisToolInvoker {
+    std::sync::Arc::new(move |name: String, args: serde_json::Value| {
+        let app_tx = app_tx.clone();
+        let fut: std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>,
+        > = Box::pin(async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            app_tx
+                .send(AppEvent::SourceAnalysis(SourceAnalysisRequest {
+                    action: name,
+                    args,
+                    reply_tx,
+                }))
+                .map_err(|_| anyhow::anyhow!("source analysis queue unavailable"))?;
+            reply_rx
+                .await
+                .map_err(|_| anyhow::anyhow!("source analysis reply unavailable"))?
+        });
+        fut
+    })
 }
 
 pub(crate) fn build_local_agent_tool_invoker(
@@ -211,7 +243,10 @@ pub(crate) struct LocalAgentRosterEntry {
     pub roles: Vec<String>,
 }
 
-pub(crate) fn roster_entry(agent_id: impl Into<String>, roles: impl IntoIterator<Item = impl Into<String>>) -> LocalAgentRosterEntry {
+pub(crate) fn roster_entry(
+    agent_id: impl Into<String>,
+    roles: impl IntoIterator<Item = impl Into<String>>,
+) -> LocalAgentRosterEntry {
     LocalAgentRosterEntry {
         agent_id: agent_id.into(),
         roles: roles.into_iter().map(Into::into).collect(),
@@ -309,7 +344,10 @@ pub(crate) fn spawn_agent_turn_core_loop(
                 themion_core::agent::AgentEvent::AssistantText(format!("error: {e}")),
             ));
         }
-        let _ = runtime_tx.send(AppRuntimeEvent::AgentReady(Box::new(agent), handle_session_id));
+        let _ = runtime_tx.send(AppRuntimeEvent::AgentReady(
+            Box::new(agent),
+            handle_session_id,
+        ));
     });
 }
 
@@ -326,7 +364,6 @@ pub(crate) fn spawn_agent_event_relay(
         }
     });
 }
-
 
 #[cfg(feature = "stylos")]
 pub(crate) fn wire_stylos_event_streams(
@@ -578,7 +615,8 @@ pub(crate) fn build_main_agent(
         local_instance_id,
         #[cfg(feature = "stylos")]
         local_agent_id,
-        Some(build_local_agent_tool_invoker(local_agent_mgmt_tx)),
+        Some(build_local_agent_tool_invoker(local_agent_mgmt_tx.clone())),
+        Some(build_source_analysis_tool_invoker(local_agent_mgmt_tx)),
         system_inspection,
         api_log_enabled,
         "master",
@@ -587,26 +625,45 @@ pub(crate) fn build_main_agent(
     )
 }
 
-
 #[derive(Clone)]
 pub(crate) enum RuntimeCommand {
-    LoginCodex { profile_name: Option<String> },
+    LoginCodex {
+        profile_name: Option<String>,
+    },
     UnifiedSearchIndex {
         full: bool,
         source_kind: Option<String>,
     },
-    SessionProfileUse { name: String },
-    SessionProfileSet { key: String, value: String },
+    SessionProfileUse {
+        name: String,
+    },
+    SessionProfileSet {
+        key: String,
+        value: String,
+    },
     SessionProfileReset,
-    ConfigProfileUse { name: String },
-    ConfigProfileCreate { name: String },
-    ConfigProfileClone { source: String, dest: String },
-    ConfigProfileDelete { name: String },
-    ConfigProfileSet { key: String, value: String },
-    SetApiLogEnabled { enabled: bool },
+    ConfigProfileUse {
+        name: String,
+    },
+    ConfigProfileCreate {
+        name: String,
+    },
+    ConfigProfileClone {
+        source: String,
+        dest: String,
+    },
+    ConfigProfileDelete {
+        name: String,
+    },
+    ConfigProfileSet {
+        key: String,
+        value: String,
+    },
+    SetApiLogEnabled {
+        enabled: bool,
+    },
     ClearContext,
 }
-
 
 pub(crate) enum RuntimeCommandOutcome {
     Noop,
@@ -616,8 +673,13 @@ pub(crate) enum RuntimeCommandOutcome {
         new_session_id: Uuid,
         output_lines: Vec<String>,
     },
-    SetInteractiveApiLogEnabled { enabled: bool, output_lines: Vec<String> },
-    ClearInteractiveContext { output_lines: Vec<String> },
+    SetInteractiveApiLogEnabled {
+        enabled: bool,
+        output_lines: Vec<String>,
+    },
+    ClearInteractiveContext {
+        output_lines: Vec<String>,
+    },
 }
 
 pub(crate) struct RuntimeCommandContext<'a> {
@@ -921,7 +983,6 @@ pub(crate) fn execute_runtime_command(
     }
 }
 
-
 pub(crate) struct RuntimeCommandApplication {
     pub output_lines: Vec<String>,
     pub had_effect: bool,
@@ -997,8 +1058,9 @@ pub(crate) fn apply_runtime_command_outcome_to_app_runtime(
     }
 }
 
-
-pub(crate) fn current_activity_label(activity: Option<&crate::app_state::AgentActivity>) -> Option<String> {
+pub(crate) fn current_activity_label(
+    activity: Option<&crate::app_state::AgentActivity>,
+) -> Option<String> {
     activity.map(|activity| match activity {
         crate::app_state::AgentActivity::PreparingRequest => "preparing_request".to_string(),
         crate::app_state::AgentActivity::WaitingForModel => "waiting_for_model".to_string(),
@@ -1006,7 +1068,9 @@ pub(crate) fn current_activity_label(activity: Option<&crate::app_state::AgentAc
         crate::app_state::AgentActivity::RunningTool(_) => "running_tool".to_string(),
         crate::app_state::AgentActivity::WaitingAfterTool => "waiting_after_tool".to_string(),
         crate::app_state::AgentActivity::LoginStarting => "login_starting".to_string(),
-        crate::app_state::AgentActivity::WaitingForLoginBrowser => "waiting_for_login_browser".to_string(),
+        crate::app_state::AgentActivity::WaitingForLoginBrowser => {
+            "waiting_for_login_browser".to_string()
+        }
         crate::app_state::AgentActivity::RunningShellCommand => "running_shell_command".to_string(),
         crate::app_state::AgentActivity::Finishing => "finishing".to_string(),
     })
@@ -1041,7 +1105,12 @@ pub(crate) fn build_task_runtime_snapshot(
         );
     }
     SystemInspectionTaskRuntime {
-        status: if recent_window_ms.is_some() { "ok" } else { "partial" }.to_string(),
+        status: if recent_window_ms.is_some() {
+            "ok"
+        } else {
+            "partial"
+        }
+        .to_string(),
         current_activity: current_activity_label(activity),
         current_activity_detail: current_activity_detail(activity, stream_chunks, stream_chars),
         busy: Some(agent_busy),
@@ -1053,7 +1122,6 @@ pub(crate) fn build_task_runtime_snapshot(
         runtime_notes,
     }
 }
-
 
 pub(crate) struct SystemInspectionRuntimeRefreshState<'a> {
     pub session: &'a Session,
@@ -1153,7 +1221,6 @@ pub(crate) struct SystemInspectionRefreshInput {
     pub debug_runtime_lines: Vec<String>,
 }
 
-
 pub(crate) fn build_master_agent_handle(
     new_agent: Agent,
     new_session_id: Uuid,
@@ -1220,7 +1287,10 @@ pub(crate) fn apply_system_inspection_to_interactive_agent(
     agents: &mut [crate::tui::AgentHandle],
     inspection: SystemInspectionResult,
 ) {
-    if let Some(handle) = agents.iter_mut().find(|h| h.roles.iter().any(|r| r == "interactive")) {
+    if let Some(handle) = agents
+        .iter_mut()
+        .find(|h| h.roles.iter().any(|r| r == "interactive"))
+    {
         if let Some(agent) = handle.agent.as_mut() {
             agent.set_system_inspection(Some(inspection));
         }
@@ -1267,7 +1337,10 @@ pub(crate) fn build_system_inspection_snapshot(
         provider: Some(session.provider.clone()),
         model: Some(session.model.clone()),
         auth_configured: Some(match session.provider.as_str() {
-            "openai-codex" => crate::app_state::resolve_codex_auth(session).ok().flatten().is_some(),
+            "openai-codex" => crate::app_state::resolve_codex_auth(session)
+                .ok()
+                .flatten()
+                .is_some(),
             _ => session
                 .api_key
                 .as_ref()
@@ -1384,7 +1457,6 @@ pub(crate) fn build_replacement_main_agent(
     Ok((new_agent, new_session_id))
 }
 
-
 fn unix_epoch_now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1392,14 +1464,17 @@ fn unix_epoch_now_ms() -> u64 {
         .as_millis() as u64
 }
 
-
 pub(crate) fn agent_has_role(handle: &crate::tui::AgentHandle, role: &str) -> bool {
     #[cfg(feature = "stylos")]
     let role = if role == "main" { "master" } else { role };
     handle.roles.iter().any(|candidate| {
         #[cfg(feature = "stylos")]
         {
-            let candidate = if candidate == "main" { "master" } else { candidate.as_str() };
+            let candidate = if candidate == "main" {
+                "master"
+            } else {
+                candidate.as_str()
+            };
             candidate == role
         }
         #[cfg(not(feature = "stylos"))]
@@ -1433,7 +1508,10 @@ pub(crate) fn build_local_agent_status_entries_local(
                 handle.label.clone(),
                 handle.roles.clone(),
                 handle.session_id.to_string(),
-                handle.agent.as_ref().map(|agent| agent.workflow_state().clone()),
+                handle
+                    .agent
+                    .as_ref()
+                    .map(|agent| agent.workflow_state().clone()),
                 handle.agent.as_ref().map(|agent| agent.project_dir.clone()),
                 handle.busy,
                 false,
@@ -1455,7 +1533,10 @@ pub(crate) fn build_local_agent_status_entries(
                 handle.label.clone(),
                 handle.roles.clone(),
                 handle.session_id.to_string(),
-                handle.agent.as_ref().map(|agent| agent.workflow_state().clone()),
+                handle
+                    .agent
+                    .as_ref()
+                    .map(|agent| agent.workflow_state().clone()),
                 handle.agent.as_ref().map(|agent| agent.project_dir.clone()),
                 handle.busy,
                 incoming_prompts.contains_key(&handle.agent_id),
@@ -1496,6 +1577,7 @@ pub(crate) struct LocalAgentRuntimeContext<'a> {
     #[cfg(feature = "stylos")]
     pub local_instance_id: Option<&'a str>,
     pub local_agent_tool_invoker: Option<themion_core::tools::LocalAgentToolInvoker>,
+    pub source_analysis_tool_invoker: Option<themion_core::tools::SourceAnalysisToolInvoker>,
     pub api_log_enabled: bool,
 }
 
@@ -1546,7 +1628,12 @@ pub(crate) fn allocate_default_local_agent_id(agents: &[LocalAgentRosterEntry]) 
 pub(crate) fn validate_agent_roles(agents: &[LocalAgentRosterEntry]) -> anyhow::Result<()> {
     let master_count = agents
         .iter()
-        .filter(|handle| handle.roles.iter().any(|role| normalize_primary_role(role) == "master"))
+        .filter(|handle| {
+            handle
+                .roles
+                .iter()
+                .any(|role| normalize_primary_role(role) == "master")
+        })
         .count();
     if master_count != 1 {
         anyhow::bail!("invalid agent roles: expected exactly one master agent");
@@ -1605,7 +1692,10 @@ fn create_local_agent(
         anyhow::bail!("cannot create another master agent");
     }
     if roles.iter().any(|r| r == "interactive")
-        && ctx.roster.iter().any(|entry| entry.roles.iter().any(|r| r == "interactive"))
+        && ctx
+            .roster
+            .iter()
+            .any(|entry| entry.roles.iter().any(|r| r == "interactive"))
     {
         anyhow::bail!("invalid agent roles: expected at most one interactive agent");
     }
@@ -1623,19 +1713,21 @@ fn create_local_agent(
         #[cfg(feature = "stylos")]
         &agent_id,
         ctx.local_agent_tool_invoker,
+        ctx.source_analysis_tool_invoker,
         None,
         ctx.api_log_enabled,
         &agent_id,
         &label,
         roles.clone(),
     )?;
-    ctx.agents.push(build_local_agent_handle(NewLocalAgentHandleParts {
-        agent,
-        session_id,
-        agent_id: agent_id.clone(),
-        label: label.clone(),
-        roles: roles.clone(),
-    }));
+    ctx.agents
+        .push(build_local_agent_handle(NewLocalAgentHandleParts {
+            agent,
+            session_id,
+            agent_id: agent_id.clone(),
+            label: label.clone(),
+            roles: roles.clone(),
+        }));
     Ok(serde_json::json!({
         "ok": true,
         "entity": "local_agent",
@@ -1712,12 +1804,18 @@ impl WatchdogRuntimeState {
         _has_active_incoming_prompt: bool,
         pending_watchdog_note: bool,
     ) {
-        *self.pending_watchdog_note.lock().expect("watchdog state lock") = pending_watchdog_note;
+        *self
+            .pending_watchdog_note
+            .lock()
+            .expect("watchdog state lock") = pending_watchdog_note;
     }
 
     #[cfg_attr(not(feature = "stylos"), allow(dead_code))]
     pub(crate) fn pending_watchdog_note(&self) -> bool {
-        *self.pending_watchdog_note.lock().expect("watchdog state lock")
+        *self
+            .pending_watchdog_note
+            .lock()
+            .expect("watchdog state lock")
     }
 }
 
@@ -1807,8 +1905,7 @@ pub(crate) fn resolve_incoming_prompt_disposition(
 
     let log_text = if is_note {
         let note_identifier = stylos_note_display_identifier(&request.prompt);
-        let column = stylos_note_header_value(&request.prompt, "column")
-            .unwrap_or("unknown");
+        let column = stylos_note_header_value(&request.prompt, "column").unwrap_or("unknown");
         format!(
             "Board note intake {} from={} from_agent_id={} to={} to_agent_id={} column={}",
             note_identifier, sender, sender_agent, target_instance, target_agent, column
@@ -1843,20 +1940,23 @@ pub(crate) fn submit_target_failure_effect(
     resolution: &SubmitTargetResolution,
 ) -> Option<SubmitTargetFailureEffect> {
     match resolution {
-        SubmitTargetResolution::MissingIncomingPromptTarget {
-            log_text,
-            ..
-        } => Some(SubmitTargetFailureEffect {
-            log_text: log_text.clone(),
-        }),
+        SubmitTargetResolution::MissingIncomingPromptTarget { log_text, .. } => {
+            Some(SubmitTargetFailureEffect {
+                log_text: log_text.clone(),
+            })
+        }
         _ => None,
     }
 }
 
 #[cfg(feature = "stylos")]
 pub(crate) enum SubmitTargetResolution {
-    Interactive { agent_index: usize },
-    IncomingPromptTarget { agent_index: usize },
+    Interactive {
+        agent_index: usize,
+    },
+    IncomingPromptTarget {
+        agent_index: usize,
+    },
     MissingIncomingPromptTarget {
         active_agent_index: usize,
         log_text: String,
@@ -1872,10 +1972,7 @@ pub(crate) fn resolve_submit_target(
         .iter()
         .position(|h| h.roles.iter().any(|r| r == "interactive"))
         .expect("interactive agent");
-    let Some(active_agent_index) = agents
-        .iter()
-        .position(|h| h.has_active_incoming_prompt)
-    else {
+    let Some(active_agent_index) = agents.iter().position(|h| h.has_active_incoming_prompt) else {
         return SubmitTargetResolution::Interactive {
             agent_index: interactive_index,
         };
@@ -1911,7 +2008,7 @@ pub(crate) fn resolve_submit_target(
             };
             SubmitTargetResolution::MissingIncomingPromptTarget {
                 active_agent_index,
-                    log_text,
+                log_text,
             }
         }
     }
@@ -1982,7 +2079,14 @@ pub(crate) fn clear_active_incoming_prompt(
     watchdog_state: &Arc<WatchdogRuntimeState>,
     agent_index: usize,
 ) {
-    set_active_incoming_prompt(agents, incoming_prompts, watchdog_state, agent_index, None, false);
+    set_active_incoming_prompt(
+        agents,
+        incoming_prompts,
+        watchdog_state,
+        agent_index,
+        None,
+        false,
+    );
 }
 
 #[cfg(feature = "stylos")]
@@ -2227,7 +2331,12 @@ pub(crate) fn build_stylos_status_snapshot(
 ) -> anyhow::Result<crate::stylos::StylosStatusSnapshot> {
     let main_count = agent_sources
         .iter()
-        .filter(|agent| agent.roles.iter().any(|r| normalize_primary_role(r) == "master"))
+        .filter(|agent| {
+            agent
+                .roles
+                .iter()
+                .any(|r| normalize_primary_role(r) == "master")
+        })
         .count();
     if main_count != 1 {
         anyhow::bail!(
@@ -2249,7 +2358,8 @@ pub(crate) fn build_stylos_status_snapshot(
     let agents = agent_sources
         .into_iter()
         .map(|agent| {
-            let git_status = crate::stylos::GitStatusCache::new(agent.project_dir.clone()).snapshot();
+            let git_status =
+                crate::stylos::GitStatusCache::new(agent.project_dir.clone()).snapshot();
             crate::stylos::StylosAgentStatusSnapshot {
                 agent_id: agent.agent_id,
                 label: agent.label,
@@ -2503,8 +2613,6 @@ pub(crate) fn build_and_publish_stylos_status_snapshot(
     });
 }
 
-
-
 #[cfg(all(test, feature = "stylos"))]
 mod tests {
     use super::stylos_note_display_identifier;
@@ -2522,8 +2630,7 @@ body";
 
     #[test]
     fn stylos_note_display_identifier_falls_back_to_note_id() {
-        let prompt =
-            "type=stylos_note note_id=123e4567-e89b-12d3-a456-426614174000 column=todo
+        let prompt = "type=stylos_note note_id=123e4567-e89b-12d3-a456-426614174000 column=todo
 
 body";
         assert_eq!(

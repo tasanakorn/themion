@@ -114,6 +114,7 @@ pub(crate) enum AppEvent {
         auth_result: anyhow::Result<themion_core::CodexAuth>,
     },
     LocalAgentManagement(LocalAgentManagementRequest),
+    SourceAnalysis(crate::app_runtime::SourceAnalysisRequest),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1611,6 +1612,9 @@ impl App {
                     frame_requester,
                 );
             }
+            AppEvent::SourceAnalysis(request) => {
+                crate::app_state::handle_source_analysis_request(self, request, frame_requester);
+            }
         }
     }
 
@@ -2374,7 +2378,7 @@ mod tests {
             prompt: "hi".to_string(),
             source: IncomingPromptSource::RemoteStylos,
             agent_id: Some("worker".to_string()),
-                request_id: None,
+            request_id: None,
             from: Some("peer-1:1234".to_string()),
             from_agent_id: Some("master".to_string()),
             to: Some("peer-2:5678".to_string()),
@@ -2396,7 +2400,7 @@ mod tests {
             prompt: "hi".to_string(),
             source: IncomingPromptSource::RemoteStylos,
             agent_id: Some("worker".to_string()),
-                request_id: None,
+            request_id: None,
             from: Some("peer-1:1234".to_string()),
             from_agent_id: Some("master".to_string()),
             to: Some("peer-2:5678".to_string()),

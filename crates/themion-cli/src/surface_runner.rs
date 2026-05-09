@@ -36,7 +36,6 @@ impl SurfaceRunnerContext {
     }
 }
 
-
 pub(crate) fn start_tick_loop_on_domain<T, F>(
     domain: &DomainHandle,
     app_tx: mpsc::UnboundedSender<T>,
@@ -56,7 +55,6 @@ pub(crate) fn start_tick_loop_on_domain<T, F>(
         }
     });
 }
-
 
 pub(crate) fn start_snapshot_watch_loop(
     runtime_domains: &Arc<RuntimeDomains>,
@@ -106,7 +104,12 @@ pub(crate) async fn handle_surface_app_event(
             app.request_draw(&ctx.frame_requester);
         }
         AppEvent::RuntimeCommand(command) => {
-            crate::app_state::handle_runtime_command(app, command, &ctx.frame_requester, &ctx.app_tx);
+            crate::app_state::handle_runtime_command(
+                app,
+                command,
+                &ctx.frame_requester,
+                &ctx.app_tx,
+            );
         }
         AppEvent::LoginPrompt {
             user_code,
@@ -127,9 +130,15 @@ pub(crate) async fn handle_surface_app_event(
             .await;
         }
         AppEvent::LocalAgentManagement(request) => {
-            crate::app_state::handle_local_agent_management_request(app, request, &ctx.frame_requester);
+            crate::app_state::handle_local_agent_management_request(
+                app,
+                request,
+                &ctx.frame_requester,
+            );
+        }
+        AppEvent::SourceAnalysis(request) => {
+            crate::app_state::handle_source_analysis_request(app, request, &ctx.frame_requester);
         }
         AppEvent::Key(_) | AppEvent::Mouse(_) | AppEvent::Paste(_) => {}
     }
 }
-

@@ -1,5 +1,6 @@
 use crate::app_runtime::{
     apply_master_agent_replacement, build_local_agent_roster, build_local_agent_tool_invoker,
+    build_source_analysis_tool_invoker,
     handle_local_agent_management_request as runtime_handle_local_agent_management_request,
     LocalAgentManagementRequest, LocalAgentRuntimeContext,
 };
@@ -620,6 +621,21 @@ pub(crate) fn runtime_replace_master_agent(
     );
 }
 
+pub(crate) fn handle_source_analysis_request(
+    app: &mut App,
+    request: crate::app_runtime::SourceAnalysisRequest,
+    frame_requester: &FrameRequester,
+) {
+    let result = crate::source_analysis::handle_source_analysis_request(
+        &app.runtime.project_dir,
+        &request.action,
+        request.args,
+    );
+    app.mark_dirty_all();
+    app.request_draw(frame_requester);
+    let _ = request.reply_tx.send(result);
+}
+
 pub(crate) fn handle_local_agent_management_request(
     app: &mut App,
     request: LocalAgentManagementRequest,
@@ -642,6 +658,9 @@ pub(crate) fn handle_local_agent_management_request(
             #[cfg(feature = "stylos")]
             local_instance_id: app.runtime.local_instance_id.as_deref(),
             local_agent_tool_invoker: Some(local_agent_tool_invoker),
+            source_analysis_tool_invoker: Some(build_source_analysis_tool_invoker(
+                app.runtime.local_agent_mgmt_tx.clone(),
+            )),
             api_log_enabled: app.runtime.api_log_enabled,
         },
         &request.action,
@@ -1326,8 +1345,7 @@ pub(crate) fn process_agent_event(
     match ev {
         themion_core::agent::AgentEvent::LlmStart => {
             #[cfg(feature = "stylos")]
-            {
-            }
+            {}
             runtime_reset_stream_counters(&mut app.runtime);
             #[cfg(feature = "stylos")]
             {
@@ -2309,6 +2327,7 @@ pub fn build_agent(
     #[cfg(feature = "stylos")] local_instance_id: Option<&str>,
     #[cfg(feature = "stylos")] local_agent_id: &str,
     local_agent_tool_invoker: Option<themion_core::tools::LocalAgentToolInvoker>,
+    source_analysis_tool_invoker: Option<themion_core::tools::SourceAnalysisToolInvoker>,
     system_inspection: Option<SystemInspectionResult>,
     api_log_enabled: bool,
     local_role_agent_id: &str,
@@ -2371,6 +2390,7 @@ pub fn build_agent(
     agent.set_api_log_enabled(api_log_enabled);
     agent.set_system_inspection(system_inspection);
     agent.set_local_agent_tool_invoker(local_agent_tool_invoker);
+    agent.set_source_analysis_tool_invoker(source_analysis_tool_invoker);
     agent.set_local_agent_role_context(local_role_agent_id, local_role_label, local_role_roles);
 
     #[cfg(feature = "stylos")]

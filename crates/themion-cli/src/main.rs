@@ -5,15 +5,16 @@ mod board_runtime;
 mod build_info;
 mod chat_composer;
 mod config;
-mod instance_id;
 mod headless_runner;
+mod instance_id;
 mod local_prompts;
 mod login_codex;
 mod paste_burst;
 mod runtime_domains;
-mod surface_runner;
+mod source_analysis;
 #[cfg(feature = "stylos")]
 mod stylos;
+mod surface_runner;
 mod textarea;
 mod tui;
 mod tui_runner;
@@ -177,7 +178,14 @@ fn main() -> anyhow::Result<()> {
 
     let cfg = Config::load()?;
 
-    let (project_dir_override, headless_mode, web_mode, web_bind_addr, command_mode, remaining_args) = {
+    let (
+        project_dir_override,
+        headless_mode,
+        web_mode,
+        web_bind_addr,
+        command_mode,
+        remaining_args,
+    ) = {
         let mut dir: Option<std::path::PathBuf> = None;
         let mut headless = false;
         let mut web = false;
@@ -277,7 +285,9 @@ fn main() -> anyhow::Result<()> {
     } else if web_mode {
         println!("{startup_banner}");
         if !remaining_args.is_empty() {
-            anyhow::bail!("--web does not accept prompt arguments; use prompt args for non-interactive mode");
+            anyhow::bail!(
+                "--web does not accept prompt arguments; use prompt args for non-interactive mode"
+            );
         }
         let bind_addr = web::parse_bind_addr(web_bind_addr.as_deref())?;
         let app_runtime = AppState::for_headless(cfg, project_dir_override)?;
@@ -306,10 +316,15 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn is_valid_unified_search_source_kind(value: &str) -> bool {
-    matches!(value, "memory" | "chat_message" | "tool_call" | "tool_result")
+    matches!(
+        value,
+        "memory" | "chat_message" | "tool_call" | "tool_result"
+    )
 }
 
-fn parse_unified_search_index_command(args: &[String]) -> Option<(bool, Option<String>, Vec<String>)> {
+fn parse_unified_search_index_command(
+    args: &[String],
+) -> Option<(bool, Option<String>, Vec<String>)> {
     let [domain, command, rest @ ..] = args else {
         return None;
     };

@@ -440,6 +440,7 @@ pub struct Agent {
     #[cfg(feature = "stylos")]
     stylos_tool_invoker: Option<crate::tools::StylosToolInvoker>,
     local_agent_tool_invoker: Option<crate::tools::LocalAgentToolInvoker>,
+    source_analysis_tool_invoker: Option<crate::tools::SourceAnalysisToolInvoker>,
     system_inspection: Option<crate::tools::SystemInspectionResult>,
     api_log_enabled: bool,
     build_identity: Option<BuildIdentity>,
@@ -491,6 +492,7 @@ impl Agent {
             #[cfg(feature = "stylos")]
             stylos_tool_invoker: None,
             local_agent_tool_invoker: None,
+            source_analysis_tool_invoker: None,
             system_inspection: None,
             api_log_enabled: false,
             build_identity: None,
@@ -557,6 +559,7 @@ impl Agent {
             #[cfg(feature = "stylos")]
             stylos_tool_invoker: None,
             local_agent_tool_invoker: None,
+            source_analysis_tool_invoker: None,
             system_inspection: None,
             api_log_enabled: false,
             build_identity: None,
@@ -579,6 +582,13 @@ impl Agent {
         invoker: Option<crate::tools::LocalAgentToolInvoker>,
     ) {
         self.local_agent_tool_invoker = invoker;
+    }
+
+    pub fn set_source_analysis_tool_invoker(
+        &mut self,
+        invoker: Option<crate::tools::SourceAnalysisToolInvoker>,
+    ) {
+        self.source_analysis_tool_invoker = invoker;
     }
 
     pub fn set_api_log_enabled(&mut self, enabled: bool) {
@@ -2079,6 +2089,7 @@ impl Agent {
                     #[cfg(feature = "stylos")]
                     stylos_enabled: self.stylos_tool_invoker.is_some(),
                     local_agent_tool_invoker: self.local_agent_tool_invoker.clone(),
+                    source_analysis_tool_invoker: self.source_analysis_tool_invoker.clone(),
                     system_inspection: self.system_inspection.clone(),
                 };
                 let result =
