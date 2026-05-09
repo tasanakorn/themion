@@ -818,7 +818,7 @@ pub fn tool_definitions() -> Value {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "Source file path to analyze" },
-                        "detail": { "type": "string", "enum": ["normal", "full"], "description": "Output detail. Default: full for compatibility. Use normal for compact navigation." }
+                        "detail": { "type": "string", "enum": ["normal", "full"], "description": "Output detail. Default: normal for compact navigation. Use full for graph-ready IDs and edges." }
                     },
                     "required": ["path"]
                 }

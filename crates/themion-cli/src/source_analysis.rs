@@ -57,7 +57,7 @@ enum SourceOutlineDetail {
 
 fn parse_source_outline_detail(value: Option<&Value>) -> Result<SourceOutlineDetail> {
     let Some(value) = value else {
-        return Ok(SourceOutlineDetail::Full);
+        return Ok(SourceOutlineDetail::Normal);
     };
     let detail = value
         .as_str()
@@ -432,7 +432,7 @@ fn top() {}
     }
 
     #[test]
-    fn source_outline_detail_defaults_to_full_shape() {
+    fn source_outline_defaults_to_normal_shape() {
         let (dir_guard, relative) = write_temp_source("fn top() {}\n");
         let args = serde_json::json!({ "path": relative.to_str().unwrap() });
         let text = handle_source_analysis_request(dir_guard.path(), "source_outline", args)
@@ -440,9 +440,9 @@ fn top() {}
         let value: serde_json::Value = serde_json::from_str(&text).expect("json outline");
 
         assert_eq!(value["language"], "rust");
-        assert!(value.get("file").is_some());
-        assert!(value.get("edges").is_some());
-        assert!(value.get("detail").is_none());
+        assert_eq!(value["detail"], "normal");
+        assert!(value.get("file").is_none());
+        assert!(value.get("edges").is_none());
     }
 
     #[test]

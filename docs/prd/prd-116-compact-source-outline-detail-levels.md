@@ -1,6 +1,6 @@
 # PRD-116: Compact Detail Levels for Source Outline
 
-- **Status:** Implemented
+- **Status:** Implemented (amended default behavior)
 - **Version:** v0.72.0
 - **Scope:** `themion-core`, `themion-cli`, docs
 - **Author:** Tasanakorn (design intent) + Themion (PRD authoring)
@@ -10,7 +10,7 @@
 
 - `source_outline` is useful, but its current full JSON shape can be large for big files.
 - Add compact detail levels so agents can request a smaller outline for normal navigation.
-- Keep the current full object shape available for compatibility and debugging.
+- Keep the current full object shape available through `detail: "full"` for compatibility and debugging.
 - Make the compact shape preserve the facts agents need most: language, path, symbols, spans, parent names, imports, warnings, and parse status.
 - Do not move source-analysis policy into TUI or Web UI code.
 
@@ -64,7 +64,7 @@ Recommended tool schema:
       "detail": {
         "type": "string",
         "enum": ["normal", "full"],
-        "description": "Output detail. Default: full for compatibility. Use normal for compact navigation."
+        "description": "Output detail. Default: normal for compact navigation. Use full for graph-ready IDs and edges."
       }
     },
     "required": ["path"]
@@ -137,18 +137,18 @@ Required behavior:
 
 ### 4. Default behavior and compatibility
 
-This PRD should ship without changing the behavior of existing `source_outline(path)` calls. Omitted `detail` must mean `full` in this implementation slice.
+This amended PRD now sets compact output as the default behavior. Omitted `detail` must mean `normal`, while `detail: "full"` preserves the graph-ready shape.
 
 Required behavior:
 
-- omitted `detail` returns the current full PRD-113 object shape
-- `detail: "full"` returns the same full shape explicitly
+- omitted `detail` returns the compact model-facing shape
+- `detail: "full"` returns the full PRD-113-compatible shape explicitly
 - `detail: "normal"` returns the compact model-facing shape
-- tool guidance should tell agents to pass `detail: "normal"` for ordinary navigation
-- tests must prove omitted `detail` and explicit `full` remain compatible with the current full output
+- tool guidance should describe `normal` as the default for ordinary navigation
+- tests must prove omitted `detail` returns compact output and explicit `full` still returns the current full output
 - if a later release wants compact output as the default, that default flip needs a separate compatibility decision or PRD update
 
-This keeps PRD-116 implementation-ready now. It delivers compact output for callers that ask for it and avoids a silent schema change for existing callers.
+This amended behavior makes compact output the default for ordinary calls while preserving an explicit escape hatch for graph-oriented callers.
 
 ### 5. Keep extraction shared and projection-only
 
@@ -186,7 +186,7 @@ Required behavior:
 
 ## Edge Cases
 
-- caller omits `detail` → verify: output remains the current full PRD-113 shape.
+- caller omits `detail` → verify: output returns the compact `normal` shape.
 - caller passes an unknown detail value → verify: the tool returns a clear invalid-detail error.
 - source file has no symbols or imports → verify: `normal` returns empty arrays without failing.
 - symbol has no parent → verify: parent slot is `null`, not an invented empty parent.
@@ -197,9 +197,9 @@ Required behavior:
 
 ## Migration
 
-This is an additive tool-contract change. Omitted `detail` remains compatible with the PRD-113 full shape. Existing callers do not need to change.
+This is a tool-contract default change. Omitted `detail` now returns compact output. Callers that need the old graph-ready shape must pass `detail: "full"`.
 
-New model calls should pass `detail: "normal"` for ordinary navigation once implemented. Callers that need graph-ready IDs and edges should pass `detail: "full"` or omit `detail`.
+New model calls may omit `detail` for ordinary navigation. Callers that need graph-ready IDs and edges should pass `detail: "full"`.
 
 No database migration is required.
 
@@ -208,7 +208,7 @@ No database migration is required.
 - inspect tool schemas → verify: `source_outline` exposes one optional `detail` parameter with `normal` and `full` values.
 - call `source_outline` with `detail: "normal"` on a Rust file → verify: output uses compact symbol and import arrays with language, path, and detail.
 - call `source_outline` with `detail: "full"` on the same file → verify: output keeps file, IDs, parent IDs, imports, and edges from the current full shape.
-- call `source_outline` without `detail` → verify: output matches the current full PRD-113 shape.
+- call `source_outline` without `detail` → verify: output matches the compact `normal` shape.
 - call `source_outline` with an invalid detail value → verify: the tool fails with a clear error.
 - parse a file with nested symbols → verify: compact rows preserve parent names.
 - parse a file with imports → verify: compact import rows preserve useful import text and start line.
@@ -227,13 +227,13 @@ No database migration is required.
 - [x] parse and validate `detail` in the source-analysis request handler
 - [x] keep full extraction shared and add projection from full outline to normal rows
 - [x] preserve full output compatibility through `detail: "full"`
-- [x] keep omitted `detail` compatible with the current full PRD-113 shape
+- [x] make omitted `detail` default to the compact `normal` shape
 - [x] add focused tests for normal, full, default, invalid detail, nested parent names, imports, warnings, and size reduction
 - [x] update PRD-113 implementation notes and docs index after implementation lands
 
 ## Implementation Notes
 
-Implemented in v0.72.0. `source_outline` now accepts optional `detail` with `normal` and `full` values. Omitted `detail` and explicit `detail: "full"` keep the PRD-113 full shape for compatibility. `detail: "normal"` returns compact array rows for symbols and imports, includes `detail: "normal"`, preserves parse errors and warnings, and omits file nodes, IDs, parent IDs, edges, and import resolution fields.
+Implemented in v0.72.0 and amended so omitted `detail` now defaults to `normal`. `source_outline` accepts optional `detail` with `normal` and `full` values. Omitted `detail` returns compact array rows for symbols and imports, includes `detail: "normal"`, preserves parse errors and warnings, and omits file nodes, IDs, parent IDs, edges, and import resolution fields. Explicit `detail: "full"` preserves the PRD-113-compatible graph-ready shape.
 
 Validation run for this slice:
 
