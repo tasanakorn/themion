@@ -259,6 +259,8 @@ When implementing an existing PRD, do not consider the task complete until you h
 - Stylos logic is runtime/orchestrator work, not TUI work; when local agent creation, status publication, discovery, or board routing misbehaves, inspect runtime ownership first and only change TUI code for narrow presentation/input plumbing.
 - For cross-layer runtime state, prefer hub/app-state ownership with `watch`-observable snapshots so TUI, headless, and Stylos consume the same source of truth instead of rebuilding state separately.
 - When delegating work to another agent via a board note, state explicitly in the note body how the result must be returned. If you need a durable response, say clearly that the agent should place a done note back or update the delegated note result through the board workflow rather than replying only in chat.
+- When one web UI view updates correctly but another similar view stays stale, compare their data sources first before changing rendering details; mismatched runtime payload sources can look like a reactive rendering bug.
+- After rebuilding `themion-cli --web` assets, remember that the browser or the running CLI web server may still serve older JS/WASM; hard refresh and restart the web process before concluding the code fix failed.
 
 ## When updating docs
 

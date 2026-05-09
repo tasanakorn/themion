@@ -342,39 +342,84 @@ fn App() -> impl IntoView {
                 </header>
 
                 <section class=move || if active_tab.get() == ViewTab::Terminal { "agent-tab-strip hidden" } else { "agent-tab-strip" } aria-label="agent tabs">
-                    <For
-                        each=move || status.get().map(|s| s.local_agents).unwrap_or_default().into_iter()
-                        key=|agent| agent.agent_id.clone()
-                        children=move |agent| {
-                            let agent_id = agent.agent_id.clone();
-                            let subscribe_agent_id = agent.agent_id.clone();
-                            let role_chips = if agent.roles.is_empty() {
-                                vec!["-".to_string()]
-                            } else {
-                                agent.roles.clone()
-                            };
-                            view! {
-                                <button
-                                    type="button"
-                                    class=move || if active_agent.get() == agent_id { "agent-tab active" } else { "agent-tab" }
-                                    on:click=move |_| active_agent.set(subscribe_agent_id.clone())
-                                >
-                                    <span class="agent-tab-label">{agent.label}</span>
-                                    <code>{agent.agent_id}</code>
-                                    <small>{if agent.busy { "busy" } else { "idle" }}</small>
-                                    <div class="agent-tab-roles">
-                                        <For
-                                            each=move || role_chips.clone().into_iter()
-                                            key=|role| role.clone()
-                                            children=move |role| view! {
-                                                <small class="agent-tab-role">{role}</small>
-                                            }
-                                        />
-                                    </div>
-                                </button>
-                            }
-                        }
-                    />
+                    {move || match agents.get() {
+                        Some(payload) => view! {
+                            <For
+                                each=move || payload.local_agents.clone().into_iter()
+                                key=|agent| agent.agent_id.clone()
+                                children=move |agent| {
+                                    let agent_id = agent.agent_id.clone();
+                                    let subscribe_agent_id = agent.agent_id.clone();
+                                    let role_chips = if agent.roles.is_empty() {
+                                        vec!["-".to_string()]
+                                    } else {
+                                        agent.roles.clone()
+                                    };
+                                    let label = agent.label.clone();
+                                    let code = agent.agent_id.clone();
+                                    let busy_label = if agent.busy { "busy" } else { "idle" };
+                                    view! {
+                                        <button
+                                            type="button"
+                                            class=move || if active_agent.get() == agent_id { "agent-tab active" } else { "agent-tab" }
+                                            on:click=move |_| active_agent.set(subscribe_agent_id.clone())
+                                        >
+                                            <span class="agent-tab-label">{label}</span>
+                                            <code>{code}</code>
+                                            <small>{busy_label}</small>
+                                            <div class="agent-tab-roles">
+                                                <For
+                                                    each=move || role_chips.clone().into_iter()
+                                                    key=|role| role.clone()
+                                                    children=move |role| view! {
+                                                        <small class="agent-tab-role">{role}</small>
+                                                    }
+                                                />
+                                            </div>
+                                        </button>
+                                    }
+                                }
+                            />
+                        }.into_any(),
+                        None => view! {
+                            <For
+                                each=move || status.get().map(|s| s.local_agents).unwrap_or_default().into_iter()
+                                key=|agent| agent.agent_id.clone()
+                                children=move |agent| {
+                                    let agent_id = agent.agent_id.clone();
+                                    let subscribe_agent_id = agent.agent_id.clone();
+                                    let role_chips = if agent.roles.is_empty() {
+                                        vec!["-".to_string()]
+                                    } else {
+                                        agent.roles.clone()
+                                    };
+                                    let label = agent.label.clone();
+                                    let code = agent.agent_id.clone();
+                                    let busy_label = if agent.busy { "busy" } else { "idle" };
+                                    view! {
+                                        <button
+                                            type="button"
+                                            class=move || if active_agent.get() == agent_id { "agent-tab active" } else { "agent-tab" }
+                                            on:click=move |_| active_agent.set(subscribe_agent_id.clone())
+                                        >
+                                            <span class="agent-tab-label">{label}</span>
+                                            <code>{code}</code>
+                                            <small>{busy_label}</small>
+                                            <div class="agent-tab-roles">
+                                                <For
+                                                    each=move || role_chips.clone().into_iter()
+                                                    key=|role| role.clone()
+                                                    children=move |role| view! {
+                                                        <small class="agent-tab-role">{role}</small>
+                                                    }
+                                                />
+                                            </div>
+                                        </button>
+                                    }
+                                }
+                            />
+                        }.into_any(),
+                    }}
                 </section>
 
                 <section class=move || if active_tab.get() == ViewTab::Terminal { "tab-strip hidden" } else { "tab-strip" } aria-label="workspace tabs">
