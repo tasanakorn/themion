@@ -1674,6 +1674,7 @@ pub(crate) fn submit_text_to_agent(app: &mut App, agent_index: usize, text: Stri
 
     let runtime_launch =
         crate::app_runtime::prepare_agent_turn_runtime_launch(&mut app.runtime.agents, agent_index);
+    publish_runtime_snapshot(app);
 
     crate::app_runtime::launch_agent_turn_runtime(
         &app.runtime.background_domain(),
