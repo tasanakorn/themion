@@ -20,8 +20,14 @@ pub struct WebSocketServices {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "domain", rename_all = "snake_case")]
 enum ClientSocketEnvelope {
-    Terminal { #[serde(flatten)] message: TerminalClientMessage },
-    Agent { #[serde(flatten)] message: AgentClientMessage },
+    Terminal {
+        #[serde(flatten)]
+        message: TerminalClientMessage,
+    },
+    Agent {
+        #[serde(flatten)]
+        message: AgentClientMessage,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -29,49 +35,95 @@ enum ClientSocketEnvelope {
 enum TerminalClientMessage {
     CreateTerminal,
     ListTerminals,
-    AttachTerminal { terminal_id: u64 },
-    Input { terminal_id: u64, data: String },
-    Resize { terminal_id: u64, cols: u16, rows: u16 },
-    CloseTerminal { terminal_id: u64 },
+    AttachTerminal {
+        terminal_id: u64,
+    },
+    Input {
+        terminal_id: u64,
+        data: String,
+    },
+    Resize {
+        terminal_id: u64,
+        cols: u16,
+        rows: u16,
+    },
+    CloseTerminal {
+        terminal_id: u64,
+    },
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AgentClientMessage {
     Snapshot,
-    Attach { agent_id: String },
-    PromptSubmit { agent_id: String, prompt: String },
-    Create { label: Option<String>, roles: Vec<String> },
-    Delete { agent_id: String },
+    Attach {
+        agent_id: String,
+    },
+    PromptSubmit {
+        agent_id: String,
+        prompt: String,
+    },
+    Create {
+        label: Option<String>,
+        roles: Vec<String>,
+    },
+    Delete {
+        agent_id: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "domain", rename_all = "snake_case")]
 enum ServerSocketEnvelope {
-    Terminal { #[serde(flatten)] message: TerminalServerMessage },
-    Agent { #[serde(flatten)] message: AgentServerMessage },
+    Terminal {
+        #[serde(flatten)]
+        message: TerminalServerMessage,
+    },
+    Agent {
+        #[serde(flatten)]
+        message: AgentServerMessage,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum TerminalServerMessage {
-    TerminalList { terminals: Vec<TerminalDescriptor> },
-    TerminalCreated { terminal: TerminalDescriptor },
+    TerminalList {
+        terminals: Vec<TerminalDescriptor>,
+    },
+    TerminalCreated {
+        terminal: TerminalDescriptor,
+    },
     TerminalAttached {
         terminal: TerminalDescriptor,
         scrollback: String,
     },
-    TerminalOutput { terminal_id: u64, data: String },
-    TerminalClosed { terminal_id: u64 },
-    Error { message: String },
+    TerminalOutput {
+        terminal_id: u64,
+        data: String,
+    },
+    TerminalClosed {
+        terminal_id: u64,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AgentServerMessage {
-    RosterSnapshot { agents: Vec<AgentSummaryWire> },
-    AgentCreated { agent_id: String, label: String, roles: Vec<String> },
-    AgentDeleted { agent_id: String },
+    RosterSnapshot {
+        agents: Vec<AgentSummaryWire>,
+    },
+    AgentCreated {
+        agent_id: String,
+        label: String,
+        roles: Vec<String>,
+    },
+    AgentDeleted {
+        agent_id: String,
+    },
     AgentSnapshot {
         agent_id: String,
         label: String,
@@ -83,15 +135,23 @@ enum AgentServerMessage {
         status: String,
         warning: Option<String>,
     },
-    BusyState { agent_id: String, busy: bool },
+    BusyState {
+        agent_id: String,
+        busy: bool,
+    },
     TranscriptDelta {
         agent_id: String,
         kind: String,
         text: String,
         replace_last: bool,
     },
-    Completed { agent_id: String },
-    Failed { agent_id: String, message: String },
+    Completed {
+        agent_id: String,
+    },
+    Failed {
+        agent_id: String,
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -376,7 +436,7 @@ fn map_roster_snapshot(snapshot: AgentRosterSnapshot) -> Vec<AgentSummaryWire> {
             provider: agent.provider,
             model: agent.model,
             status: agent.status,
-        warning: agent.warning,
+            warning: agent.warning,
         })
         .collect()
 }
@@ -387,10 +447,9 @@ fn map_agent_runtime_event(event: AgentRuntimeEvent) -> AgentServerMessage {
         AgentRuntimeEvent::RosterUpdated(snapshot) => AgentServerMessage::RosterSnapshot {
             agents: map_roster_snapshot(snapshot),
         },
-        AgentRuntimeEvent::Busy { agent_id, busy } => AgentServerMessage::BusyState {
-            agent_id,
-            busy,
-        },
+        AgentRuntimeEvent::Busy { agent_id, busy } => {
+            AgentServerMessage::BusyState { agent_id, busy }
+        }
         AgentRuntimeEvent::TranscriptDelta(delta) => AgentServerMessage::TranscriptDelta {
             agent_id: delta.agent_id,
             kind: delta.kind,

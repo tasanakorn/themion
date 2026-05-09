@@ -1681,7 +1681,7 @@ impl InboxMessage {
             prompt,
             source: IncomingPromptSource::RemoteStylos,
             agent_id: Some(self.to_agent_id.clone()),
-                request_id: self.request_id.clone(),
+            request_id: self.request_id.clone(),
             from: Some(self.from_instance),
             from_agent_id: self.from_agent_id,
             to: Some(self.to_instance),

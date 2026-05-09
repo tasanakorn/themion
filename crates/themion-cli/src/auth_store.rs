@@ -70,7 +70,8 @@ pub fn load_for_profile(profile: &str) -> Result<Option<CodexAuth>> {
 }
 
 pub fn save_for_profile(profile: &str, auth: &CodexAuth) -> Result<()> {
-    let path = profile_auth_path(profile).ok_or_else(|| anyhow::anyhow!("cannot determine config dir"))?;
+    let path =
+        profile_auth_path(profile).ok_or_else(|| anyhow::anyhow!("cannot determine config dir"))?;
     save_auth_file(&path, auth)
 }
 

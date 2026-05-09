@@ -294,7 +294,6 @@ pub struct MemorySearchResponse {
     pub nodes: Vec<MemoryNode>,
 }
 
-
 #[derive(Debug, Clone, Serialize)]
 pub struct UnifiedSearchSnippet {
     pub text: String,
@@ -326,7 +325,6 @@ pub struct UnifiedSearchResponse {
     pub unavailable_source_kinds: Vec<String>,
     pub results: Vec<UnifiedSearchResult>,
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnifiedSearchSourceKind {
@@ -387,7 +385,10 @@ pub struct NormalizedUnifiedSearchQuery {
 }
 
 impl UnifiedSearchQuery {
-    pub fn normalize(self, default_project_dir: Option<&str>) -> Result<NormalizedUnifiedSearchQuery> {
+    pub fn normalize(
+        self,
+        default_project_dir: Option<&str>,
+    ) -> Result<NormalizedUnifiedSearchQuery> {
         let project_dir = self
             .project_dir
             .as_deref()
@@ -414,9 +415,15 @@ impl UnifiedSearchQuery {
             limit,
             hashtags: self.hashtags,
             hashtag_match: self.hashtag_match.unwrap_or(HashtagMatch::Any),
-            node_type: self.node_type.and_then(|value| normalize_optional_string(Some(value))),
-            relation_type: self.relation_type.and_then(|value| normalize_optional_string(Some(value))),
-            linked_node_id: self.linked_node_id.and_then(|value| normalize_optional_string(Some(value))),
+            node_type: self
+                .node_type
+                .and_then(|value| normalize_optional_string(Some(value))),
+            relation_type: self
+                .relation_type
+                .and_then(|value| normalize_optional_string(Some(value))),
+            linked_node_id: self
+                .linked_node_id
+                .and_then(|value| normalize_optional_string(Some(value))),
         })
     }
 }
@@ -618,7 +625,11 @@ pub fn append_unified_search_rows(
             source_id: row.source_id,
             project_dir: row.project_dir,
             score: if score < 0.05 { 0.05 } else { score },
-            score_kind: if matches!(mode, UnifiedSearchMode::Hybrid) { UnifiedSearchMode::Fts } else { mode },
+            score_kind: if matches!(mode, UnifiedSearchMode::Hybrid) {
+                UnifiedSearchMode::Fts
+            } else {
+                mode
+            },
             snippet: row.snippet.clone(),
             primary_snippet: row.snippet.clone(),
             supporting_snippets: Vec::new(),
@@ -671,7 +682,14 @@ impl<'a> MemoryStore<'a> {
         )?;
         replace_hashtags(&conn, &node_id, &hashtags)?;
         #[cfg(feature = "semantic-memory")]
-        register_memory_node_for_unified_search(&conn, &node_id, &project_dir, &title, args.content.as_deref(), now_ms)?;
+        register_memory_node_for_unified_search(
+            &conn,
+            &node_id,
+            &project_dir,
+            &title,
+            args.content.as_deref(),
+            now_ms,
+        )?;
         drop(conn);
         self.get_node(&node_id)?
             .ok_or_else(|| anyhow::anyhow!("memory node insert failed"))
@@ -711,7 +729,14 @@ impl<'a> MemoryStore<'a> {
             replace_hashtags(&conn, node_id, &hashtags)?;
         }
         #[cfg(feature = "semantic-memory")]
-        register_memory_node_for_unified_search(&conn, node_id, &project_dir, &title, content.as_deref(), now_ms)?;
+        register_memory_node_for_unified_search(
+            &conn,
+            node_id,
+            &project_dir,
+            &title,
+            content.as_deref(),
+            now_ms,
+        )?;
         drop(conn);
         self.get_node(node_id)
     }
@@ -983,7 +1008,8 @@ impl<'a> MemoryStore<'a> {
         {
             let project_dir = normalize_project_dir(project_dir)?;
             let conn = self.conn.lock().unwrap();
-            let pending = list_pending_unified_search_documents(&conn, &project_dir, "chat_message", limit)?;
+            let pending =
+                list_pending_unified_search_documents(&conn, &project_dir, "chat_message", limit)?;
             let queued_before = pending.len() as u32;
             let mut indexed_documents = 0u32;
             let mut failed_documents = 0u32;
@@ -1044,9 +1070,17 @@ impl<'a> MemoryStore<'a> {
             };
             let requested_source_kind = source_kind.map(|value| value.trim().to_string());
             if full {
-                clear_unified_search_scope(&conn, requested_project_dir.as_deref(), requested_source_kind.as_deref())?;
+                clear_unified_search_scope(
+                    &conn,
+                    requested_project_dir.as_deref(),
+                    requested_source_kind.as_deref(),
+                )?;
             }
-            let docs = collect_unified_search_inputs(&conn, requested_project_dir.as_deref(), requested_source_kind.as_deref())?;
+            let docs = collect_unified_search_inputs(
+                &conn,
+                requested_project_dir.as_deref(),
+                requested_source_kind.as_deref(),
+            )?;
             let queued_before = docs.len() as u32;
             let mut indexed_documents = 0u32;
             for doc in docs.iter() {
@@ -1068,7 +1102,6 @@ impl<'a> MemoryStore<'a> {
         }
     }
 
-
     #[cfg(feature = "semantic-memory")]
     pub fn unified_search_semantic(
         &self,
@@ -1080,10 +1113,9 @@ impl<'a> MemoryStore<'a> {
         let project_dir = normalize_project_dir(project_dir)?;
         let conn = self.conn.lock().unwrap();
         let query_embedding = build_text_embeddings(&[query.to_string()])?;
-        let query_vector = query_embedding
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("semantic query embedding generation returned no vector"))?;
+        let query_vector = query_embedding.into_iter().next().ok_or_else(|| {
+            anyhow::anyhow!("semantic query embedding generation returned no vector")
+        })?;
         let mut sql = String::from(
             "SELECT d.document_id, d.source_kind, d.source_id, d.project_dir, d.title, c.chunk_index, c.char_start, c.char_len, c.chunk_text, c.embedding_blob
              FROM unified_search_documents d
@@ -1094,13 +1126,18 @@ impl<'a> MemoryStore<'a> {
         if !requested_source_kinds.is_empty() {
             sql.push_str(" AND d.source_kind IN (");
             for idx in 0..requested_source_kinds.len() {
-                if idx > 0 { sql.push_str(", "); }
+                if idx > 0 {
+                    sql.push_str(", ");
+                }
                 sql.push('?');
                 params_vec.push(Box::new(requested_source_kinds[idx].clone()));
             }
             sql.push(')');
         }
-        let params_ref: Vec<&dyn ToSql> = params_vec.iter().map(|v| v.as_ref() as &dyn ToSql).collect();
+        let params_ref: Vec<&dyn ToSql> = params_vec
+            .iter()
+            .map(|v| v.as_ref() as &dyn ToSql)
+            .collect();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_ref.as_slice(), |row| {
             Ok((
@@ -1116,19 +1153,42 @@ impl<'a> MemoryStore<'a> {
                 row.get::<_, Vec<u8>>(9)?,
             ))
         })?;
-        let mut grouped: BTreeMap<(String, String, String), Vec<(f64, UnifiedSearchSnippet, String)>> = BTreeMap::new();
+        let mut grouped: BTreeMap<
+            (String, String, String),
+            Vec<(f64, UnifiedSearchSnippet, String)>,
+        > = BTreeMap::new();
         for row in rows {
-            let (_document_id, source_kind, source_id, project_dir, title, chunk_index, char_start, char_len, chunk_text, blob) = row?;
+            let (
+                _document_id,
+                source_kind,
+                source_id,
+                project_dir,
+                title,
+                chunk_index,
+                char_start,
+                char_len,
+                chunk_text,
+                blob,
+            ) = row?;
             if let Some(embedding) = decode_embedding_blob(&blob)? {
                 let score = cosine_similarity(&query_vector, &embedding) as f64;
-                grouped.entry((source_kind, source_id, project_dir))
+                grouped
+                    .entry((source_kind, source_id, project_dir))
                     .or_default()
-                    .push((score, UnifiedSearchSnippet { text: chunk_text, char_start, char_len }, format!("{}:{}", title, chunk_index)));
+                    .push((
+                        score,
+                        UnifiedSearchSnippet {
+                            text: chunk_text,
+                            char_start,
+                            char_len,
+                        },
+                        format!("{}:{}", title, chunk_index),
+                    ));
             }
         }
         let mut results = Vec::new();
         for ((source_kind, source_id, project_dir), mut chunks) in grouped {
-            chunks.sort_by(|a,b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+            chunks.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
             let best = chunks.first().cloned();
             if let Some((best_score, best_snippet, title)) = best {
                 let mut score = best_score;
@@ -1138,7 +1198,10 @@ impl<'a> MemoryStore<'a> {
                 if let Some((third_score, _, _)) = chunks.get(2) {
                     score += (0.05 * best_score).min(*third_score);
                 }
-                let supporting_snippets = chunks.iter().skip(1).take(2)
+                let supporting_snippets = chunks
+                    .iter()
+                    .skip(1)
+                    .take(2)
                     .filter(|(candidate_score, _, _)| *candidate_score >= (0.50 * best_score))
                     .map(|(_, snippet, _)| snippet.clone())
                     .collect::<Vec<_>>();
@@ -1157,7 +1220,7 @@ impl<'a> MemoryStore<'a> {
                 });
             }
         }
-        results.sort_by(|a,b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
         results.truncate(limit.min(50) as usize);
         Ok(UnifiedSearchResponse {
             mode: UnifiedSearchMode::Semantic,
@@ -1621,7 +1684,9 @@ fn chunk_text_for_unified_search(source_text: &str) -> Vec<UnifiedSearchChunkDra
     }
     let mut chunks = Vec::new();
     let mut start = 0usize;
-    let step = UNIFIED_SEARCH_CHUNK_LEN.saturating_sub(UNIFIED_SEARCH_CHUNK_OVERLAP).max(1);
+    let step = UNIFIED_SEARCH_CHUNK_LEN
+        .saturating_sub(UNIFIED_SEARCH_CHUNK_OVERLAP)
+        .max(1);
     while start < chars.len() {
         let end = (start + UNIFIED_SEARCH_CHUNK_LEN).min(chars.len());
         let chunk_text: String = chars[start..end].iter().collect();
@@ -1664,7 +1729,10 @@ fn collect_unified_search_inputs(
         memory_sql.push_str(" AND project_dir = ?");
         memory_params.push(Box::new(project_dir.to_string()));
     }
-    let memory_params_ref: Vec<&dyn ToSql> = memory_params.iter().map(|v| v.as_ref() as &dyn ToSql).collect();
+    let memory_params_ref: Vec<&dyn ToSql> = memory_params
+        .iter()
+        .map(|v| v.as_ref() as &dyn ToSql)
+        .collect();
     if source_kind.is_none() || source_kind == Some("memory") {
         let mut stmt = conn.prepare(&memory_sql)?;
         let rows = stmt.query_map(memory_params_ref.as_slice(), |row| {
@@ -1679,9 +1747,12 @@ fn collect_unified_search_inputs(
                 tool_call_id: None,
                 title: title.clone(),
                 source_text: match content.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
-                    Some(content) => format!("{}
+                    Some(content) => format!(
+                        "{}
 
-{}", title, content),
+{}",
+                        title, content
+                    ),
                     None => title,
                 },
                 source_updated_at_ms: row.get(5)?,
@@ -1692,7 +1763,12 @@ fn collect_unified_search_inputs(
         }
     }
 
-    if source_kind.is_none() || matches!(source_kind, Some("chat_message") | Some("tool_call") | Some("tool_result")) {
+    if source_kind.is_none()
+        || matches!(
+            source_kind,
+            Some("chat_message") | Some("tool_call") | Some("tool_result")
+        )
+    {
         let mut sql = String::from(
             "SELECT m.message_id, m.session_id, t.turn_seq, m.role, m.content, m.tool_calls_json, m.tool_call_id, s.project_dir, t.created_at
              FROM agent_messages m
@@ -1705,7 +1781,10 @@ fn collect_unified_search_inputs(
             sql.push_str(" AND s.project_dir = ?");
             params_vec.push(Box::new(project_dir.to_string()));
         }
-        let params_ref: Vec<&dyn ToSql> = params_vec.iter().map(|v| v.as_ref() as &dyn ToSql).collect();
+        let params_ref: Vec<&dyn ToSql> = params_vec
+            .iter()
+            .map(|v| v.as_ref() as &dyn ToSql)
+            .collect();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_ref.as_slice(), |row| {
             Ok((
@@ -1721,7 +1800,17 @@ fn collect_unified_search_inputs(
             ))
         })?;
         for row in rows {
-            let (message_id, session_id, turn_seq, role, content, tool_calls_json, tool_call_id, project_dir, created_at) = row?;
+            let (
+                message_id,
+                session_id,
+                turn_seq,
+                role,
+                content,
+                tool_calls_json,
+                tool_call_id,
+                project_dir,
+                created_at,
+            ) = row?;
             if source_kind.is_none() || source_kind == Some("chat_message") {
                 if let Some(doc) = build_chat_message_document_input(
                     message_id,
@@ -1736,23 +1825,42 @@ fn collect_unified_search_inputs(
                     docs.push(doc);
                 }
             }
-            if (source_kind.is_none() || source_kind == Some("tool_call")) && tool_calls_json.as_deref().map(|v| !v.trim().is_empty()).unwrap_or(false) {
+            if (source_kind.is_none() || source_kind == Some("tool_call"))
+                && tool_calls_json
+                    .as_deref()
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false)
+            {
                 let tool_json = tool_calls_json.clone().unwrap_or_default();
                 if let Ok(Value::Array(calls)) = serde_json::from_str::<Value>(&tool_json) {
                     for call in calls {
-                        let tool_name = call.get("function").and_then(|f| f.get("name")).and_then(|v| v.as_str()).unwrap_or("tool_call");
-                        let tool_args = call.get("function").and_then(|f| f.get("arguments")).and_then(|v| v.as_str()).unwrap_or("");
+                        let tool_name = call
+                            .get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("tool_call");
+                        let tool_args = call
+                            .get("function")
+                            .and_then(|f| f.get("arguments"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
                         docs.push(UnifiedSearchDocumentInput {
                             source_kind: "tool_call".to_string(),
                             source_id: format!("{}:{}:{}", message_id, tool_name, docs.len()),
                             project_dir: project_dir.clone(),
                             session_id: Some(session_id.clone()),
                             turn_seq: Some(turn_seq),
-                            tool_call_id: call.get("id").and_then(|v| v.as_str()).map(str::to_string),
+                            tool_call_id: call
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string),
                             title: tool_name.to_string(),
-                            source_text: format!("{}
+                            source_text: format!(
+                                "{}
 
-{}", tool_name, tool_args),
+{}",
+                                tool_name, tool_args
+                            ),
                             source_updated_at_ms: created_at * 1000,
                         });
                     }
@@ -1761,7 +1869,8 @@ fn collect_unified_search_inputs(
             if (source_kind.is_none() || source_kind == Some("tool_result")) && role == "tool" {
                 let text = content.clone().unwrap_or_default();
                 if !text.trim().is_empty() {
-                    let title = tool_name_from_result_payload(&text).unwrap_or_else(|| "tool_result".to_string());
+                    let title = tool_name_from_result_payload(&text)
+                        .unwrap_or_else(|| "tool_result".to_string());
                     docs.push(UnifiedSearchDocumentInput {
                         source_kind: "tool_result".to_string(),
                         source_id: message_id.to_string(),
@@ -1846,7 +1955,10 @@ fn build_chat_message_document_input(
 }
 
 #[cfg(feature = "semantic-memory")]
-fn upsert_unified_search_document_pending(conn: &Connection, doc: &UnifiedSearchDocumentInput) -> Result<()> {
+fn upsert_unified_search_document_pending(
+    conn: &Connection,
+    doc: &UnifiedSearchDocumentInput,
+) -> Result<()> {
     let existing: Option<String> = conn
         .query_row(
             "SELECT document_id FROM unified_search_documents WHERE source_kind = ?1 AND source_id = ?2 AND project_dir = ?3",
@@ -1936,7 +2048,8 @@ fn list_pending_unified_search_documents(
             source_updated_at_ms: row.get(9)?,
         })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 #[cfg(feature = "semantic-memory")]
@@ -1958,7 +2071,10 @@ fn mark_unified_search_document_failed(
 }
 
 #[cfg(feature = "semantic-memory")]
-fn index_pending_unified_search_document(conn: &Connection, pending: &PendingUnifiedSearchDocument) -> Result<()> {
+fn index_pending_unified_search_document(
+    conn: &Connection,
+    pending: &PendingUnifiedSearchDocument,
+) -> Result<()> {
     let doc = pending_document_to_input(pending);
     match index_unified_search_document(conn, &doc) {
         Ok(()) => Ok(()),
@@ -1977,7 +2093,10 @@ fn index_pending_unified_search_document(conn: &Connection, pending: &PendingUni
 }
 
 #[cfg(feature = "semantic-memory")]
-fn index_unified_search_document(conn: &Connection, doc: &UnifiedSearchDocumentInput) -> Result<()> {
+fn index_unified_search_document(
+    conn: &Connection,
+    doc: &UnifiedSearchDocumentInput,
+) -> Result<()> {
     let now_ms = now_unix_ms();
     let existing: Option<String> = conn
         .query_row(
@@ -1988,7 +2107,12 @@ fn index_unified_search_document(conn: &Connection, doc: &UnifiedSearchDocumentI
         .optional()?;
     let document_id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
     let chunks = chunk_text_for_unified_search(&doc.source_text);
-    let embeddings = build_text_embeddings(&chunks.iter().map(|chunk| chunk.chunk_text.clone()).collect::<Vec<_>>())?;
+    let embeddings = build_text_embeddings(
+        &chunks
+            .iter()
+            .map(|chunk| chunk.chunk_text.clone())
+            .collect::<Vec<_>>(),
+    )?;
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "DELETE FROM unified_search_chunks WHERE document_id = ?1",
@@ -2026,4 +2150,3 @@ fn index_unified_search_document(conn: &Connection, doc: &UnifiedSearchDocumentI
     tx.commit()?;
     Ok(())
 }
-

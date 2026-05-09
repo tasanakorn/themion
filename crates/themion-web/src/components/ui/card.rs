@@ -11,10 +11,7 @@ mod components {
 }
 
 #[component]
-pub fn Card(
-    #[prop(into, optional)] class: String,
-    children: Children,
-) -> impl IntoView {
+pub fn Card(#[prop(into, optional)] class: String, children: Children) -> impl IntoView {
     let merged = tw_merge::tw_merge!(
         "bg-card text-card-foreground flex flex-col rounded-xl border shadow-sm py-6 gap-4",
         class

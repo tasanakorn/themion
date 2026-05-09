@@ -11,7 +11,6 @@ use std::io;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
-
 type TerminalBackend = CrosstermBackend<std::io::Stdout>;
 type TuiTerminal = Terminal<TerminalBackend>;
 
@@ -116,14 +115,12 @@ fn install_panic_cleanup_hook() {
     }));
 }
 
-
 fn build_app(
     runtime: crate::app_state::AppRuntimeState,
     initial_snapshot: crate::app_state::AppSnapshot,
 ) -> App {
     App::new(runtime, initial_snapshot)
 }
-
 
 fn start_snapshot_watch_loop(
     runtime_domains: &Arc<RuntimeDomains>,
@@ -231,7 +228,6 @@ impl RunnerContext {
     }
 }
 
-
 async fn shutdown_app(_app: &mut App, ctx: RunnerContext) {
     ctx.shutdown();
     drop(ctx.app_tx);
@@ -252,8 +248,11 @@ pub async fn run(mut app_runtime: AppState) -> anyhow::Result<()> {
         &mut app_runtime,
         ctx.app_tx.clone(),
         ctx.runtime_tx.clone(),
-        runtime_domains.tui().expect("tui runtime available in TUI mode"),
-    ).await?;
+        runtime_domains
+            .tui()
+            .expect("tui runtime available in TUI mode"),
+    )
+    .await?;
 
     let mut app = build_app(app_runtime.runtime, initial_snapshot);
 

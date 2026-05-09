@@ -3,7 +3,8 @@ pub(crate) fn derive_local_instance_id() -> String {
     let base = {
         #[cfg(feature = "stylos")]
         {
-            if let Some(hostname) = std::env::var_os("HOSTNAME").and_then(|v| v.into_string().ok()) {
+            if let Some(hostname) = std::env::var_os("HOSTNAME").and_then(|v| v.into_string().ok())
+            {
                 let hostname = hostname.trim();
                 if !hostname.is_empty() {
                     hostname.to_string()

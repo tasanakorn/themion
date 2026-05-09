@@ -52,7 +52,8 @@ pub async fn run(mut app_runtime: AppState) -> anyhow::Result<()> {
         app_tx,
         runtime_tx,
         watchdog_domain,
-    ).await?;
+    )
+    .await?;
 
     let project_dir = app_runtime.runtime.project_dir.display().to_string();
     emit_event(
@@ -96,7 +97,8 @@ pub async fn run_non_interactive(mut app_runtime: AppState, _prompt: String) -> 
         app_tx,
         runtime_tx,
         watchdog_domain,
-    ).await?;
+    )
+    .await?;
 
     emit_event(
         "headless_result",
@@ -121,10 +123,15 @@ pub async fn run_unified_search_index(
     source_kind: Option<String>,
 ) -> anyhow::Result<()> {
     let db = app_runtime.runtime.db.clone();
-    let report =
-        tokio::task::spawn_blocking(move || db.memory_store().rebuild_unified_search_index(Some(&app_runtime.runtime.project_dir.display().to_string()), source_kind.as_deref(), force_full))
-            .await
-            .map_err(|err| anyhow::anyhow!("unified-search index task failed: {}", err))??;
+    let report = tokio::task::spawn_blocking(move || {
+        db.memory_store().rebuild_unified_search_index(
+            Some(&app_runtime.runtime.project_dir.display().to_string()),
+            source_kind.as_deref(),
+            force_full,
+        )
+    })
+    .await
+    .map_err(|err| anyhow::anyhow!("unified-search index task failed: {}", err))??;
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
 }

@@ -78,9 +78,7 @@ fn build_background_runtime() -> Result<Runtime> {
         .context("failed to build background service runtime")
 }
 
-async fn run_background_services(
-    ready_tx: oneshot::Sender<Result<TerminalService>>,
-) -> Result<()> {
+async fn run_background_services(ready_tx: oneshot::Sender<Result<TerminalService>>) -> Result<()> {
     let registry = Arc::new(TerminalRegistry::new()?);
     let (request_tx, request_rx) = mpsc::channel::<TerminalRequest>();
     let service = TerminalService { request_tx };
@@ -151,8 +149,14 @@ impl TerminalRegistry {
             .spawn_command(cmd)
             .with_context(|| format!("failed to spawn shell '{}'", self.shell))?;
 
-        let writer = pair.master.take_writer().context("failed to get pty writer")?;
-        let reader = pair.master.try_clone_reader().context("failed to clone pty reader")?;
+        let writer = pair
+            .master
+            .take_writer()
+            .context("failed to get pty writer")?;
+        let reader = pair
+            .master
+            .try_clone_reader()
+            .context("failed to clone pty reader")?;
         let resizer = pair.master;
 
         let (output_tx, output_rx) = tokio_mpsc::unbounded_channel::<String>();
@@ -311,5 +315,4 @@ impl TerminalService {
             .await
             .context("terminal service dropped attach response")?
     }
-
 }

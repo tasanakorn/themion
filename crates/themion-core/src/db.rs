@@ -1,10 +1,10 @@
+use crate::memory::AppendedChatMessageIndexArgs;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, Row};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
-use crate::memory::AppendedChatMessageIndexArgs;
 
 const BLOCKED_RETRY_COOLDOWN_MS: i64 = 5 * 60 * 1000;
 
@@ -766,8 +766,9 @@ impl DbHandle {
             |row| row.get(0),
         )?;
         drop(conn);
-        let _ = self.memory_store().register_appended_chat_message_for_unified_search(
-            AppendedChatMessageIndexArgs {
+        let _ = self
+            .memory_store()
+            .register_appended_chat_message_for_unified_search(AppendedChatMessageIndexArgs {
                 message_id,
                 session_id: session_id.to_string(),
                 turn_seq: seq,
@@ -776,8 +777,7 @@ impl DbHandle {
                 tool_calls_json,
                 project_dir,
                 created_at_s,
-            },
-        );
+            });
         Ok(message_id)
     }
 
@@ -1024,8 +1024,10 @@ impl DbHandle {
                AND (?2 IS NULL OR to_agent_id = ?2)",
         );
         if !columns.is_empty() {
-            sql.push_str("
-               AND column_name IN (");
+            sql.push_str(
+                "
+               AND column_name IN (",
+            );
             for i in 0..columns.len() {
                 if i > 0 {
                     sql.push_str(", ");
@@ -1035,8 +1037,10 @@ impl DbHandle {
             }
             sql.push(')');
         }
-        sql.push_str("
-             ORDER BY created_at_ms ASC");
+        sql.push_str(
+            "
+             ORDER BY created_at_ms ASC",
+        );
 
         let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(2 + columns.len());
         params.push(&to_instance);
@@ -1235,12 +1239,12 @@ impl DbHandle {
         default_project_dir: Option<&std::path::Path>,
     ) -> Result<crate::memory::UnifiedSearchResponse> {
         use crate::memory::{
-            append_unified_search_rows, memory_search_to_unified, SearchNodesArgs, UnifiedSearchMode,
-            UnifiedSearchResponse, UnifiedSearchSourceKind,
+            append_unified_search_rows, memory_search_to_unified, SearchNodesArgs,
+            UnifiedSearchMode, UnifiedSearchResponse, UnifiedSearchSourceKind,
         };
 
-        let default_project_dir = default_project_dir
-            .map(|path| path.to_string_lossy().to_string());
+        let default_project_dir =
+            default_project_dir.map(|path| path.to_string_lossy().to_string());
         let normalized = query.normalize(default_project_dir.as_deref())?;
         let wants_memory = normalized
             .source_kinds
@@ -1264,8 +1268,10 @@ impl DbHandle {
             results: Vec::new(),
         };
 
-        if matches!(normalized.mode, UnifiedSearchMode::Semantic | UnifiedSearchMode::Hybrid)
-            && !normalized.query.is_empty()
+        if matches!(
+            normalized.mode,
+            UnifiedSearchMode::Semantic | UnifiedSearchMode::Hybrid
+        ) && !normalized.query.is_empty()
         {
             #[cfg(feature = "semantic-memory")]
             {
@@ -1309,8 +1315,10 @@ impl DbHandle {
             response.mode = normalized.mode;
         }
 
-        if matches!(normalized.mode, UnifiedSearchMode::Fts | UnifiedSearchMode::Hybrid)
-            && wants_db_rows
+        if matches!(
+            normalized.mode,
+            UnifiedSearchMode::Fts | UnifiedSearchMode::Hybrid
+        ) && wants_db_rows
             && !normalized.query.is_empty()
         {
             let allowed_source_kinds = normalized
@@ -1328,11 +1336,13 @@ impl DbHandle {
             if matches!(normalized.mode, UnifiedSearchMode::Hybrid) {
                 let exact_ids = rows
                     .iter()
-                    .map(|row| (
-                        row.source_kind.clone(),
-                        row.source_id.clone(),
-                        row.project_dir.clone(),
-                    ))
+                    .map(|row| {
+                        (
+                            row.source_kind.clone(),
+                            row.source_id.clone(),
+                            row.project_dir.clone(),
+                        )
+                    })
                     .collect::<std::collections::BTreeSet<_>>();
                 for result in response.results.iter_mut() {
                     if exact_ids.contains(&(
@@ -1347,11 +1357,13 @@ impl DbHandle {
                 let already = response
                     .results
                     .iter()
-                    .map(|result| (
-                        result.source_kind.clone(),
-                        result.source_id.clone(),
-                        result.project_dir.clone(),
-                    ))
+                    .map(|result| {
+                        (
+                            result.source_kind.clone(),
+                            result.source_id.clone(),
+                            result.project_dir.clone(),
+                        )
+                    })
                     .collect::<std::collections::BTreeSet<_>>();
                 rows.retain(|row| {
                     !already.contains(&(
@@ -1407,16 +1419,41 @@ impl DbHandle {
                 let tool_name = content
                     .as_deref()
                     .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-                    .and_then(|value| value.get("tool_name").and_then(|v| v.as_str()).map(str::to_string))
+                    .and_then(|value| {
+                        value
+                            .get("tool_name")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    })
                     .unwrap_or_else(|| "tool_result".to_string());
-                ("tool_result".to_string(), format!("{}:{}", session_id, message_id), tool_name)
-            } else if tool_calls_json.as_deref().map(|v| !v.trim().is_empty()).unwrap_or(false) {
-                let tool_name = serde_json::from_str::<serde_json::Value>(tool_calls_json.as_deref().unwrap_or("[]"))
-                    .ok()
-                    .and_then(|value| value.as_array().and_then(|arr| arr.first().cloned()))
-                    .and_then(|value| value.get("function").and_then(|f| f.get("name")).and_then(|v| v.as_str()).map(str::to_string))
-                    .unwrap_or_else(|| "tool_call".to_string());
-                ("tool_call".to_string(), format!("{}:{}", session_id, message_id), tool_name)
+                (
+                    "tool_result".to_string(),
+                    format!("{}:{}", session_id, message_id),
+                    tool_name,
+                )
+            } else if tool_calls_json
+                .as_deref()
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false)
+            {
+                let tool_name = serde_json::from_str::<serde_json::Value>(
+                    tool_calls_json.as_deref().unwrap_or("[]"),
+                )
+                .ok()
+                .and_then(|value| value.as_array().and_then(|arr| arr.first().cloned()))
+                .and_then(|value| {
+                    value
+                        .get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "tool_call".to_string());
+                (
+                    "tool_call".to_string(),
+                    format!("{}:{}", session_id, message_id),
+                    tool_name,
+                )
             } else {
                 let source_kind = if role == "user" || role == "assistant" || role == "system" {
                     "chat_message"
@@ -1424,7 +1461,11 @@ impl DbHandle {
                     "chat_message"
                 };
                 let title = role.clone();
-                (source_kind.to_string(), format!("{}:{}", session_id, message_id), title)
+                (
+                    source_kind.to_string(),
+                    format!("{}:{}", session_id, message_id),
+                    title,
+                )
             };
             Ok(UnifiedSearchSourceRow {
                 source_kind,
@@ -1537,7 +1578,6 @@ pub struct UnifiedSearchSourceRow {
     pub title: String,
     pub snippet: String,
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoteColumn {

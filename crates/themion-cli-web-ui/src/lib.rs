@@ -195,12 +195,20 @@ fn App() -> impl IntoView {
         let status_payload = status.get();
         let current_agent = active_agent.get();
         if let Some(payload) = status_payload {
-            let available = payload.local_agents.iter().any(|agent| agent.agent_id == current_agent);
+            let available = payload
+                .local_agents
+                .iter()
+                .any(|agent| agent.agent_id == current_agent);
             if !available {
                 let next_agent = payload
                     .primary_agent_id
                     .clone()
-                    .or_else(|| payload.local_agents.first().map(|agent| agent.agent_id.clone()))
+                    .or_else(|| {
+                        payload
+                            .local_agents
+                            .first()
+                            .map(|agent| agent.agent_id.clone())
+                    })
                     .unwrap_or_else(|| "master".to_string());
                 active_agent.set(next_agent);
             }
@@ -803,7 +811,6 @@ mod tests {
         assert!(!keydown_should_submit("Enter", false, false, true, false));
         assert!(!keydown_should_submit("Enter", false, false, false, true));
     }
-
 
     #[test]
     fn user_chat_entry_label_shows_target_agent() {

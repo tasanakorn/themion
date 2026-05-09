@@ -1,5 +1,5 @@
-pub mod components;
 mod agent_runtime;
+pub mod components;
 mod terminal_runtime;
 mod web_socket;
 
@@ -180,7 +180,8 @@ fn main() -> Result<()> {
 
 fn start_terminal_runtime() -> Result<terminal_runtime::TerminalService> {
     let (background_ready_tx, background_ready_rx) = oneshot::channel();
-    let _background_thread = terminal_runtime::spawn_background_service_runtime(background_ready_tx)?;
+    let _background_thread =
+        terminal_runtime::spawn_background_service_runtime(background_ready_tx)?;
     background_ready_rx
         .blocking_recv()
         .context("background service runtime exited before startup completed")?
@@ -484,18 +485,19 @@ fn load_knowledge_summary(db_path: &Path) -> Result<KnowledgeSummary> {
     ensure_required_table(&conn, "memory_node_hashtags")?;
     ensure_required_table(&conn, "memory_edges")?;
 
-    let total_nodes: i64 = conn.query_row("SELECT COUNT(*) FROM memory_nodes", [], |row| row.get(0))?;
-    let total_edges: i64 = conn.query_row("SELECT COUNT(*) FROM memory_edges", [], |row| row.get(0))?;
+    let total_nodes: i64 =
+        conn.query_row("SELECT COUNT(*) FROM memory_nodes", [], |row| row.get(0))?;
+    let total_edges: i64 =
+        conn.query_row("SELECT COUNT(*) FROM memory_edges", [], |row| row.get(0))?;
     let distinct_hashtags: i64 = conn.query_row(
         "SELECT COUNT(DISTINCT hashtag) FROM memory_node_hashtags",
         [],
         |row| row.get(0),
     )?;
-    let latest_updated_at_ms: Option<i64> = conn.query_row(
-        "SELECT MAX(updated_at_ms) FROM memory_nodes",
-        [],
-        |row| row.get(0),
-    )?;
+    let latest_updated_at_ms: Option<i64> =
+        conn.query_row("SELECT MAX(updated_at_ms) FROM memory_nodes", [], |row| {
+            row.get(0)
+        })?;
 
     let node_types = query_count_rows(
         &conn,
@@ -662,7 +664,10 @@ fn ratio_label(numerator: i64, denominator: i64) -> String {
     if denominator <= 0 {
         return "0.00 edges per node".to_string();
     }
-    format!("{:.2} edges per node", numerator as f64 / denominator as f64)
+    format!(
+        "{:.2} edges per node",
+        numerator as f64 / denominator as f64
+    )
 }
 
 fn render_app_shell(knowledge_summary: &KnowledgeSummaryPageData, active_page: WebPage) -> String {
@@ -945,15 +950,24 @@ fn build_query_href(form: &KnowledgeQueryFormState) -> String {
     let mut params = vec![
         "page=knowledge".to_string(),
         "view=query".to_string(),
-        format!("source_scope={}", encode_query_value(form.source_scope.as_param_value())),
-        format!("mode={}", encode_query_value(&format!("{:?}", form.mode).to_lowercase())),
+        format!(
+            "source_scope={}",
+            encode_query_value(form.source_scope.as_param_value())
+        ),
+        format!(
+            "mode={}",
+            encode_query_value(&format!("{:?}", form.mode).to_lowercase())
+        ),
         format!("limit={}", form.limit),
     ];
     if !form.query.trim().is_empty() {
         params.push(format!("query={}", encode_query_value(form.query.trim())));
     }
     if !form.hashtags.is_empty() {
-        params.push(format!("hashtags={}", encode_query_value(&form.hashtags.join(", "))));
+        params.push(format!(
+            "hashtags={}",
+            encode_query_value(&form.hashtags.join(", "))
+        ));
     }
     if !matches!(form.hashtag_match, HashtagMatch::Any) {
         params.push(format!(
@@ -962,7 +976,10 @@ fn build_query_href(form: &KnowledgeQueryFormState) -> String {
         ));
     }
     if !form.node_type.trim().is_empty() {
-        params.push(format!("node_type={}", encode_query_value(form.node_type.trim())));
+        params.push(format!(
+            "node_type={}",
+            encode_query_value(form.node_type.trim())
+        ));
     }
     if !form.relation_type.trim().is_empty() {
         params.push(format!(
@@ -986,7 +1003,11 @@ enum QueryPivotKind {
     RelationType,
 }
 
-fn build_pivot_href(form: &KnowledgeQueryFormState, label: &str, pivot_kind: &QueryPivotKind) -> String {
+fn build_pivot_href(
+    form: &KnowledgeQueryFormState,
+    label: &str,
+    pivot_kind: &QueryPivotKind,
+) -> String {
     let mut pivot_form = form.clone();
     match pivot_kind {
         QueryPivotKind::QueryText => {

@@ -17,7 +17,8 @@ const LLAMACPP_DEFAULT_BASE_URL: &str = "http://localhost:8080/v1";
 const LLAMACPP_DEFAULT_MODEL: &str = "local";
 const CODEX_DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const CODEX_DEFAULT_MODEL: &str = "gpt-5.4";
-const DEFAULT_SYSTEM_PROMPT: &str = "You are an expert coding assistant operating inside Themion, a terminal-based coding agent.";
+const DEFAULT_SYSTEM_PROMPT: &str =
+    "You are an expert coding assistant operating inside Themion, a terminal-based coding agent.";
 
 #[derive(Clone)]
 pub struct AgentRuntimeService {
@@ -225,7 +226,9 @@ async fn handle_request(state: &Arc<Mutex<AgentRuntimeState>>, request: AgentRun
 }
 
 fn snapshot_state(state: &Arc<Mutex<AgentRuntimeState>>) -> Result<AgentRosterSnapshot> {
-    let state = state.lock().map_err(|_| anyhow!("agent runtime poisoned"))?;
+    let state = state
+        .lock()
+        .map_err(|_| anyhow!("agent runtime poisoned"))?;
     Ok(AgentRosterSnapshot {
         agents: collect_sorted_summaries(&state.agents),
     })
@@ -236,7 +239,9 @@ fn subscribe_agent(
     agent_id: &str,
 ) -> Result<mpsc::UnboundedReceiver<AgentRuntimeEvent>> {
     let (tx, rx) = mpsc::unbounded_channel();
-    let mut state = state.lock().map_err(|_| anyhow!("agent runtime poisoned"))?;
+    let mut state = state
+        .lock()
+        .map_err(|_| anyhow!("agent runtime poisoned"))?;
     let entry = state
         .agents
         .get_mut(agent_id)
@@ -252,9 +257,14 @@ fn create_agent(
     label: Option<String>,
     roles: Vec<String>,
 ) -> Result<CreatedAgent> {
-    let mut state = state.lock().map_err(|_| anyhow!("agent runtime poisoned"))?;
+    let mut state = state
+        .lock()
+        .map_err(|_| anyhow!("agent runtime poisoned"))?;
     let roles = normalize_created_agent_roles(roles);
-    if roles.iter().any(|role| normalize_primary_role(role) == "master") {
+    if roles
+        .iter()
+        .any(|role| normalize_primary_role(role) == "master")
+    {
         anyhow::bail!("cannot create another master agent");
     }
 
@@ -292,7 +302,9 @@ fn create_agent(
 }
 
 fn delete_agent(state: &Arc<Mutex<AgentRuntimeState>>, agent_id: &str) -> Result<DeletedAgent> {
-    let mut state = state.lock().map_err(|_| anyhow!("agent runtime poisoned"))?;
+    let mut state = state
+        .lock()
+        .map_err(|_| anyhow!("agent runtime poisoned"))?;
     if agent_id == "master" {
         anyhow::bail!("cannot delete the predefined leader agent");
     }
@@ -324,7 +336,9 @@ async fn begin_agent_turn(
 ) -> Result<()> {
     let agent_id_owned = agent_id.to_string();
     let (session_id, bootstrap, db, project_dir, roles, label, warning) = {
-        let mut runtime = state.lock().map_err(|_| anyhow!("agent runtime poisoned"))?;
+        let mut runtime = state
+            .lock()
+            .map_err(|_| anyhow!("agent runtime poisoned"))?;
         let bootstrap = runtime.bootstrap.clone();
         let db = Arc::clone(&runtime.db);
         let project_dir = runtime.project_dir.clone();
@@ -506,7 +520,9 @@ fn finalize_success(
     agent_id: &str,
     response: String,
 ) -> Result<()> {
-    let mut state = state.lock().map_err(|_| anyhow!("agent runtime poisoned"))?;
+    let mut state = state
+        .lock()
+        .map_err(|_| anyhow!("agent runtime poisoned"))?;
     let entry = state
         .agents
         .get_mut(agent_id)
@@ -558,7 +574,9 @@ fn finalize_failure(
     agent_id: &str,
     message: String,
 ) -> Result<()> {
-    let mut state = state.lock().map_err(|_| anyhow!("agent runtime poisoned"))?;
+    let mut state = state
+        .lock()
+        .map_err(|_| anyhow!("agent runtime poisoned"))?;
     let entry = state
         .agents
         .get_mut(agent_id)
@@ -591,7 +609,9 @@ fn apply_transcript_delta(
     agent_id: &str,
     delta: TranscriptDelta,
 ) -> Result<()> {
-    let mut state = state.lock().map_err(|_| anyhow!("agent runtime poisoned"))?;
+    let mut state = state
+        .lock()
+        .map_err(|_| anyhow!("agent runtime poisoned"))?;
     let entry = state
         .agents
         .get_mut(agent_id)
@@ -754,7 +774,9 @@ fn build_agent(
     );
     agent.set_build_identity(Some(BuildIdentity {
         app_version: env!("CARGO_PKG_VERSION").to_string(),
-        app_version_hash: option_env!("THEMION_BUILD_HASH").unwrap_or("dev").to_string(),
+        app_version_hash: option_env!("THEMION_BUILD_HASH")
+            .unwrap_or("dev")
+            .to_string(),
         app_version_dirty: option_env!("THEMION_BUILD_DIRTY")
             .map(|value| value == "true")
             .unwrap_or(true),
@@ -801,7 +823,9 @@ fn load_bootstrap() -> Result<WebAgentBootstrap> {
             let api_key = std::env::var("OPENROUTER_API_KEY")
                 .ok()
                 .filter(|value| !value.is_empty())
-                .ok_or_else(|| anyhow!("OPENROUTER_API_KEY is required for themion-web agent runtime"))?;
+                .ok_or_else(|| {
+                    anyhow!("OPENROUTER_API_KEY is required for themion-web agent runtime")
+                })?;
             (
                 std::env::var("OPENROUTER_BASE_URL")
                     .ok()

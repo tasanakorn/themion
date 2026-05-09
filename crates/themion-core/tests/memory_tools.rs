@@ -194,7 +194,10 @@ async fn memory_project_dir_defaults_and_global_selector_partition_results() {
     )
     .await;
     assert_eq!(default_results["results"].as_array().unwrap().len(), 1);
-    assert_eq!(default_results["results"][0]["source_id"], project_node["node_id"]);
+    assert_eq!(
+        default_results["results"][0]["source_id"],
+        project_node["node_id"]
+    );
 
     let global_results = call_json(
         &ctx,
@@ -203,7 +206,10 @@ async fn memory_project_dir_defaults_and_global_selector_partition_results() {
     )
     .await;
     assert_eq!(global_results["results"].as_array().unwrap().len(), 1);
-    assert_eq!(global_results["results"][0]["source_id"], global_node["node_id"]);
+    assert_eq!(
+        global_results["results"][0]["source_id"],
+        global_node["node_id"]
+    );
 }
 
 #[cfg(feature = "semantic-memory")]
@@ -294,7 +300,6 @@ async fn memory_update_node_succeeds_without_legacy_embedding_table() {
         .any(|row| row["source_id"] == created["node_id"]));
 }
 
-
 #[tokio::test]
 async fn project_dir_dot_matches_current_project_for_targeted_tools() {
     let db = DbHandle::open_in_memory().unwrap();
@@ -383,12 +388,7 @@ async fn project_dir_dot_matches_current_project_for_targeted_tools() {
         json!({"project_dir": current_project}),
     )
     .await;
-    let dot_tags = call_json(
-        &ctx,
-        "memory_list_hashtags",
-        json!({"project_dir": "."}),
-    )
-    .await;
+    let dot_tags = call_json(&ctx, "memory_list_hashtags", json!({"project_dir": "."})).await;
 
     assert_eq!(default_tags, explicit_tags);
     assert_eq!(default_tags, dot_tags);
@@ -429,12 +429,7 @@ async fn unified_search_rebuild_treats_project_dir_dot_as_current_project() {
         json!({"project_dir": current_project}),
     )
     .await;
-    let dot_rebuild = call_json(
-        &ctx,
-        "unified_search_rebuild",
-        json!({"project_dir": "."}),
-    )
-    .await;
+    let dot_rebuild = call_json(&ctx, "unified_search_rebuild", json!({"project_dir": "."})).await;
 
     assert_eq!(default_rebuild["project_dir"], current_project);
     assert_eq!(explicit_rebuild["project_dir"], current_project);
@@ -571,7 +566,8 @@ async fn unified_search_returns_chat_message_and_tool_result_rows() {
     let db = DbHandle::open_in_memory().unwrap();
     let session_id = Uuid::new_v4();
     let workflow = WorkflowState::default();
-    db.insert_session(session_id, PathBuf::from(".").as_path(), true).unwrap();
+    db.insert_session(session_id, PathBuf::from(".").as_path(), true)
+        .unwrap();
     let turn_id = db.begin_turn(session_id, 1, &workflow, None).unwrap();
 
     let user_msg = Message {
@@ -580,15 +576,19 @@ async fn unified_search_returns_chat_message_and_tool_result_rows() {
         tool_calls: None,
         tool_call_id: None,
     };
-    db.append_message(turn_id, session_id, 1, &user_msg, &workflow).unwrap();
+    db.append_message(turn_id, session_id, 1, &user_msg, &workflow)
+        .unwrap();
 
     let tool_msg = Message {
         role: "tool".to_string(),
-        content: Some(r#"{"tool_name":"fs_read_file","result":"searchable tool result"}"#.to_string()),
+        content: Some(
+            r#"{"tool_name":"fs_read_file","result":"searchable tool result"}"#.to_string(),
+        ),
         tool_calls: None,
         tool_call_id: Some("call-1".to_string()),
     };
-    db.append_message(turn_id, session_id, 2, &tool_msg, &workflow).unwrap();
+    db.append_message(turn_id, session_id, 2, &tool_msg, &workflow)
+        .unwrap();
 
     let ctx = test_ctx(db.clone());
     let chat_results = call_json(

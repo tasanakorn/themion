@@ -1,5 +1,8 @@
 use crate::app_state::{AppRuntimeState, AppSnapshot, AppState};
-use crate::surface_runner::{handle_surface_app_event, handle_surface_runtime_event, start_snapshot_watch_loop, SurfaceRunnerContext};
+use crate::surface_runner::{
+    handle_surface_app_event, handle_surface_runtime_event, start_snapshot_watch_loop,
+    SurfaceRunnerContext,
+};
 use anyhow::{anyhow, Context};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -10,8 +13,8 @@ use axum::Json;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -34,10 +37,7 @@ struct WebAppState {
 
 #[derive(Clone)]
 enum WebInputEvent {
-    SubmitPrompt {
-        agent_id: String,
-        prompt: String,
-    },
+    SubmitPrompt { agent_id: String, prompt: String },
 }
 
 #[derive(Clone, Debug)]
@@ -47,7 +47,6 @@ struct WebAgentEvent {
     text: String,
     at_ms: u64,
 }
-
 
 #[derive(Default)]
 struct WebSocketSubscriptions {
@@ -104,8 +103,7 @@ struct WebTranscriptResponse {
     chat_entries: Vec<WebChatEntry>,
 }
 
-#[derive(Serialize)]
-#[derive(Clone)]
+#[derive(Serialize, Clone)]
 struct WebChatEntry {
     kind: &'static str,
     agent_id: Option<String>,
@@ -229,7 +227,9 @@ pub fn run(mut app_state: AppState, bind_addr: SocketAddr) -> anyhow::Result<()>
     web_runtime.block_on(async move {
         let (agent_event_tx, _) = broadcast::channel::<WebAgentEvent>(256);
         let chat_entries = Arc::new(std::sync::Mutex::new(Vec::<WebChatEntry>::new()));
-        let web_input_tx = start_web_surface_loop(&mut app_state, agent_event_tx.clone(), chat_entries.clone()).await?;
+        let web_input_tx =
+            start_web_surface_loop(&mut app_state, agent_event_tx.clone(), chat_entries.clone())
+                .await?;
         let terminal_service = start_terminal_runtime().await?;
         #[cfg(feature = "stylos")]
         let stylos = app_state.runtime.stylos.take();
@@ -264,7 +264,10 @@ fn router(state: WebAppState) -> Router {
         .route("/assets/app.css", get(spa_css_asset))
         .route("/assets/themion_cli_web_ui.js", get(spa_js_asset))
         .route("/assets/themion_cli_web_ui_bg.wasm", get(spa_wasm_asset))
-        .route("/assets/fonts/JetBrainsMonoNerdFont-Regular.ttf", get(font_asset))
+        .route(
+            "/assets/fonts/JetBrainsMonoNerdFont-Regular.ttf",
+            get(font_asset),
+        )
         .route("/transcript", get(index))
         .route("/shell", get(index))
         .route("/api/ws", get(multiplex_ws))
@@ -281,11 +284,17 @@ async fn index(State(_state): State<WebAppState>) -> Response {
 }
 
 async fn spa_css_asset() -> Response {
-    asset_response(crate::web_assets::spa_css().as_bytes(), "text/css; charset=utf-8")
+    asset_response(
+        crate::web_assets::spa_css().as_bytes(),
+        "text/css; charset=utf-8",
+    )
 }
 
 async fn spa_js_asset() -> Response {
-    asset_response(crate::web_assets::spa_js().as_bytes(), "application/javascript; charset=utf-8")
+    asset_response(
+        crate::web_assets::spa_js().as_bytes(),
+        "application/javascript; charset=utf-8",
+    )
 }
 
 async fn font_asset() -> Response {
@@ -296,10 +305,7 @@ async fn spa_wasm_asset() -> Response {
     binary_asset_response(crate::web_assets::spa_wasm(), "application/wasm")
 }
 
-async fn multiplex_ws(
-    ws: WebSocketUpgrade,
-    State(state): State<WebAppState>,
-) -> impl IntoResponse {
+async fn multiplex_ws(ws: WebSocketUpgrade, State(state): State<WebAppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| async move {
         if let Err(error) = handle_multiplex_socket(socket, state).await {
             eprintln!("websocket ended with error: {error:#}");
@@ -332,7 +338,11 @@ async fn handle_multiplex_socket(socket: WebSocket, state: WebAppState) -> anyho
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
                 };
-                if !subscriptions.lock().await.is_agent_subscribed(&event.agent_id) {
+                if !subscriptions
+                    .lock()
+                    .await
+                    .is_agent_subscribed(&event.agent_id)
+                {
                     continue;
                 }
                 let payload = match serde_json::to_value(AgentStreamEventPayload {
@@ -344,14 +354,17 @@ async fn handle_multiplex_socket(socket: WebSocket, state: WebAppState) -> anyho
                     Ok(payload) => payload,
                     Err(_) => break,
                 };
-                if outbound_tx.send(WebSocketEnvelope {
-                    kind: "event".to_string(),
-                    domain: "agent".to_string(),
-                    target_id: event.agent_id,
-                    sequence_id: Some(state.websocket_sequence.fetch_add(1, Ordering::Relaxed)),
-                    request_id: None,
-                    payload,
-                }).is_err() {
+                if outbound_tx
+                    .send(WebSocketEnvelope {
+                        kind: "event".to_string(),
+                        domain: "agent".to_string(),
+                        target_id: event.agent_id,
+                        sequence_id: Some(state.websocket_sequence.fetch_add(1, Ordering::Relaxed)),
+                        request_id: None,
+                        payload,
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -376,14 +389,17 @@ async fn handle_multiplex_socket(socket: WebSocket, state: WebAppState) -> anyho
                     Ok(payload) => payload,
                     Err(_) => break,
                 };
-                if outbound_tx.send(WebSocketEnvelope {
-                    kind: "snapshot".to_string(),
-                    domain: "runtime".to_string(),
-                    target_id: "status".to_string(),
-                    sequence_id: Some(state.websocket_sequence.fetch_add(1, Ordering::Relaxed)),
-                    request_id: None,
-                    payload,
-                }).is_err() {
+                if outbound_tx
+                    .send(WebSocketEnvelope {
+                        kind: "snapshot".to_string(),
+                        domain: "runtime".to_string(),
+                        target_id: "status".to_string(),
+                        sequence_id: Some(state.websocket_sequence.fetch_add(1, Ordering::Relaxed)),
+                        request_id: None,
+                        payload,
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -421,10 +437,19 @@ async fn handle_websocket_envelope(
     match (envelope.kind.as_str(), envelope.domain.as_str()) {
         ("create", "terminal") => {
             let descriptor = state.terminal_service.create_terminal().await?;
-            send_terminal_attach(state, outbound_tx, descriptor.terminal_id, envelope.request_id).await
+            send_terminal_attach(
+                state,
+                outbound_tx,
+                descriptor.terminal_id,
+                envelope.request_id,
+            )
+            .await
         }
         ("subscribe", "agent") => {
-            subscriptions.lock().await.subscribe_agent(envelope.target_id.clone());
+            subscriptions
+                .lock()
+                .await
+                .subscribe_agent(envelope.target_id.clone());
             outbound_tx.send(WebSocketEnvelope {
                 kind: "snapshot".to_string(),
                 domain: "agent".to_string(),
@@ -447,53 +472,70 @@ async fn handle_websocket_envelope(
             Ok(())
         }
         ("unsubscribe", "agent") => {
-            subscriptions.lock().await.unsubscribe_agent(&envelope.target_id);
-            outbound_tx.send(WebSocketEnvelope {
-                kind: "ack".to_string(),
-                domain: "agent".to_string(),
-                target_id: envelope.target_id,
-                sequence_id: Some(state.websocket_sequence.fetch_add(1, Ordering::Relaxed)),
-                request_id: envelope.request_id,
-                payload: serde_json::json!({"subscribed": false}),
-            }).map_err(|_| anyhow!("websocket outbound channel closed"))?;
+            subscriptions
+                .lock()
+                .await
+                .unsubscribe_agent(&envelope.target_id);
+            outbound_tx
+                .send(WebSocketEnvelope {
+                    kind: "ack".to_string(),
+                    domain: "agent".to_string(),
+                    target_id: envelope.target_id,
+                    sequence_id: Some(state.websocket_sequence.fetch_add(1, Ordering::Relaxed)),
+                    request_id: envelope.request_id,
+                    payload: serde_json::json!({"subscribed": false}),
+                })
+                .map_err(|_| anyhow!("websocket outbound channel closed"))?;
             Ok(())
         }
         ("subscribe", "runtime") => {
-            subscriptions.lock().await.subscribe_runtime(envelope.target_id.clone());
+            subscriptions
+                .lock()
+                .await
+                .subscribe_runtime(envelope.target_id.clone());
             let snapshot = state.app_state.snapshot_hub.current();
-            outbound_tx.send(WebSocketEnvelope {
-                kind: "snapshot".to_string(),
-                domain: "runtime".to_string(),
-                target_id: envelope.target_id,
-                sequence_id: Some(state.websocket_sequence.fetch_add(1, Ordering::Relaxed)),
-                request_id: envelope.request_id,
-                payload: serde_json::to_value(build_status_response(state, &snapshot))?,
-            }).map_err(|_| anyhow!("websocket outbound channel closed"))?;
+            outbound_tx
+                .send(WebSocketEnvelope {
+                    kind: "snapshot".to_string(),
+                    domain: "runtime".to_string(),
+                    target_id: envelope.target_id,
+                    sequence_id: Some(state.websocket_sequence.fetch_add(1, Ordering::Relaxed)),
+                    request_id: envelope.request_id,
+                    payload: serde_json::to_value(build_status_response(state, &snapshot))?,
+                })
+                .map_err(|_| anyhow!("websocket outbound channel closed"))?;
             Ok(())
         }
         ("unsubscribe", "runtime") => {
-            subscriptions.lock().await.unsubscribe_runtime(&envelope.target_id);
-            outbound_tx.send(WebSocketEnvelope {
-                kind: "ack".to_string(),
-                domain: "runtime".to_string(),
-                target_id: envelope.target_id,
-                sequence_id: Some(state.websocket_sequence.fetch_add(1, Ordering::Relaxed)),
-                request_id: envelope.request_id,
-                payload: serde_json::json!({"subscribed": false}),
-            }).map_err(|_| anyhow!("websocket outbound channel closed"))?;
+            subscriptions
+                .lock()
+                .await
+                .unsubscribe_runtime(&envelope.target_id);
+            outbound_tx
+                .send(WebSocketEnvelope {
+                    kind: "ack".to_string(),
+                    domain: "runtime".to_string(),
+                    target_id: envelope.target_id,
+                    sequence_id: Some(state.websocket_sequence.fetch_add(1, Ordering::Relaxed)),
+                    request_id: envelope.request_id,
+                    payload: serde_json::json!({"subscribed": false}),
+                })
+                .map_err(|_| anyhow!("websocket outbound channel closed"))?;
             Ok(())
         }
         ("subscribe", "terminal") => {
             if envelope.target_id == "list" {
                 let terminals = state.terminal_service.list_terminals().await?;
-                outbound_tx.send(WebSocketEnvelope {
-                    kind: "snapshot".to_string(),
-                    domain: "terminal".to_string(),
-                    target_id: "list".to_string(),
-                    sequence_id: Some(state.websocket_sequence.fetch_add(1, Ordering::Relaxed)),
-                    request_id: envelope.request_id,
-                    payload: serde_json::to_value(TerminalListPayload { terminals })?,
-                }).map_err(|_| anyhow!("websocket outbound channel closed"))?;
+                outbound_tx
+                    .send(WebSocketEnvelope {
+                        kind: "snapshot".to_string(),
+                        domain: "terminal".to_string(),
+                        target_id: "list".to_string(),
+                        sequence_id: Some(state.websocket_sequence.fetch_add(1, Ordering::Relaxed)),
+                        request_id: envelope.request_id,
+                        payload: serde_json::to_value(TerminalListPayload { terminals })?,
+                    })
+                    .map_err(|_| anyhow!("websocket outbound channel closed"))?;
                 Ok(())
             } else {
                 let terminal_id = parse_terminal_target_id(&envelope.target_id)?;
@@ -502,20 +544,23 @@ async fn handle_websocket_envelope(
         }
         ("input", "agent") => {
             let prompt = extract_prompt_payload(&envelope.payload)?;
-            state.web_input_tx
+            state
+                .web_input_tx
                 .send(WebInputEvent::SubmitPrompt {
                     agent_id: envelope.target_id.clone(),
                     prompt,
                 })
                 .map_err(|_| anyhow!("web input channel closed"))?;
-            outbound_tx.send(WebSocketEnvelope {
-                kind: "ack".to_string(),
-                domain: "agent".to_string(),
-                target_id: envelope.target_id,
-                sequence_id: Some(state.websocket_sequence.fetch_add(1, Ordering::Relaxed)),
-                request_id: envelope.request_id,
-                payload: serde_json::json!({"accepted": true}),
-            }).map_err(|_| anyhow!("websocket outbound channel closed"))?;
+            outbound_tx
+                .send(WebSocketEnvelope {
+                    kind: "ack".to_string(),
+                    domain: "agent".to_string(),
+                    target_id: envelope.target_id,
+                    sequence_id: Some(state.websocket_sequence.fetch_add(1, Ordering::Relaxed)),
+                    request_id: envelope.request_id,
+                    payload: serde_json::json!({"accepted": true}),
+                })
+                .map_err(|_| anyhow!("websocket outbound channel closed"))?;
             Ok(())
         }
         _ => {
@@ -539,18 +584,20 @@ async fn send_terminal_attach(
     request_id: Option<String>,
 ) -> anyhow::Result<()> {
     let attach = state.terminal_service.attach_terminal(terminal_id).await?;
-    outbound_tx.send(WebSocketEnvelope {
-        kind: "snapshot".to_string(),
-        domain: "terminal".to_string(),
-        target_id: attach.descriptor.terminal_id.to_string(),
-        sequence_id: Some(state.websocket_sequence.fetch_add(1, Ordering::Relaxed)),
-        request_id: request_id.clone(),
-        payload: serde_json::to_value(TerminalAttachedPayload {
-            terminal_id: attach.descriptor.terminal_id,
-            label: attach.descriptor.label.clone(),
-            scrollback: attach.scrollback.clone(),
-        })?,
-    }).map_err(|_| anyhow!("websocket outbound channel closed"))?;
+    outbound_tx
+        .send(WebSocketEnvelope {
+            kind: "snapshot".to_string(),
+            domain: "terminal".to_string(),
+            target_id: attach.descriptor.terminal_id.to_string(),
+            sequence_id: Some(state.websocket_sequence.fetch_add(1, Ordering::Relaxed)),
+            request_id: request_id.clone(),
+            payload: serde_json::to_value(TerminalAttachedPayload {
+                terminal_id: attach.descriptor.terminal_id,
+                label: attach.descriptor.label.clone(),
+                scrollback: attach.scrollback.clone(),
+            })?,
+        })
+        .map_err(|_| anyhow!("websocket outbound channel closed"))?;
 
     let mut output_rx = attach.output_rx;
     let outbound_tx = outbound_tx.clone();
@@ -631,7 +678,10 @@ fn publish_web_agent_event(
             let _ = agent_event_tx.send(WebAgentEvent {
                 agent_id,
                 event_kind: "tool".to_string(),
-                text: format!("tool start: {} {name} {args}", tool_call_id.as_deref().unwrap_or("?")),
+                text: format!(
+                    "tool start: {} {name} {args}",
+                    tool_call_id.as_deref().unwrap_or("?")
+                ),
                 at_ms,
             });
         }
@@ -702,7 +752,8 @@ fn extract_prompt_payload(payload: &serde_json::Value) -> anyhow::Result<String>
 
 async fn start_terminal_runtime() -> anyhow::Result<crate::web_terminal::TerminalService> {
     let (background_ready_tx, background_ready_rx) = tokio::sync::oneshot::channel();
-    let _background_thread = crate::web_terminal::spawn_background_service_runtime(background_ready_tx)?;
+    let _background_thread =
+        crate::web_terminal::spawn_background_service_runtime(background_ready_tx)?;
     background_ready_rx
         .await
         .context("background terminal service runtime exited before startup completed")?
@@ -713,7 +764,10 @@ async fn health() -> impl IntoResponse {
 }
 
 async fn status(State(state): State<WebAppState>) -> Json<WebStatusResponse> {
-    Json(build_status_response(&state, &state.app_state.snapshot_hub.current()))
+    Json(build_status_response(
+        &state,
+        &state.app_state.snapshot_hub.current(),
+    ))
 }
 
 async fn transcript_api(State(state): State<WebAppState>) -> Json<WebTranscriptResponse> {
@@ -724,7 +778,10 @@ async fn transcript_api(State(state): State<WebAppState>) -> Json<WebTranscriptR
 }
 
 async fn agents_api(State(state): State<WebAppState>) -> Json<WebAgentsResponse> {
-    Json(build_agents_response(&state, &state.app_state.snapshot_hub.current()))
+    Json(build_agents_response(
+        &state,
+        &state.app_state.snapshot_hub.current(),
+    ))
 }
 
 fn html_response(body: String) -> Response {
@@ -738,10 +795,9 @@ fn html_response(body: String) -> Response {
 
 fn asset_response(body: &[u8], content_type: &'static str) -> Response {
     let mut response = Response::new(axum::body::Body::from(body.to_vec()));
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static(content_type),
-    );
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("no-store, max-age=0"),
@@ -770,10 +826,13 @@ async fn start_web_surface_loop(
         ctx.app_tx.clone(),
         ctx.runtime_tx.clone(),
         ctx.domain.clone(),
-    ).await?;
+    )
+    .await?;
 
     let placeholder_runtime =
-        crate::app_state::AppRuntimeState::placeholder_for_surface_transfer_from(&app_state.runtime);
+        crate::app_state::AppRuntimeState::placeholder_for_surface_transfer_from(
+            &app_state.runtime,
+        );
     let mut app = crate::tui::App::new(
         std::mem::replace(&mut app_state.runtime, placeholder_runtime),
         initial_snapshot,
@@ -814,7 +873,6 @@ async fn start_web_surface_loop(
     };
     Ok(web_input_tx)
 }
-
 
 fn submit_web_prompt(
     app: &mut crate::tui::App,
@@ -866,10 +924,7 @@ fn build_status_response(state: &WebAppState, snapshot: &AppSnapshot) -> WebStat
     }
 }
 
-fn build_transcript_response(
-    state: &WebAppState,
-    snapshot: &AppSnapshot,
-) -> WebTranscriptResponse {
+fn build_transcript_response(state: &WebAppState, snapshot: &AppSnapshot) -> WebTranscriptResponse {
     WebTranscriptResponse {
         mode: "web",
         bind_addr: state.bind_addr.to_string(),
@@ -886,8 +941,6 @@ fn build_transcript_response(
             .unwrap_or_default(),
     }
 }
-
-
 
 fn update_web_chat_entries(
     chat_entries: &Arc<std::sync::Mutex<Vec<WebChatEntry>>>,
@@ -940,7 +993,12 @@ fn build_chat_entries(entries: &[crate::tui::Entry]) -> Vec<WebChatEntry> {
                     completed: false,
                 });
             }
-            crate::tui::Entry::ToolCall { agent_id, tool_call_id, detail, reason } => {
+            crate::tui::Entry::ToolCall {
+                agent_id,
+                tool_call_id,
+                detail,
+                reason,
+            } => {
                 chat_entries.push(WebChatEntry {
                     kind: "tool_call",
                     agent_id: agent_id.clone(),
@@ -982,7 +1040,11 @@ fn build_chat_entries(entries: &[crate::tui::Entry]) -> Vec<WebChatEntry> {
                     });
                 }
             }
-            crate::tui::Entry::Status { agent_id, source, text } => {
+            crate::tui::Entry::Status {
+                agent_id,
+                source,
+                text,
+            } => {
                 last_tool_entry_index = None;
                 chat_entries.push(WebChatEntry {
                     kind: "status",
@@ -997,7 +1059,11 @@ fn build_chat_entries(entries: &[crate::tui::Entry]) -> Vec<WebChatEntry> {
                 });
             }
             #[cfg(feature = "stylos")]
-            crate::tui::Entry::RemoteEvent { agent_id, source, text } => {
+            crate::tui::Entry::RemoteEvent {
+                agent_id,
+                source,
+                text,
+            } => {
                 last_tool_entry_index = None;
                 chat_entries.push(WebChatEntry {
                     kind: "remote",
@@ -1011,7 +1077,11 @@ fn build_chat_entries(entries: &[crate::tui::Entry]) -> Vec<WebChatEntry> {
                     completed: false,
                 });
             }
-            crate::tui::Entry::TurnDone { agent_id, summary, stats } => {
+            crate::tui::Entry::TurnDone {
+                agent_id,
+                summary,
+                stats,
+            } => {
                 last_tool_entry_index = None;
                 chat_entries.push(WebChatEntry {
                     kind: "turn_done",
@@ -1130,14 +1200,20 @@ fn build_recent_events(
 }
 
 fn web_recent_event_visible(kind: &str) -> bool {
-    matches!(kind, "user" | "assistant" | "tool" | "status" | "remote" | "turn")
+    matches!(
+        kind,
+        "user" | "assistant" | "tool" | "status" | "remote" | "turn"
+    )
 }
 
 fn truncate_text(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_string();
     }
-    let mut truncated = value.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+    let mut truncated = value
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
     truncated.push('…');
     truncated
 }
@@ -1160,7 +1236,6 @@ mod tests {
         assert!(html.contains(r#"type="module""#));
     }
 
-
     #[test]
     fn tool_done_merges_into_previous_tool_call() {
         let entries = vec![
@@ -1170,7 +1245,9 @@ mod tests {
                 detail: "shell: df -h".to_string(),
                 reason: None,
             },
-            crate::tui::Entry::ToolDone { tool_call_id: Some("call-1".to_string()) },
+            crate::tui::Entry::ToolDone {
+                tool_call_id: Some("call-1".to_string()),
+            },
         ];
 
         let chat_entries = build_chat_entries(&entries);
