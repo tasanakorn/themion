@@ -43,11 +43,14 @@ impl BuildIdentity {
             "Build identity: app_version={} app_version_hash={} app_version_dirty={}",
             self.app_version,
             self.app_version_hash,
-            if self.app_version_dirty { "true" } else { "false" }
+            if self.app_version_dirty {
+                "true"
+            } else {
+                "false"
+            }
         )
     }
 }
-
 
 #[derive(Clone)]
 struct TokenEstimateContext {
@@ -442,7 +445,6 @@ pub struct Agent {
     build_identity: Option<BuildIdentity>,
 }
 
-
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ApiRoundLogArtifact {
     pub session_id: String,
@@ -767,11 +769,11 @@ impl Agent {
             let self_instance = self.local_instance_id.as_deref().unwrap_or("local");
             let self_agent_id = self.local_agent_id.as_deref().unwrap_or("master");
             format!(
-                "Board guidance: simple direct Q&A without tools usually should not create a self-note. If the task needs tools, edits, validation, or durable follow-up tracking, consider creating a durable board note for yourself to help keep track of the work. For self-notes, prefer the magic local target to_instance=local to_agent_id={self_agent_id}. In this session, the exact current self target is to_instance={self_instance} to_agent_id={self_agent_id}. Use local for ordinary self-notes unless you specifically need the exact instance id. Multi-agent collaboration guidance: prefer durable board notes over stylos_request_talk when delegating asynchronous or non-urgent work to another agent. Treat stylos_request_talk as a lightweight volatile path for urgent coordination or brief clarification; it may queue in memory when the target is busy but is not durable. When you receive a done-mention note, treat it as an informational completion notification rather than a fresh work request."
+                "Board guidance: simple direct Q&A without tools usually should not create a self-note. If the task needs tools, edits, validation, or durable follow-up tracking, consider creating a durable board note for yourself to help keep track of the work. For self-notes, prefer the magic local target to_instance=local to_agent_id={self_agent_id}. In this session, the exact current self target is to_instance={self_instance} to_agent_id={self_agent_id}. Use local for ordinary self-notes unless you specifically need the exact instance id. Multi-agent collaboration guidance: prefer durable board notes over stylos_send_message when delegating asynchronous or non-urgent work to another agent. Treat stylos_send_message as a lightweight volatile path for urgent coordination or brief clarification; it may queue in the receiver inbox when the target is busy but is not durable. When you receive a done-mention note, treat it as an informational completion notification rather than a fresh work request."
             )
         };
         #[cfg(not(feature = "stylos"))]
-        let board_guidance_text = "Board guidance: simple direct Q&A without tools usually should not create a self-note. If the task needs tools, edits, validation, or durable follow-up tracking, consider creating a durable board note for yourself to help keep track of the work. For self-notes, prefer the magic local target to_instance=local to_agent_id=master. Do not invent remote identifiers for local-only board work. Multi-agent collaboration guidance: prefer durable board notes over stylos_request_talk when delegating asynchronous or non-urgent work to another agent. Treat stylos_request_talk as a lightweight volatile path for urgent coordination or brief clarification; it may queue in memory when the target is busy but is not durable. When you receive a done-mention note, treat it as an informational completion notification rather than a fresh work request.".to_string();
+        let board_guidance_text = "Board guidance: simple direct Q&A without tools usually should not create a self-note. If the task needs tools, edits, validation, or durable follow-up tracking, consider creating a durable board note for yourself to help keep track of the work. For self-notes, prefer the magic local target to_instance=local to_agent_id=master. Do not invent remote identifiers for local-only board work. Multi-agent collaboration guidance: prefer durable board notes over stylos_send_message when delegating asynchronous or non-urgent work to another agent. Treat stylos_send_message as a lightweight volatile path for urgent coordination or brief clarification; it may queue in the receiver inbox when the target is busy but is not durable. When you receive a done-mention note, treat it as an informational completion notification rather than a fresh work request.".to_string();
         let board_guidance = vec![Message {
             role: "system".to_string(),
             content: Some(board_guidance_text),

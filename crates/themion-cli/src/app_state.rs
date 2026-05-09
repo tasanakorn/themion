@@ -1,7 +1,14 @@
+use crate::app_runtime::{
+    apply_master_agent_replacement, build_local_agent_roster, build_local_agent_tool_invoker,
+    handle_local_agent_management_request as runtime_handle_local_agent_management_request,
+    LocalAgentManagementRequest, LocalAgentRuntimeContext,
+};
+use crate::app_runtime::{
+    start_watchdog_task, AppRuntimeObserverPublisher, AppSnapshotPublisher, WatchdogRuntimeState,
+};
 use crate::config::{save_profiles, Config};
-use crate::tui::{AppEvent, App, Entry, FrameRequester};
-use crate::app_runtime::{start_watchdog_task, AppRuntimeObserverPublisher, AppSnapshotPublisher, WatchdogRuntimeState};
 use crate::runtime_domains::RuntimeDomains;
+use crate::tui::{App, AppEvent, Entry, FrameRequester};
 use crate::Session;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,14 +18,9 @@ use themion_core::client::ChatClient;
 use themion_core::client_codex::CodexClient;
 use themion_core::db::DbHandle;
 use themion_core::db::{CreateNoteArgs, NoteColumn, NoteKind};
-use themion_core::ModelInfo;
-use crate::app_runtime::{
-    apply_master_agent_replacement, build_local_agent_roster,
-    build_local_agent_tool_invoker, handle_local_agent_management_request as runtime_handle_local_agent_management_request,
-    LocalAgentManagementRequest, LocalAgentRuntimeContext,
-};
 use themion_core::tools::SystemInspectionResult;
 use themion_core::ChatBackend;
+use themion_core::ModelInfo;
 use tokio::process::Command;
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
@@ -31,7 +33,9 @@ pub(crate) enum AppRuntimeEvent {
     #[cfg(feature = "stylos")]
     IncomingPrompt(crate::local_prompts::IncomingPromptRequest),
     #[cfg(feature = "stylos")]
-    DrainQueuedTalk { agent_id: String },
+    DrainMessageInbox {
+        agent_id: String,
+    },
     WatchdogTick,
     #[cfg(feature = "stylos")]
     StylosEvent(String),
@@ -40,8 +44,6 @@ pub(crate) enum AppRuntimeEvent {
         exit_code: Option<i32>,
     },
 }
-
-
 
 #[derive(Clone)]
 pub(crate) enum AgentActivity {
@@ -225,8 +227,8 @@ pub(crate) struct AppRuntimeState {
     pub local_instance_id: Option<String>,
     #[cfg(feature = "stylos")]
     pub stylos_tool_bridge: Option<crate::stylos::StylosToolBridge>,
-        pub watchdog_state: Arc<WatchdogRuntimeState>,
-        pub board_claims: Arc<crate::board_runtime::LocalBoardClaimRegistry>,
+    pub watchdog_state: Arc<WatchdogRuntimeState>,
+    pub board_claims: Arc<crate::board_runtime::LocalBoardClaimRegistry>,
     #[cfg(feature = "stylos")]
     pub shared_status_hub: crate::app_runtime::SharedStylosStatusHub,
     #[cfg(feature = "stylos")]
@@ -265,7 +267,6 @@ pub struct DoneMentionRequest {
     pub completed_by_agent_id: String,
     pub result_summary: String,
 }
-
 
 impl AppRuntimeState {
     pub(crate) fn placeholder_for_surface_transfer_from(source: &AppRuntimeState) -> Self {
@@ -383,7 +384,9 @@ impl AppState {
         let process_started_at = std::time::Instant::now();
         let process_started_at_ms = crate::tui::unix_epoch_now_ms();
 
-        let background_domain = runtime_domains.background().expect("force-red bg runtime in AppState");
+        let background_domain = runtime_domains
+            .background()
+            .expect("force-red bg runtime in AppState");
         let app_state = Self {
             runtime: AppRuntimeState {
                 session: session.clone(),
@@ -395,7 +398,9 @@ impl AppState {
                 startup_project_dir: project_dir.clone(),
                 local_agent_mgmt_tx: tokio::sync::mpsc::unbounded_channel().0,
                 runtime_tx: tokio::sync::mpsc::unbounded_channel().0,
-                runtime_observer_publisher: crate::app_runtime::AppRuntimeObserverPublisher::new(crate::app_runtime::AppSnapshotPublisher::new(snapshot_hub.clone())),
+                runtime_observer_publisher: crate::app_runtime::AppRuntimeObserverPublisher::new(
+                    crate::app_runtime::AppSnapshotPublisher::new(snapshot_hub.clone()),
+                ),
                 api_log_enabled: false,
                 status_model_info: session.model_info.clone(),
                 status_rate_limits: None,
@@ -425,8 +430,8 @@ impl AppState {
                 local_instance_id: None,
                 #[cfg(feature = "stylos")]
                 stylos_tool_bridge: None,
-                                watchdog_state: Arc::new(WatchdogRuntimeState::default()),
-                                board_claims: Arc::new(crate::board_runtime::LocalBoardClaimRegistry::default()),
+                watchdog_state: Arc::new(WatchdogRuntimeState::default()),
+                board_claims: Arc::new(crate::board_runtime::LocalBoardClaimRegistry::default()),
                 #[cfg(feature = "stylos")]
                 shared_status_hub: crate::app_runtime::SharedStylosStatusHub::default(),
                 #[cfg(feature = "stylos")]
@@ -450,9 +455,6 @@ impl AppState {
         Ok(app_state)
     }
 }
-
-
-
 
 pub(crate) fn snapshot_all_agents_idle(snapshot: &AppSnapshot) -> bool {
     !snapshot.local_agents.is_empty() && snapshot.local_agents.iter().all(|agent| !agent.busy)
@@ -545,9 +547,6 @@ pub fn start_tick_loop<T, F>(
     });
 }
 
-
-
-
 pub(crate) async fn bootstrap_runtime_owner(
     app_state: &mut AppState,
     app_tx: mpsc::UnboundedSender<AppEvent>,
@@ -573,8 +572,6 @@ pub(crate) async fn bootstrap_runtime_owner(
     );
     Ok(())
 }
-
-
 
 pub(crate) fn context_report_lines(runtime: &AppRuntimeState) -> Vec<String> {
     if let Some(handle) = runtime
@@ -676,7 +673,8 @@ pub(crate) fn runtime_request_interrupt(app: &mut App) {
 }
 
 pub(crate) fn runtime_arm_ctrl_c_exit(app: &mut App) {
-    app.runtime.ctrl_c_exit_armed_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
+    app.runtime.ctrl_c_exit_armed_until =
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
     app.push(Entry::Status {
         agent_id: None,
         source: Some(crate::tui::NonAgentSource::Runtime),
@@ -685,11 +683,17 @@ pub(crate) fn runtime_arm_ctrl_c_exit(app: &mut App) {
     app.mark_dirty_status();
 }
 
-pub(crate) fn runtime_ctrl_c_exit_is_armed(runtime: &AppRuntimeState, now: std::time::Instant) -> bool {
+pub(crate) fn runtime_ctrl_c_exit_is_armed(
+    runtime: &AppRuntimeState,
+    now: std::time::Instant,
+) -> bool {
     matches!(runtime.ctrl_c_exit_armed_until, Some(deadline) if deadline > now)
 }
 
-pub(crate) fn runtime_expire_ctrl_c_exit_if_needed(runtime: &mut AppRuntimeState, now: std::time::Instant) -> bool {
+pub(crate) fn runtime_expire_ctrl_c_exit_if_needed(
+    runtime: &mut AppRuntimeState,
+    now: std::time::Instant,
+) -> bool {
     if matches!(runtime.ctrl_c_exit_armed_until, Some(deadline) if deadline <= now) {
         runtime.ctrl_c_exit_armed_until = None;
         return true;
@@ -727,7 +731,11 @@ pub(crate) fn clear_agent_activity(app: &mut App) {
     publish_runtime_snapshot(app);
 }
 
-pub(crate) fn push_recent_runtime_event(app: &mut App, kind: impl Into<String>, text: impl Into<String>) {
+pub(crate) fn push_recent_runtime_event(
+    app: &mut App,
+    kind: impl Into<String>,
+    text: impl Into<String>,
+) {
     const MAX_RECENT_EVENTS: usize = 12;
     let event = AppRecentEvent::new(kind, text, crate::tui::unix_epoch_now_ms());
     app.runtime.recent_events.push_back(event);
@@ -742,7 +750,10 @@ pub(crate) fn truncate_recent_event_text(text: &str) -> String {
     if chars.len() <= MAX_CHARS {
         return text.to_string();
     }
-    let kept: String = chars.into_iter().take(MAX_CHARS.saturating_sub(1)).collect();
+    let kept: String = chars
+        .into_iter()
+        .take(MAX_CHARS.saturating_sub(1))
+        .collect();
     format!("{kept}…")
 }
 
@@ -752,9 +763,6 @@ pub(crate) fn on_tick(app: &mut App) {
     app.record_runtime_snapshot();
     publish_runtime_snapshot(app);
 }
-
-
-
 
 pub(crate) fn session_config_lines(session: &Session) -> Vec<String> {
     let key_display = match &session.api_key {
@@ -807,7 +815,11 @@ pub(crate) fn config_profile_list_lines(session: &Session) -> Vec<String> {
     names
         .into_iter()
         .map(|name| {
-            let marker = if name == session.active_profile { "* " } else { "  " };
+            let marker = if name == session.active_profile {
+                "* "
+            } else {
+                "  "
+            };
             format!("{}{}", marker, name)
         })
         .collect()
@@ -828,31 +840,35 @@ pub(crate) async fn handle_login_complete_event(
                     text: format!("warning: failed to save auth: {}", e),
                 });
             }
-            app.runtime
-                .session
-                .profiles
-                .insert(profile_name.clone(), crate::config::codex_profile_defaults());
+            app.runtime.session.profiles.insert(
+                profile_name.clone(),
+                crate::config::codex_profile_defaults(),
+            );
             app.runtime.session.configured_profile = profile_name.clone();
             app.runtime.session.switch_profile(&profile_name);
-            if let Err(e) = save_profiles(&app.runtime.session.active_profile, &app.runtime.session.profiles)
-            {
+            if let Err(e) = save_profiles(
+                &app.runtime.session.active_profile,
+                &app.runtime.session.profiles,
+            ) {
                 app.push(Entry::Assistant {
                     agent_id: None,
                     text: format!("warning: failed to save config: {}", e),
                 });
             }
-            match crate::app_runtime::build_replacement_main_agent(crate::app_runtime::AgentReplacementParams {
-                session: &app.runtime.session,
-                project_dir: &app.runtime.project_dir,
-                db: &app.runtime.db,
-                #[cfg(feature = "stylos")]
-                stylos_tool_bridge: app.runtime.stylos_tool_bridge.clone(),
-                #[cfg(feature = "stylos")]
-                local_instance_id: app.runtime.local_instance_id.as_deref(),
-                api_log_enabled: app.runtime.api_log_enabled,
-                local_agent_mgmt_tx: app.runtime.local_agent_mgmt_tx.clone(),
-                insert_session: true,
-            }) {
+            match crate::app_runtime::build_replacement_main_agent(
+                crate::app_runtime::AgentReplacementParams {
+                    session: &app.runtime.session,
+                    project_dir: &app.runtime.project_dir,
+                    db: &app.runtime.db,
+                    #[cfg(feature = "stylos")]
+                    stylos_tool_bridge: app.runtime.stylos_tool_bridge.clone(),
+                    #[cfg(feature = "stylos")]
+                    local_instance_id: app.runtime.local_instance_id.as_deref(),
+                    api_log_enabled: app.runtime.api_log_enabled,
+                    local_agent_mgmt_tx: app.runtime.local_agent_mgmt_tx.clone(),
+                    insert_session: true,
+                },
+            ) {
                 Ok((mut new_agent, new_session_id)) => {
                     new_agent.refresh_model_info().await;
                     runtime_replace_master_agent(&mut app.runtime, new_agent, new_session_id);
@@ -861,9 +877,7 @@ pub(crate) async fn handle_login_complete_event(
                         agent_id: None,
                         text: format!(
                             "logged in as {} — switched to Codex profile '{}' ({})",
-                            auth.account_id,
-                            profile_name,
-                            app.runtime.session.model
+                            auth.account_id, profile_name, app.runtime.session.model
                         ),
                     });
                     app.push(Entry::Blank);
@@ -913,7 +927,8 @@ pub(crate) fn handle_runtime_command(
             set_agent_activity(app, AgentActivity::LoginStarting);
             let target_profile = profile_name.clone().unwrap_or_else(|| {
                 if app
-                    .runtime.session
+                    .runtime
+                    .session
                     .profiles
                     .get(&app.runtime.session.active_profile)
                     .is_some_and(|profile| profile.provider.as_deref() == Some("openai-codex"))
@@ -924,11 +939,20 @@ pub(crate) fn handle_runtime_command(
                 }
             });
             let login_message = if profile_name.is_some() {
-                format!("logging in to OpenAI Codex for profile '{}'…", target_profile)
+                format!(
+                    "logging in to OpenAI Codex for profile '{}'…",
+                    target_profile
+                )
             } else if target_profile == app.runtime.session.active_profile {
-                format!("logging in to OpenAI Codex for current profile '{}'…", target_profile)
+                format!(
+                    "logging in to OpenAI Codex for current profile '{}'…",
+                    target_profile
+                )
             } else {
-                format!("logging in to OpenAI Codex for profile '{}'…", target_profile)
+                format!(
+                    "logging in to OpenAI Codex for profile '{}'…",
+                    target_profile
+                )
             };
             app.push(Entry::Assistant {
                 agent_id: None,
@@ -938,7 +962,11 @@ pub(crate) fn handle_runtime_command(
             app.runtime.background_domain().spawn(async move {
                 match crate::login_codex::start_device_flow().await {
                     Err(e) => {
-                        tx.send(AppEvent::LoginComplete { profile_name: target_profile.clone(), auth_result: Err(e) }).ok();
+                        tx.send(AppEvent::LoginComplete {
+                            profile_name: target_profile.clone(),
+                            auth_result: Err(e),
+                        })
+                        .ok();
                     }
                     Ok((info, poll)) => {
                         tx.send(AppEvent::LoginPrompt {
@@ -947,7 +975,11 @@ pub(crate) fn handle_runtime_command(
                         })
                         .ok();
                         let result = poll.await;
-                        tx.send(AppEvent::LoginComplete { profile_name: target_profile.clone(), auth_result: result }).ok();
+                        tx.send(AppEvent::LoginComplete {
+                            profile_name: target_profile.clone(),
+                            auth_result: result,
+                        })
+                        .ok();
                     }
                 }
             });
@@ -980,12 +1012,18 @@ pub(crate) fn handle_runtime_command(
                     return;
                 }
                 app.runtime.agent_busy = true;
-                let scope_suffix = source_kind.as_deref().map(|kind| format!(" ({})", kind)).unwrap_or_default();
-                set_agent_activity(app, AgentActivity::RunningTool(if full {
-                    format!("unified-search full reindex{}", scope_suffix)
-                } else {
-                    format!("unified-search index pending{}", scope_suffix)
-                }));
+                let scope_suffix = source_kind
+                    .as_deref()
+                    .map(|kind| format!(" ({})", kind))
+                    .unwrap_or_default();
+                set_agent_activity(
+                    app,
+                    AgentActivity::RunningTool(if full {
+                        format!("unified-search full reindex{}", scope_suffix)
+                    } else {
+                        format!("unified-search index pending{}", scope_suffix)
+                    }),
+                );
                 app.push(Entry::Assistant {
                     agent_id: None,
                     text: match (full, source_kind.as_deref()) {
@@ -1000,12 +1038,19 @@ pub(crate) fn handle_runtime_command(
                 let project_dir = app.runtime.project_dir.display().to_string();
                 app.runtime.background_domain().spawn(async move {
                     let result = tokio::task::spawn_blocking(move || {
-                        db.memory_store().rebuild_unified_search_index(Some(&project_dir), source_kind.as_deref(), full)
+                        db.memory_store().rebuild_unified_search_index(
+                            Some(&project_dir),
+                            source_kind.as_deref(),
+                            full,
+                        )
                     })
                     .await;
                     let text = match result {
-                        Ok(Ok(report)) => serde_json::to_string_pretty(&report)
-                            .unwrap_or_else(|err| format!("indexing report serialization failed: {}", err)),
+                        Ok(Ok(report)) => {
+                            serde_json::to_string_pretty(&report).unwrap_or_else(|err| {
+                                format!("indexing report serialization failed: {}", err)
+                            })
+                        }
                         Ok(Err(err)) => {
                             if full {
                                 format!("unified-search full reindex failed: {}", err)
@@ -1085,12 +1130,13 @@ pub(crate) fn publish_runtime_snapshot(app: &mut App) {
     let debug_runtime_lines = app.debug_runtime_lines();
     let activity_status = app.activity_status_value();
     #[cfg(feature = "stylos")]
-    let primary_activity_label = app
-        .runtime
-        .agent_activity
-        .as_ref()
-        .map(|activity| activity.status_bar(app.runtime.stream_chunks, app.runtime.stream_chars));
-    let recent_window_ms = app.recent_runtime_delta().map(|recent| recent.wall_elapsed_ms);
+    let primary_activity_label =
+        app.runtime.agent_activity.as_ref().map(|activity| {
+            activity.status_bar(app.runtime.stream_chunks, app.runtime.stream_chars)
+        });
+    let recent_window_ms = app
+        .recent_runtime_delta()
+        .map(|recent| recent.wall_elapsed_ms);
     let uptime_ms = app.runtime.process_started_at.elapsed().as_millis() as u64;
     #[cfg(feature = "stylos")]
     let stylos_status = app
@@ -1129,51 +1175,52 @@ pub(crate) fn publish_runtime_snapshot(app: &mut App) {
         }
     });
 
-    app.runtime.runtime_observer_publisher.publish(crate::app_runtime::AppRuntimeObserverPublishState {
-        agents: &mut app.runtime.agents,
-        snapshot: {
-            #[cfg(feature = "stylos")]
-            {
-                crate::app_runtime::AppRuntimeSnapshotPublishState {
-                    agent_busy: app.runtime.agent_busy,
-                    activity_status: activity_status.clone(),
-                    stylos_status: Some(stylos_status),
-                    watchdog_state: &app.runtime.watchdog_state,
-                    incoming_prompts: &app.runtime.incoming_prompts,
+    app.runtime.runtime_observer_publisher.publish(
+        crate::app_runtime::AppRuntimeObserverPublishState {
+            agents: &mut app.runtime.agents,
+            snapshot: {
+                #[cfg(feature = "stylos")]
+                {
+                    crate::app_runtime::AppRuntimeSnapshotPublishState {
+                        agent_busy: app.runtime.agent_busy,
+                        activity_status: activity_status.clone(),
+                        stylos_status: Some(stylos_status),
+                        watchdog_state: &app.runtime.watchdog_state,
+                        incoming_prompts: &app.runtime.incoming_prompts,
+                    }
                 }
-            }
-            #[cfg(not(feature = "stylos"))]
-            {
-                crate::app_runtime::AppRuntimeSnapshotPublishState::new(
-                    app.runtime.agent_busy,
-                    activity_status.clone(),
-                )
-            }
+                #[cfg(not(feature = "stylos"))]
+                {
+                    crate::app_runtime::AppRuntimeSnapshotPublishState::new(
+                        app.runtime.agent_busy,
+                        activity_status.clone(),
+                    )
+                }
+            },
+            system_inspection: crate::app_runtime::SystemInspectionRuntimeRefreshState {
+                session: &app.runtime.session,
+                project_dir: &app.runtime.project_dir,
+                workflow_state: &app.runtime.workflow_state,
+                rate_limits: app.runtime.status_rate_limits.as_ref(),
+                activity: app.runtime.agent_activity.as_ref(),
+                stream_chunks: app.runtime.stream_chunks,
+                stream_chars: app.runtime.stream_chars,
+                agent_busy: app.runtime.agent_busy,
+                activity_status,
+                activity_status_changed_at_ms: app
+                    .runtime
+                    .agent_activity_changed_at
+                    .or(app.runtime.idle_status_changed_at),
+                process_started_at_ms: app.runtime.process_started_at_ms,
+                uptime_ms,
+                recent_window_ms,
+                debug_runtime_lines,
+            },
+            #[cfg(feature = "stylos")]
+            stylos,
         },
-        system_inspection: crate::app_runtime::SystemInspectionRuntimeRefreshState {
-            session: &app.runtime.session,
-            project_dir: &app.runtime.project_dir,
-            workflow_state: &app.runtime.workflow_state,
-            rate_limits: app.runtime.status_rate_limits.as_ref(),
-            activity: app.runtime.agent_activity.as_ref(),
-            stream_chunks: app.runtime.stream_chunks,
-            stream_chars: app.runtime.stream_chars,
-            agent_busy: app.runtime.agent_busy,
-            activity_status,
-            activity_status_changed_at_ms: app
-                .runtime
-                .agent_activity_changed_at
-                .or(app.runtime.idle_status_changed_at),
-            process_started_at_ms: app.runtime.process_started_at_ms,
-            uptime_ms,
-            recent_window_ms,
-            debug_runtime_lines,
-        },
-        #[cfg(feature = "stylos")]
-        stylos,
-    });
+    );
 }
-
 
 #[cfg(feature = "stylos")]
 pub(crate) fn handle_incoming_prompt_event(
@@ -1186,16 +1233,16 @@ pub(crate) fn handle_incoming_prompt_event(
 }
 
 #[cfg(feature = "stylos")]
-fn schedule_queued_talk_drain(app: &App, agent_id: &str) {
+fn schedule_message_inbox_drain(app: &App, agent_id: &str) {
     let tx = app.runtime.runtime_tx.clone();
     let agent_id = agent_id.to_string();
     app.runtime.background_domain().spawn(async move {
-        let _ = tx.send(AppRuntimeEvent::DrainQueuedTalk { agent_id });
+        let _ = tx.send(AppRuntimeEvent::DrainMessageInbox { agent_id });
     });
 }
 
 #[cfg(feature = "stylos")]
-fn queue_counts_by_agent(app: &App) -> std::collections::HashMap<String, usize> {
+fn inbox_counts_by_agent(app: &App) -> std::collections::HashMap<String, usize> {
     app.runtime
         .stylos
         .as_ref()
@@ -1206,7 +1253,7 @@ fn queue_counts_by_agent(app: &App) -> std::collections::HashMap<String, usize> 
                 .filter_map(|agent| {
                     let count = stylos
                         .query_context()
-                        .talk_queue()
+                        .message_inbox()
                         .count_for_agent(&agent.agent_id);
                     (count > 0).then_some((agent.agent_id.clone(), count))
                 })
@@ -1216,7 +1263,7 @@ fn queue_counts_by_agent(app: &App) -> std::collections::HashMap<String, usize> 
 }
 
 #[cfg(feature = "stylos")]
-fn drain_one_queued_talk_for_agent(
+fn drain_one_inbox_message_for_agent(
     app: &mut App,
     agent_id: String,
     app_tx: &mpsc::UnboundedSender<crate::tui::AppEvent>,
@@ -1224,10 +1271,19 @@ fn drain_one_queued_talk_for_agent(
     let Some(handle) = app.runtime.stylos.as_ref() else {
         return;
     };
-    let Some(index) = app.runtime.agents.iter().position(|h| h.agent_id == agent_id) else {
-        for item in handle.query_context().talk_queue().fail_all_for_agent(&agent_id) {
+    let Some(index) = app
+        .runtime
+        .agents
+        .iter()
+        .position(|h| h.agent_id == agent_id)
+    else {
+        for item in handle
+            .query_context()
+            .message_inbox()
+            .fail_all_for_agent(&agent_id)
+        {
             let _ = handle.query_context().submit_event(format!(
-                "Stylos talk failed correlation_id={} reason=target_agent_missing to_agent_id={}",
+                "Stylos message failed correlation_id={} reason=target_agent_missing to_agent_id={}",
                 item.correlation_id, agent_id
             ));
         }
@@ -1239,7 +1295,7 @@ fn drain_one_queued_talk_for_agent(
     {
         return;
     }
-    let Some(item) = handle.query_context().talk_queue().pop_next(&agent_id) else {
+    let Some(item) = handle.query_context().message_inbox().pop_next(&agent_id) else {
         return;
     };
     let correlation_id = item.correlation_id.clone();
@@ -1250,7 +1306,7 @@ fn drain_one_queued_talk_for_agent(
     let enqueued_at_ms = item.enqueued_at_ms;
     let request = item.into_incoming_prompt();
     let _ = handle.query_context().submit_event(format!(
-        "Stylos talk delivered correlation_id={} from={} from_agent_id={} to={} to_agent_id={} enqueued_at_ms={}",
+        "Stylos message delivered correlation_id={} from={} from_agent_id={} to={} to_agent_id={} enqueued_at_ms={}",
         correlation_id,
         from,
         from_agent_id.as_deref().unwrap_or("unknown"),
@@ -1260,7 +1316,6 @@ fn drain_one_queued_talk_for_agent(
     ));
     process_incoming_prompt_request(app, request, app_tx);
 }
-
 
 pub(crate) fn process_agent_event(
     app: &mut App,
@@ -1273,8 +1328,13 @@ pub(crate) fn process_agent_event(
             #[cfg(feature = "stylos")]
             {
                 let agent_index = app.runtime.agents.iter().position(|h| h.session_id == sid);
-                if let (Some(agent_index), Some(handle)) = (agent_index, app.runtime.stylos.as_ref()) {
-                    if let Some(remote) = crate::app_runtime::incoming_prompt_request(&app.runtime.incoming_prompts, &app.runtime.agents[agent_index].agent_id) {
+                if let (Some(agent_index), Some(handle)) =
+                    (agent_index, app.runtime.stylos.as_ref())
+                {
+                    if let Some(remote) = crate::app_runtime::incoming_prompt_request(
+                        &app.runtime.incoming_prompts,
+                        &app.runtime.agents[agent_index].agent_id,
+                    ) {
                         if let Some(task_id) = remote.task_id.clone() {
                             crate::app_runtime::publish_stylos_task_running(
                                 &app.runtime.background_domain,
@@ -1311,12 +1371,16 @@ pub(crate) fn process_agent_event(
             let agent_id = crate::tui::agent_id_for_session(&app.runtime.agents, sid);
             match app.runtime.streaming_idx {
                 Some(i) => {
-                    if let Some(crate::tui::Entry::Assistant { text, .. }) = app.entries.get_mut(i) {
+                    if let Some(crate::tui::Entry::Assistant { text, .. }) = app.entries.get_mut(i)
+                    {
                         text.push_str(&chunk);
                     }
                 }
                 None => {
-                    app.push(crate::tui::Entry::Assistant { agent_id, text: chunk });
+                    app.push(crate::tui::Entry::Assistant {
+                        agent_id,
+                        text: chunk,
+                    });
                     app.runtime.streaming_idx = Some(app.entries.len() - 1);
                 }
             }
@@ -1333,7 +1397,12 @@ pub(crate) fn process_agent_event(
                 text,
             });
         }
-        themion_core::agent::AgentEvent::ToolStart { tool_call_id, name, arguments_json, display_arguments_json } => {
+        themion_core::agent::AgentEvent::ToolStart {
+            tool_call_id,
+            name,
+            arguments_json,
+            display_arguments_json,
+        } => {
             app.runtime.streaming_idx = None;
             let display_args_json = display_arguments_json.as_deref().unwrap_or(&arguments_json);
             let (detail, reason) = crate::tui::split_tool_call_detail(&name, display_args_json);
@@ -1389,7 +1458,9 @@ pub(crate) fn process_agent_event(
         }
         themion_core::agent::AgentEvent::Stats(text) => {
             if let Some(json) = text.strip_prefix("[rate-limit] ") {
-                if let Ok(report) = serde_json::from_str::<themion_core::client_codex::ApiCallRateLimitReport>(json) {
+                if let Ok(report) =
+                    serde_json::from_str::<themion_core::client_codex::ApiCallRateLimitReport>(json)
+                {
                     app.runtime.status_rate_limits = Some(report);
                     app.mark_dirty_status();
                     publish_runtime_snapshot(app);
@@ -1406,8 +1477,13 @@ pub(crate) fn process_agent_event(
                 if let Some(agent_index) = completed_agent_index {
                     maybe_emit_done_mention_for_completed_note(app, agent_index, app_tx);
                 }
-                if let (Some(agent_index), Some(handle)) = (completed_agent_index, app.runtime.stylos.as_ref()) {
-                    if let Some(remote) = crate::app_runtime::take_incoming_prompt_request(&mut app.runtime.incoming_prompts, &app.runtime.agents[agent_index].agent_id) {
+                if let (Some(agent_index), Some(handle)) =
+                    (completed_agent_index, app.runtime.stylos.as_ref())
+                {
+                    if let Some(remote) = crate::app_runtime::take_incoming_prompt_request(
+                        &mut app.runtime.incoming_prompts,
+                        &app.runtime.agents[agent_index].agent_id,
+                    ) {
                         if let Some(task_id) = remote.task_id {
                             let result_text = app.runtime.last_assistant_text.clone();
                             crate::app_runtime::publish_stylos_task_completed(
@@ -1423,21 +1499,31 @@ pub(crate) fn process_agent_event(
             app.runtime.streaming_idx = None;
             set_agent_activity(app, AgentActivity::Finishing);
             clear_agent_activity(app);
-            let interrupted = app.runtime.workflow_state.status == themion_core::workflow::WorkflowStatus::Interrupted;
+            let interrupted = app.runtime.workflow_state.status
+                == themion_core::workflow::WorkflowStatus::Interrupted;
             let stats_text = crate::format_stats(&stats);
-            let stats_text = stats_text.strip_prefix("[stats: ").and_then(|s| s.strip_suffix("]")).unwrap_or(&stats_text).to_string();
+            let stats_text = stats_text
+                .strip_prefix("[stats: ")
+                .and_then(|s| s.strip_suffix("]"))
+                .unwrap_or(&stats_text)
+                .to_string();
             app.push(crate::tui::Entry::TurnDone {
                 agent_id: crate::tui::agent_id_for_session(&app.runtime.agents, sid),
-                summary: if interrupted { "󰇺 Turn interrupted".to_string() } else { "󰇺 Turn end".to_string() },
+                summary: if interrupted {
+                    "󰇺 Turn interrupted".to_string()
+                } else {
+                    "󰇺 Turn end".to_string()
+                },
                 stats: stats_text,
             });
             app.push(crate::tui::Entry::Blank);
             app.runtime.activity_counters.agent_turn_completed_count += 1;
-            app.runtime.agent_busy = runtime_any_agent_busy(&app.runtime) || app.runtime.agent_activity.is_some();
+            app.runtime.agent_busy =
+                runtime_any_agent_busy(&app.runtime) || app.runtime.agent_activity.is_some();
             #[cfg(feature = "stylos")]
             if let Some(agent_index) = completed_agent_index {
                 let agent_id = app.runtime.agents[agent_index].agent_id.clone();
-                schedule_queued_talk_drain(app, &agent_id);
+                schedule_message_inbox_drain(app, &agent_id);
             }
             if let Some(last_api_call_tokens_in) = stats.last_api_call_tokens_in {
                 app.runtime.last_ctx_tokens = last_api_call_tokens_in;
@@ -1475,7 +1561,8 @@ pub(crate) fn handle_agent_ready_event(
         #[cfg(feature = "stylos")]
         &app.runtime.incoming_prompts,
     );
-    app.runtime.agent_busy = runtime_any_agent_busy(&app.runtime) || app.runtime.agent_activity.is_some();
+    app.runtime.agent_busy =
+        runtime_any_agent_busy(&app.runtime) || app.runtime.agent_activity.is_some();
     app.mark_dirty_status();
     app.request_draw(frame_requester);
 }
@@ -1488,7 +1575,10 @@ pub(crate) fn handle_shell_complete_event(
 ) {
     app.runtime.activity_counters.shell_complete_count += 1;
     clear_agent_activity(app);
-    app.push(crate::tui::Entry::Assistant { agent_id: None, text: output });
+    app.push(crate::tui::Entry::Assistant {
+        agent_id: None,
+        text: output,
+    });
     if let Some(code) = exit_code {
         if code != 0 {
             app.push(crate::tui::Entry::Assistant {
@@ -1502,10 +1592,12 @@ pub(crate) fn handle_shell_complete_event(
     app.request_draw(frame_requester);
 }
 
-
 pub(crate) fn submit_shell_command(app: &mut App, command: &str) {
     let command = command.trim_start().to_string();
-    app.push(Entry::User { agent_id: None, text: format!("!{}", command) });
+    app.push(Entry::User {
+        agent_id: None,
+        text: format!("!{}", command),
+    });
 
     if command.is_empty() {
         app.push(Entry::Assistant {
@@ -1574,17 +1666,14 @@ pub(crate) fn submit_text_default(app: &mut App, text: String) {
     submit_text_to_agent(app, agent_index, text);
 }
 
-pub(crate) fn submit_text_to_agent(
-    app: &mut App,
-    agent_index: usize,
-    text: String,
-) {
+pub(crate) fn submit_text_to_agent(app: &mut App, agent_index: usize, text: String) {
     app.runtime.activity_counters.record_agent_turn_started();
     app.runtime.agent_busy = true;
     runtime_reset_stream_counters(&mut app.runtime);
     set_agent_activity(app, AgentActivity::PreparingRequest);
 
-    let runtime_launch = crate::app_runtime::prepare_agent_turn_runtime_launch(&mut app.runtime.agents, agent_index);
+    let runtime_launch =
+        crate::app_runtime::prepare_agent_turn_runtime_launch(&mut app.runtime.agents, agent_index);
 
     crate::app_runtime::launch_agent_turn_runtime(
         &app.runtime.background_domain(),
@@ -1595,11 +1684,7 @@ pub(crate) fn submit_text_to_agent(
     );
 }
 
-pub(crate) fn submit_text_to_agent_id(
-    app: &mut App,
-    agent_id: &str,
-    text: String,
-) -> bool {
+pub(crate) fn submit_text_to_agent_id(app: &mut App, agent_id: &str, text: String) -> bool {
     let Some(agent_index) = app
         .runtime
         .agents
@@ -1623,12 +1708,14 @@ pub(crate) fn resolve_and_submit_text(
     text: String,
     _app_tx: &mpsc::UnboundedSender<crate::tui::AppEvent>,
 ) {
-    let active_request = app
-        .runtime.agents
-        .iter()
-        .find_map(|h| crate::app_runtime::incoming_prompt_request(&app.runtime.incoming_prompts, &h.agent_id));
+    let active_request = app.runtime.agents.iter().find_map(|h| {
+        crate::app_runtime::incoming_prompt_request(&app.runtime.incoming_prompts, &h.agent_id)
+    });
     let resolution = crate::app_runtime::resolve_submit_target(
-        &crate::app_runtime::build_local_agent_status_entries(&app.runtime.agents, &app.runtime.incoming_prompts),
+        &crate::app_runtime::build_local_agent_status_entries(
+            &app.runtime.agents,
+            &app.runtime.incoming_prompts,
+        ),
         active_request,
     );
     let agent_index = match resolution {
@@ -1647,7 +1734,9 @@ pub(crate) fn resolve_and_submit_text(
                 source: Some(crate::tui::NonAgentSource::Board),
                 text: effect.log_text,
             });
-            if let (Some(handle), Some(task_id)) = (app.runtime.stylos.as_ref(), effect.failed_task_id) {
+            if let (Some(handle), Some(task_id)) =
+                (app.runtime.stylos.as_ref(), effect.failed_task_id)
+            {
                 crate::app_runtime::publish_stylos_task_failed(
                     &app.runtime.background_domain,
                     handle.query_context(),
@@ -1665,7 +1754,12 @@ pub(crate) fn resolve_and_submit_text(
         }
     };
 
-    if crate::app_runtime::incoming_prompt_request(&app.runtime.incoming_prompts, &app.runtime.agents[agent_index].agent_id).is_none() {
+    if crate::app_runtime::incoming_prompt_request(
+        &app.runtime.incoming_prompts,
+        &app.runtime.agents[agent_index].agent_id,
+    )
+    .is_none()
+    {
         let submitted_agent_id = app.runtime.agents[agent_index].agent_id.clone();
         app.push(crate::tui::Entry::User {
             agent_id: Some(submitted_agent_id),
@@ -1683,14 +1777,21 @@ fn process_incoming_prompt_request(
     _app_tx: &mpsc::UnboundedSender<crate::tui::AppEvent>,
 ) {
     #[cfg(feature = "stylos")]
-    if matches!(request.source, crate::local_prompts::IncomingPromptSource::WatchdogBoardNote)
-        && app.runtime
-            .stylos
-            .as_ref()
-            .map(|stylos| stylos.query_context().talk_queue().count_for_agent(
-                request.agent_id.as_deref().unwrap_or("interactive"),
-            ) > 0)
-            .unwrap_or(false)
+    if matches!(
+        request.source,
+        crate::local_prompts::IncomingPromptSource::WatchdogBoardNote
+    ) && app
+        .runtime
+        .stylos
+        .as_ref()
+        .map(|stylos| {
+            stylos
+                .query_context()
+                .message_inbox()
+                .count_for_agent(request.agent_id.as_deref().unwrap_or("interactive"))
+                > 0
+        })
+        .unwrap_or(false)
     {
         if let Some(note_id) = crate::board_runtime::board_note_id_from_prompt(&request.prompt) {
             crate::board_runtime::release_board_note_claim(&app.runtime.board_claims, note_id);
@@ -1699,7 +1800,7 @@ fn process_incoming_prompt_request(
             agent_id: request.agent_id.clone(),
             source: Some(crate::tui::NonAgentSource::Runtime),
             text: format!(
-                "watchdog deferred {} because queued Stylos talk has priority",
+                "watchdog deferred {} because queued Stylos message has priority",
                 crate::app_runtime::stylos_note_display_identifier(&request.prompt)
             ),
         });
@@ -1730,10 +1831,16 @@ fn process_incoming_prompt_request(
                 .agent_id
                 .clone()
                 .unwrap_or_else(|| "interactive".to_string());
-            let sender = request.from.clone().unwrap_or_else(|| "unknown sender".to_string());
+            let sender = request
+                .from
+                .clone()
+                .unwrap_or_else(|| "unknown sender".to_string());
             let sender_agent = request.from_agent_id.clone();
-            let target = request.to.clone().unwrap_or_else(|| current_local_instance_id(app));
-            match handle.query_context().talk_queue().enqueue(
+            let target = request
+                .to
+                .clone()
+                .unwrap_or_else(|| current_local_instance_id(app));
+            match handle.query_context().message_inbox().enqueue(
                 agent_id.clone(),
                 request.request_id.clone(),
                 sender.clone(),
@@ -1746,7 +1853,7 @@ fn process_incoming_prompt_request(
                         agent_id: Some(agent_id.clone()),
                         source: None,
                         text: format!(
-                            "Stylos talk queued correlation_id={} from={} from_agent_id={} to={} to_agent_id={} queue_position={}",
+                            "Stylos message queued correlation_id={} from={} from_agent_id={} to={} to_agent_id={} queue_position={}",
                             queued.correlation_id,
                             sender,
                             sender_agent.as_deref().unwrap_or("unknown"),
@@ -1761,7 +1868,7 @@ fn process_incoming_prompt_request(
                         agent_id: Some(agent_id.clone()),
                         source: None,
                         text: format!(
-                            "Stylos talk rejected reason={} from={} from_agent_id={} to={} to_agent_id={}",
+                            "Stylos message rejected reason={} from={} from_agent_id={} to={} to_agent_id={}",
                             reason,
                             sender,
                             sender_agent.as_deref().unwrap_or("unknown"),
@@ -1776,7 +1883,10 @@ fn process_incoming_prompt_request(
     }
 
     let outcome = crate::app_runtime::plan_incoming_prompt(
-        &crate::app_runtime::build_local_agent_status_entries(&app.runtime.agents, &app.runtime.incoming_prompts),
+        &crate::app_runtime::build_local_agent_status_entries(
+            &app.runtime.agents,
+            &app.runtime.incoming_prompts,
+        ),
         &app.runtime.board_claims,
         request,
     );
@@ -1830,7 +1940,8 @@ pub(crate) fn handle_stylos_cmd_event(
 ) {
     app.push(crate::tui::Entry::RemoteEvent {
         agent_id: app
-            .runtime.agents
+            .runtime
+            .agents
             .iter()
             .find(|h| crate::app_runtime::is_interactive_agent_handle(h))
             .map(|h| h.agent_id.clone()),
@@ -1840,8 +1951,18 @@ pub(crate) fn handle_stylos_cmd_event(
             cmd.prompt.lines().next().unwrap_or("")
         ),
     });
-    if let Some(index) = app.runtime.agents.iter().position(crate::app_runtime::is_interactive_agent_handle) {
-        crate::app_runtime::clear_active_incoming_prompt(&app.runtime.agents, &mut app.runtime.incoming_prompts, &app.runtime.watchdog_state, index);
+    if let Some(index) = app
+        .runtime
+        .agents
+        .iter()
+        .position(crate::app_runtime::is_interactive_agent_handle)
+    {
+        crate::app_runtime::clear_active_incoming_prompt(
+            &app.runtime.agents,
+            &mut app.runtime.incoming_prompts,
+            &app.runtime.watchdog_state,
+            index,
+        );
     }
     resolve_and_submit_text(app, cmd.prompt, app_tx);
 }
@@ -1856,8 +1977,7 @@ pub(crate) fn maybe_emit_done_mention_for_completed_note(
         &app.runtime.incoming_prompts,
         &app.runtime.agents[agent_index].agent_id,
     )
-    .cloned()
-    else {
+    .cloned() else {
         return false;
     };
     let apply_plan = crate::app_runtime::completed_note_follow_up_apply_plan(
@@ -1895,10 +2015,6 @@ pub(crate) fn maybe_emit_done_mention_for_completed_note(
     false
 }
 
-
-
-
-
 #[cfg(feature = "stylos")]
 fn current_local_instance_id(app: &App) -> String {
     app.runtime
@@ -1915,8 +2031,9 @@ fn current_local_instance_id(_app: &App) -> String {
 
 fn handle_watchdog_tick_local_event(app: &mut App) {
     #[cfg(feature = "stylos")]
-    let queued_talk_by_agent = queue_counts_by_agent(app);
-    let agent_statuses = crate::app_runtime::build_local_agent_status_entries_local(&app.runtime.agents);
+    let inbox_messages_by_agent = inbox_counts_by_agent(app);
+    let agent_statuses =
+        crate::app_runtime::build_local_agent_status_entries_local(&app.runtime.agents);
     let mut candidate_ids = agent_statuses
         .iter()
         .filter(|h| h.roles.iter().any(|r| r == "interactive"))
@@ -1925,19 +2042,24 @@ fn handle_watchdog_tick_local_event(app: &mut App) {
     candidate_ids.extend(
         agent_statuses
             .iter()
-            .filter(|h| !h.roles.iter().any(|r| r == "interactive") && !h.roles.iter().any(|r| r == "master"))
+            .filter(|h| {
+                !h.roles.iter().any(|r| r == "interactive")
+                    && !h.roles.iter().any(|r| r == "master")
+            })
             .map(|h| h.agent_id.clone()),
     );
     candidate_ids.extend(
         agent_statuses
             .iter()
-            .filter(|h| h.roles.iter().any(|r| r == "master") && !h.roles.iter().any(|r| r == "interactive"))
+            .filter(|h| {
+                h.roles.iter().any(|r| r == "master") && !h.roles.iter().any(|r| r == "interactive")
+            })
             .map(|h| h.agent_id.clone()),
     );
 
-    app.runtime.watchdog_no_pending_since_by_agent.retain(|agent_id, _| {
-        agent_statuses.iter().any(|h| h.agent_id == *agent_id)
-    });
+    app.runtime
+        .watchdog_no_pending_since_by_agent
+        .retain(|agent_id, _| agent_statuses.iter().any(|h| h.agent_id == *agent_id));
 
     let local_instance = current_local_instance_id(app);
     for agent_id in candidate_ids {
@@ -1948,11 +2070,15 @@ fn handle_watchdog_tick_local_event(app: &mut App) {
             continue;
         }
         #[cfg(feature = "stylos")]
-        if queued_talk_by_agent.get(&agent_id).copied().unwrap_or(0) > 0 {
-            schedule_queued_talk_drain(app, &agent_id);
+        if inbox_messages_by_agent.get(&agent_id).copied().unwrap_or(0) > 0 {
+            schedule_message_inbox_drain(app, &agent_id);
             return;
         }
-        if let Some(no_pending_since) = app.runtime.watchdog_no_pending_since_by_agent.get(&agent_id) {
+        if let Some(no_pending_since) = app
+            .runtime
+            .watchdog_no_pending_since_by_agent
+            .get(&agent_id)
+        {
             if (no_pending_since.elapsed().as_millis() as u64)
                 < crate::board_runtime::WATCHDOG_NO_PENDING_COOLDOWN_MS_DEFAULT
             {
@@ -1960,7 +2086,7 @@ fn handle_watchdog_tick_local_event(app: &mut App) {
             }
         }
         #[cfg(feature = "stylos")]
-        if queued_talk_by_agent.values().any(|count| *count > 0) {
+        if inbox_messages_by_agent.values().any(|count| *count > 0) {
             continue;
         }
         let Some(request) = crate::board_runtime::resolve_pending_board_note_injection(
@@ -1975,8 +2101,14 @@ fn handle_watchdog_tick_local_event(app: &mut App) {
                 .insert(agent_id.clone(), std::time::Instant::now());
             continue;
         };
-        let Some(agent_index) = app.runtime.agents.iter().position(|h| h.agent_id == agent_id) else {
-            if let Some(note_id) = crate::board_runtime::board_note_id_from_prompt(&request.prompt) {
+        let Some(agent_index) = app
+            .runtime
+            .agents
+            .iter()
+            .position(|h| h.agent_id == agent_id)
+        else {
+            if let Some(note_id) = crate::board_runtime::board_note_id_from_prompt(&request.prompt)
+            {
                 crate::board_runtime::release_board_note_claim(&app.runtime.board_claims, note_id);
             }
             app.runtime
@@ -1984,7 +2116,9 @@ fn handle_watchdog_tick_local_event(app: &mut App) {
                 .insert(agent_id.clone(), std::time::Instant::now());
             continue;
         };
-        app.runtime.watchdog_no_pending_since_by_agent.remove(&agent_id);
+        app.runtime
+            .watchdog_no_pending_since_by_agent
+            .remove(&agent_id);
         app.push(crate::tui::Entry::Status {
             agent_id: Some(agent_id.clone()),
             source: Some(crate::tui::NonAgentSource::Runtime),
@@ -2009,27 +2143,35 @@ pub(crate) async fn handle_runtime_event(
         AppRuntimeEvent::AgentReady(agent, sid) => {
             handle_agent_ready_event(app, agent, sid, frame_requester);
             #[cfg(feature = "stylos")]
-            if let Some(agent_id) = app.runtime.agents.iter().find(|h| h.session_id == sid).map(|h| h.agent_id.clone()) {
-                schedule_queued_talk_drain(app, &agent_id);
+            if let Some(agent_id) = app
+                .runtime
+                .agents
+                .iter()
+                .find(|h| h.session_id == sid)
+                .map(|h| h.agent_id.clone())
+            {
+                schedule_message_inbox_drain(app, &agent_id);
             }
-        },
+        }
         AppRuntimeEvent::ShellComplete { output, exit_code } => {
             handle_shell_complete_event(app, output, exit_code, frame_requester)
         }
         #[cfg(feature = "stylos")]
         AppRuntimeEvent::StylosCmd(cmd) => handle_stylos_cmd_event(app, cmd, _app_tx),
         #[cfg(feature = "stylos")]
-        AppRuntimeEvent::IncomingPrompt(request) => handle_incoming_prompt_event(app, request, _app_tx),
+        AppRuntimeEvent::IncomingPrompt(request) => {
+            handle_incoming_prompt_event(app, request, _app_tx)
+        }
         #[cfg(feature = "stylos")]
-        AppRuntimeEvent::DrainQueuedTalk { agent_id } => drain_one_queued_talk_for_agent(app, agent_id, _app_tx),
+        AppRuntimeEvent::DrainMessageInbox { agent_id } => {
+            drain_one_inbox_message_for_agent(app, agent_id, _app_tx)
+        }
         #[cfg(feature = "stylos")]
-        AppRuntimeEvent::StylosEvent(text) => {
-            app.push(crate::tui::Entry::RemoteEvent {
-                agent_id: None,
-                source: Some(crate::tui::NonAgentSource::Stylos),
-                text,
-            })
-        },
+        AppRuntimeEvent::StylosEvent(text) => app.push(crate::tui::Entry::RemoteEvent {
+            agent_id: None,
+            source: Some(crate::tui::NonAgentSource::Stylos),
+            text,
+        }),
         AppRuntimeEvent::WatchdogTick => handle_watchdog_tick_local_event(app),
         AppRuntimeEvent::Agent(sid, ev) => {
             app.runtime.activity_counters.agent_event_count += 1;
@@ -2072,7 +2214,6 @@ pub fn open_history_db(interactive: bool) -> Arc<DbHandle> {
 }
 
 #[cfg(feature = "stylos")]
-
 #[cfg(feature = "stylos")]
 pub(crate) async fn start_shared_runtime_services(
     app_state: &mut AppState,
@@ -2080,7 +2221,11 @@ pub(crate) async fn start_shared_runtime_services(
 ) -> anyhow::Result<()> {
     let shared_status_hub = crate::app_runtime::SharedStylosStatusHub::new();
     let mut stylos = start_stylos(app_state, Some(shared_status_hub.clone())).await?;
-    crate::app_runtime::wire_stylos_event_streams(&app_state.runtime_domains, &mut stylos, runtime_tx);
+    crate::app_runtime::wire_stylos_event_streams(
+        &app_state.runtime_domains,
+        &mut stylos,
+        runtime_tx,
+    );
     app_state.runtime.shared_status_hub = shared_status_hub;
     app_state.runtime.stylos_tool_bridge = crate::stylos::tool_bridge(&stylos);
     app_state.runtime.local_instance_id = match stylos.state() {
@@ -2097,7 +2242,6 @@ pub(crate) async fn start_shared_runtime_services(
     app_state.runtime.stylos = Some(stylos);
     Ok(())
 }
-
 
 #[cfg(feature = "stylos")]
 pub async fn start_stylos(
@@ -2116,7 +2260,15 @@ pub async fn start_stylos(
             #[cfg(feature = "stylos")]
             let shared_status_hub = shared_status_hub.clone();
             async move {
-                crate::stylos::start(&stylos_cfg, &session, &project_dir, db, network_domain, shared_status_hub).await
+                crate::stylos::start(
+                    &stylos_cfg,
+                    &session,
+                    &project_dir,
+                    db,
+                    network_domain,
+                    shared_status_hub,
+                )
+                .await
             }
         })
         .await
@@ -2281,7 +2433,10 @@ pub fn build_agent(
 
     #[cfg(feature = "stylos")]
     {
-        agent.set_stylos_tool_invoker(crate::app_runtime::stylos_tool_invoker(stylos_tool_bridge, local_agent_id));
+        agent.set_stylos_tool_invoker(crate::app_runtime::stylos_tool_invoker(
+            stylos_tool_bridge,
+            local_agent_id,
+        ));
         agent.set_local_instance_id(local_instance_id.map(str::to_string));
         agent.set_local_agent_id(Some(local_agent_id.to_string()));
     }

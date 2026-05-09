@@ -1,6 +1,5 @@
 use crate::db::{
-    CreateNoteArgs, DbHandle, NoteColumn, NoteKind, RecallArgs, RecallDirection,
-    SessionScope,
+    CreateNoteArgs, DbHandle, NoteColumn, NoteKind, RecallArgs, RecallDirection, SessionScope,
 };
 use crate::memory::{
     metadata_to_string, parse_hashtags_value, parse_nullable_string, CreateNodeArgs, HashtagMatch,
@@ -965,13 +964,12 @@ fn stylos_tool_definitions() -> Vec<Value> {
         stylos_tool("stylos_query_status", "Query one instance for current process and agent status.", json!({
             "type":"object","properties":{"instance":{"type":"string"},"agent_id":{"type":"string"},"role":{"type":"string"}},"required":["instance"]
         })),
-        stylos_tool("stylos_request_talk", "Send a user-style message to one instance. Valid known targets deliver now or queue in memory.", json!({
+        stylos_tool("stylos_send_message", "Send a short user-style message to one target agent. Valid known targets queue in the receiver volatile inbox.", json!({
             "type":"object","properties":{
                 "instance":{"type":"string","description":"Target instance in <hostname>:<pid> form."},
                 "to_agent_id":{"type":"string","description":"Target agent id. Default: master."},
                 "message":{"type":"string"},
-                "request_id":{"type":"string"},
-                "wait_for_idle_timeout_ms":{"type":"integer","description":"Optional bounded wait in ms before queue fallback."}
+                "request_id":{"type":"string"}
             },"required":["instance","message"]
         })),
         stylos_tool("stylos_request_task", "Submit a task request for local agent routing.", json!({
@@ -1400,18 +1398,21 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             let query = crate::memory::UnifiedSearchQuery {
                 query: args["query"].as_str().unwrap_or("").to_string(),
                 project_dir: Some(resolve_memory_project_dir(&args, ctx)),
-                source_kinds: args["source_kinds"].as_array().map(|values| {
-                    values
-                        .iter()
-                        .map(|value| {
-                            let raw = value
-                                .as_str()
-                                .ok_or_else(|| anyhow::anyhow!("source_kinds entries must be strings"))?;
-                            crate::memory::UnifiedSearchSourceKind::from_str(raw)
-                                .ok_or_else(|| anyhow::anyhow!("invalid source_kind: {raw}"))
-                        })
-                        .collect::<Result<Vec<_>, _>>()
-                }).transpose()?,
+                source_kinds: args["source_kinds"]
+                    .as_array()
+                    .map(|values| {
+                        values
+                            .iter()
+                            .map(|value| {
+                                let raw = value.as_str().ok_or_else(|| {
+                                    anyhow::anyhow!("source_kinds entries must be strings")
+                                })?;
+                                crate::memory::UnifiedSearchSourceKind::from_str(raw)
+                                    .ok_or_else(|| anyhow::anyhow!("invalid source_kind: {raw}"))
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .transpose()?,
                 mode: match args["mode"].as_str() {
                     Some(value) => Some(
                         UnifiedSearchMode::from_str(value)
@@ -1482,7 +1483,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
         | "stylos_query_agents_git"
         | "stylos_query_nodes"
         | "stylos_query_status"
-        | "stylos_request_talk"
+        | "stylos_send_message"
         | "stylos_request_task"
         | "stylos_query_task_status"
         | "stylos_query_task_result" => {

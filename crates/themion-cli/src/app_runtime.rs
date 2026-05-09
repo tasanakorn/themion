@@ -1825,7 +1825,7 @@ pub(crate) fn resolve_incoming_prompt_disposition(
         return IncomingPromptDisposition::MissingTarget {
             log_agent_id: Some(target.clone()),
             log_text: format!(
-                "Stylos hear from={} from_agent_id={} to={} to_agent_id={} rejected: target agent missing locally",
+                "Stylos incoming message from={} from_agent_id={} to={} to_agent_id={} rejected: target agent missing locally",
                 sender, sender_agent, target_instance, target_agent
             ),
             failed_task_id: request.task_id.clone(),
@@ -1844,7 +1844,7 @@ pub(crate) fn resolve_incoming_prompt_disposition(
             )
         } else {
             format!(
-                "Stylos hear from={} from_agent_id={} to={} to_agent_id={} rejected: local agent busy",
+                "Stylos incoming message from={} from_agent_id={} to={} to_agent_id={} rejected: local agent busy",
                 sender, sender_agent, target_instance, target_agent
             )
         };
@@ -1865,7 +1865,7 @@ pub(crate) fn resolve_incoming_prompt_disposition(
         )
     } else {
         format!(
-            "Stylos hear from={} from_agent_id={} to={} to_agent_id={}",
+            "Stylos incoming message from={} from_agent_id={} to={} to_agent_id={}",
             sender, sender_agent, target_instance, target_agent
         )
     };
@@ -1961,7 +1961,7 @@ pub(crate) fn resolve_submit_target(
                 )
             } else {
                 format!(
-                    "Stylos hear from={} from_agent_id={} to={} to_agent_id={} rejected: target agent missing locally",
+                    "Stylos incoming message from={} from_agent_id={} to={} to_agent_id={} rejected: target agent missing locally",
                     sender, sender_agent, target_instance, target_agent
                 )
             };

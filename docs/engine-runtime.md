@@ -232,7 +232,7 @@ In the current implementation:
 This means Stylos does not bypass the harness loop, call providers directly, or move history/tool execution into the transport layer. It only injects new work into the existing local input path.
 For durable board notes in TUI mode, `board_runtime.rs` is now the CLI-local coordination boundary for selecting the next pending note, claiming one note locally before handoff, mutating injected/completion state only after successful handoff, releasing local claims when a selected target loses the handoff race, and resolving post-turn follow-up into typed actions that the TUI displays or submits. This keeps the watchdog scheduler independent while preventing duplicate in-process injection of the same note across overlapping local-agent activity.
 
-Sender-side Stylos transport event derivation is also no longer a TUI transcript-inference path. The current implementation derives outbound talk and board-note transport events through explicit helper logic in `crates/themion-cli/src/stylos.rs`, and the TUI only renders the returned event line when present.
+Sender-side Stylos transport event derivation is also no longer a TUI transcript-inference path. The current implementation derives outbound message and board-note transport events through explicit helper logic in `crates/themion-cli/src/stylos.rs`, and the TUI only renders the returned event line when present.
 
 ## Snapshot-driven request decisions
 
@@ -241,12 +241,12 @@ The query layer makes best-effort decisions from the current local snapshot rath
 That includes:
 
 - `free` discovery using exported `activity_status`
-- `talk` acceptance requiring the requested agent to be present; if immediate prompt admission is unavailable, valid talk queues in memory unless that target queue is full
-- `talk` busy-peer waiting polling the exported snapshot until the target becomes available or the timeout expires
+- `stylos_send_message` acceptance requiring the requested agent to be present; valid messages queue in the receiver's volatile inbox unless that target inbox is full
+- message inbox delivery happens through the runtime/watchdog drain path; the send-message query handler does not inject peer-message prompts directly
 - `tasks/request` candidate selection using the exported agent list, role metadata, git-repo metadata, and current activity state
 - Zenoh-level `stylos_query_nodes` using `session.info()` from the active local Stylos session rather than Themion mesh queryables
 
-Because those checks are snapshot-based, they can race with local activity changes. The runtime reports the chosen agent honestly and may queue talk later if the selected local execution path is no longer available by the time the request reaches the event loop.
+Because those checks are snapshot-based, they can race with local activity changes. The runtime reports the chosen agent honestly and leaves accepted peer messages in the inbox until the watchdog/runtime drain path can hand them to the local agent.
 
 ## In-memory task lifecycle tracking
 
@@ -273,17 +273,16 @@ That means:
 - the query layer still relies on snapshot-based selection and a CLI-local in-process bridge rather than a durable scheduler
 - this preserves the current harness architecture while still making the query and task surface useful for discovery, request submission, and best-effort status lookup
 
-## Sender-aware talk prompt injection
+## Sender-aware message prompt injection
 
-Stylos `talk` now resolves sender identity automatically and carries exact instance identifiers through the CLI-local bridge:
+Stylos `message` delivery resolves sender identity automatically and carries exact instance identifiers through the CLI-local bridge:
 
 - sender-side local instance `from` resolved automatically as exact `<hostname>:<pid>`
 - mandatory target `to` in exact `<hostname>:<pid>` form
 - optional `to_agent_id` on the request input, defaulting to `master`
 - optional `request_id`
-- optional `wait_for_idle_timeout_ms`; if the wait expires and immediate admission is still unavailable, valid talk falls back to the in-memory queue
 
-When a `talk` request is accepted, the CLI does not inject the raw message directly. Instead it wraps the message in a peer-message prompt that tells the receiving agent:
+When a message request is accepted, the CLI does not inject the raw message directly. Instead it wraps the message in a peer-message prompt that tells the receiving agent:
 
 - who sent the message
 - which local agent received it
@@ -293,9 +292,9 @@ When a `talk` request is accepted, the CLI does not inject the raw message direc
 
 This keeps sender identity and reply guidance visible to the model in the harness prompt path rather than hidden only in transport metadata.
 
-When the local agent invokes `stylos_request_talk` and the request is accepted, the sender-side chat-panel event line is now derived by explicit helper logic in `crates/themion-cli/src/stylos.rs` rather than by TUI transcript backtracking:
+When the local agent invokes `stylos_send_message` and the request is accepted, the sender-side chat-panel event line is now derived by explicit helper logic in `crates/themion-cli/src/stylos.rs` rather than by TUI transcript backtracking:
 
-- `Stylos talk to=<hostname>:<pid> from=<hostname>:<pid>`
+- `Stylos message to=<hostname>:<pid> from=<hostname>:<pid>`
 
 This sender-side log remains distinct from generic tool-call text and is intended to make outbound peer messaging visible in the chat transcript.
 

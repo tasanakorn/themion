@@ -780,7 +780,7 @@ mod tests {
             agent_id: Some("smith-2".to_string()),
             tool_call_id: None,
             source: Some("stylos".to_string()),
-            text: "Stylos hear".to_string(),
+            text: "Stylos incoming message".to_string(),
             detail: None,
             reason: None,
             stats: None,

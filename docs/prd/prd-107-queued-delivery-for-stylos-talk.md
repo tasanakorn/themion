@@ -221,6 +221,8 @@ If the message body is shown, it should appear only through the same transcript 
 
 Implemented in v0.66.0. The landed slice removes the non-idle rejection guard, adds a process-local FIFO queue per target agent with a 16 message limit and 10 minute TTL, extends `TalkReply` with delivery state/correlation/queue position fields, and drains queued talk through the normal incoming-prompt path when admission becomes available. A follow-up in the same version also handles the admission race where a target appears idle to Stylos but becomes busy before prompt intake: peer-message intake now requeues instead of emitting `rejected: local agent busy`.
 
+PRD-109 later renames this public surface from talk to message/inbox terminology and removes the wait-for-idle option. Treat this PRD as the historical contract for the queued-delivery behavior that first shipped under the old `talk` names.
+
 ## Migration
 
 This is a backward-compatible behavior change for valid `stylos_request_talk` calls.

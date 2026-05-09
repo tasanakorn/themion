@@ -1,5 +1,12 @@
 use crate::app_runtime::{LocalAgentManagementRequest, RuntimeCommand};
-use crate::app_state::{activity_status_value, on_tick as app_state_on_tick, publish_runtime_snapshot as app_state_publish_runtime_snapshot, push_recent_runtime_event as app_state_push_recent_runtime_event, truncate_recent_event_text as app_state_truncate_recent_event_text, AppRuntimeState, set_agent_activity as app_state_set_agent_activity, AgentActivity, AppSnapshot};
+use crate::app_state::{
+    activity_status_value, on_tick as app_state_on_tick,
+    publish_runtime_snapshot as app_state_publish_runtime_snapshot,
+    push_recent_runtime_event as app_state_push_recent_runtime_event,
+    set_agent_activity as app_state_set_agent_activity,
+    truncate_recent_event_text as app_state_truncate_recent_event_text, AgentActivity,
+    AppRuntimeState, AppSnapshot,
+};
 use crate::chat_composer::{ChatComposer, InputAction};
 use crate::runtime_domains::DomainHandle;
 #[cfg(feature = "stylos")]
@@ -65,21 +72,28 @@ fn config_help_lines() -> Vec<String> {
         "  /config profile show                 show active saved profile".to_string(),
         "  /config profile create <name>        create from current settings".to_string(),
         "  /config profile clone <source> <dest> clone a saved profile".to_string(),
-        "  /config profile delete <name>        delete a saved profile (not active/default)".to_string(),
+        "  /config profile delete <name>        delete a saved profile (not active/default)"
+            .to_string(),
         "  /config profile use <name>           switch profile and save to config".to_string(),
-        "  /config profile set provider=<value> set provider on the active saved profile".to_string(),
+        "  /config profile set provider=<value> set provider on the active saved profile"
+            .to_string(),
         "  /config profile set model=<value>    set model on the active saved profile".to_string(),
-        "  /config profile set endpoint=<value> set endpoint on the active saved profile".to_string(),
-        "  /config profile set api_key=<value>  set api_key on the active saved profile".to_string(),
+        "  /config profile set endpoint=<value> set endpoint on the active saved profile"
+            .to_string(),
+        "  /config profile set api_key=<value>  set api_key on the active saved profile"
+            .to_string(),
     ]
 }
 
 fn session_help_lines() -> Vec<String> {
     vec![
         "commands:".to_string(),
-        "  /session profile show                show configured vs effective session runtime state".to_string(),
-        "  /session profile use <name>          temporarily switch profile for this session only".to_string(),
-        "  /session profile set model=<value>   temporarily override model for this session only".to_string(),
+        "  /session profile show                show configured vs effective session runtime state"
+            .to_string(),
+        "  /session profile use <name>          temporarily switch profile for this session only"
+            .to_string(),
+        "  /session profile set model=<value>   temporarily override model for this session only"
+            .to_string(),
         "  /session profile reset               clear temporary session-only overrides".to_string(),
     ]
 }
@@ -480,9 +494,9 @@ pub(crate) fn split_tool_call_detail(name: &str, args_json: &str) -> (String, Op
         "workflow_complete" | "complete_workflow" => {
             (format!("workflow: complete {}", t("outcome")), None)
         }
-        "stylos_request_talk" => (
+        "stylos_send_message" => (
             format!(
-                "stylos_request_talk instance={} to_agent_id={}",
+                "stylos_send_message instance={} to_agent_id={}",
                 t("instance"),
                 center_trim(
                     args["to_agent_id"]
@@ -580,8 +594,6 @@ pub(crate) fn split_tool_call_detail(name: &str, args_json: &str) -> (String, Op
         other => (other.to_string(), None),
     }
 }
-
-
 
 pub struct AgentHandle {
     pub(crate) agent: Option<Agent>,
@@ -686,7 +698,6 @@ impl FrameScheduler {
         }
     }
 }
-
 
 #[derive(Clone, Copy)]
 struct ActivityCountersSnapshot {
@@ -823,10 +834,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(
-        runtime: AppRuntimeState,
-        initial_snapshot: AppSnapshot,
-    ) -> Self {
+    pub fn new(runtime: AppRuntimeState, initial_snapshot: AppSnapshot) -> Self {
         let art = concat!(
             "████████╗██╗  ██╗███████╗███╗   ███╗██╗ ██████╗ ███╗   ██╗\n",
             "╚══██╔══╝██║  ██║██╔════╝████╗ ████║██║██╔═══██╗████╗  ██║\n",
@@ -847,7 +855,11 @@ impl App {
                     "version: {}  |  hash: {}  |  dirty: {}  |  profile: {}  |  model: {}",
                     crate::build_info::APP_VERSION,
                     crate::build_info::APP_VERSION_HASH,
-                    if crate::build_info::app_version_dirty() { "true" } else { "false" },
+                    if crate::build_info::app_version_dirty() {
+                        "true"
+                    } else {
+                        "false"
+                    },
                     runtime.session.active_profile,
                     runtime.session.model
                 ),
@@ -885,8 +897,6 @@ impl App {
         app_state_publish_runtime_snapshot(&mut app);
         app
     }
-
-
 
     pub(crate) fn any_agent_busy(&self) -> bool {
         crate::app_state::runtime_any_agent_busy(&self.runtime)
@@ -934,8 +944,6 @@ impl App {
         app_state_set_agent_activity(self, activity);
     }
 
-
-
     fn request_interrupt(&mut self) {
         crate::app_state::runtime_request_interrupt(self);
     }
@@ -961,7 +969,10 @@ impl App {
         let previous = self.runtime.pending.clone();
         self.anim_frame = self.anim_frame.wrapping_add(1);
         if self.runtime.agent_busy && self.runtime.pending.is_some() {
-            self.runtime.pending = Some(crate::app_state::runtime_pending_str(&self.runtime, self.anim_frame));
+            self.runtime.pending = Some(crate::app_state::runtime_pending_str(
+                &self.runtime,
+                self.anim_frame,
+            ));
         }
         if self.runtime.pending != previous {
             self.mark_dirty_status();
@@ -1006,8 +1017,6 @@ impl App {
         self.request_draw(frame_requester);
     }
 
-
-
     pub(crate) fn push(&mut self, entry: Entry) {
         if let Some((kind, text)) = runtime_recent_event_from_entry(&entry) {
             app_state_push_recent_runtime_event(
@@ -1032,7 +1041,6 @@ impl App {
             self.runtime.stream_chars,
         )
     }
-
 
     fn current_runtime_snapshot(&self) -> RuntimeMetricsSnapshot {
         RuntimeMetricsSnapshot {
@@ -1080,7 +1088,8 @@ impl App {
             "app busy={} activity={} session={} project={}",
             self.runtime.agent_busy,
             self.activity_status_value(),
-            self.runtime.agents
+            self.runtime
+                .agents
                 .first()
                 .map(|h| h.session_id.to_string())
                 .unwrap_or_else(|| "unknown".to_string()),
@@ -1154,8 +1163,6 @@ impl App {
         }
         out
     }
-
-
 
     fn handle_command(
         &mut self,
@@ -1241,10 +1248,9 @@ impl App {
                 ];
             }
             app_tx
-                .send(AppEvent::RuntimeCommand(RuntimeCommand::UnifiedSearchIndex {
-                    full,
-                    source_kind,
-                }))
+                .send(AppEvent::RuntimeCommand(
+                    RuntimeCommand::UnifiedSearchIndex { full, source_kind },
+                ))
                 .ok();
             return out;
         }
@@ -1272,18 +1278,22 @@ impl App {
                 }
                 ["profile", "use", name] => {
                     app_tx
-                        .send(AppEvent::RuntimeCommand(RuntimeCommand::SessionProfileUse {
-                            name: (*name).to_string(),
-                        }))
+                        .send(AppEvent::RuntimeCommand(
+                            RuntimeCommand::SessionProfileUse {
+                                name: (*name).to_string(),
+                            },
+                        ))
                         .ok();
                 }
                 ["profile", "set", kv] => {
                     if let Some((key, val)) = kv.split_once('=') {
                         app_tx
-                            .send(AppEvent::RuntimeCommand(RuntimeCommand::SessionProfileSet {
-                                key: key.to_string(),
-                                value: val.to_string(),
-                            }))
+                            .send(AppEvent::RuntimeCommand(
+                                RuntimeCommand::SessionProfileSet {
+                                    key: key.to_string(),
+                                    value: val.to_string(),
+                                },
+                            ))
                             .ok();
                     } else {
                         out.push("usage: /session profile set model=<value>".to_string());
@@ -1291,7 +1301,9 @@ impl App {
                 }
                 ["profile", "reset"] => {
                     app_tx
-                        .send(AppEvent::RuntimeCommand(RuntimeCommand::SessionProfileReset))
+                        .send(AppEvent::RuntimeCommand(
+                            RuntimeCommand::SessionProfileReset,
+                        ))
                         .ok();
                 }
                 ["show"] => {
@@ -1315,31 +1327,41 @@ impl App {
             let parts: Vec<&str> = rest.splitn(4, ' ').collect();
             match parts.as_slice() {
                 ["profile"] | ["profile", "list"] => {
-                    out.extend(crate::app_state::config_profile_list_lines(&self.runtime.session));
+                    out.extend(crate::app_state::config_profile_list_lines(
+                        &self.runtime.session,
+                    ));
                 }
                 ["profile", "show"] => {
-                    out.extend(crate::app_state::session_config_lines(&self.runtime.session));
+                    out.extend(crate::app_state::session_config_lines(
+                        &self.runtime.session,
+                    ));
                 }
                 ["profile", "create", name] => {
                     app_tx
-                        .send(AppEvent::RuntimeCommand(RuntimeCommand::ConfigProfileCreate {
-                            name: (*name).to_string(),
-                        }))
+                        .send(AppEvent::RuntimeCommand(
+                            RuntimeCommand::ConfigProfileCreate {
+                                name: (*name).to_string(),
+                            },
+                        ))
                         .ok();
                 }
                 ["profile", "clone", source, dest] => {
                     app_tx
-                        .send(AppEvent::RuntimeCommand(RuntimeCommand::ConfigProfileClone {
-                            source: (*source).to_string(),
-                            dest: (*dest).to_string(),
-                        }))
+                        .send(AppEvent::RuntimeCommand(
+                            RuntimeCommand::ConfigProfileClone {
+                                source: (*source).to_string(),
+                                dest: (*dest).to_string(),
+                            },
+                        ))
                         .ok();
                 }
                 ["profile", "delete", name] => {
                     app_tx
-                        .send(AppEvent::RuntimeCommand(RuntimeCommand::ConfigProfileDelete {
-                            name: (*name).to_string(),
-                        }))
+                        .send(AppEvent::RuntimeCommand(
+                            RuntimeCommand::ConfigProfileDelete {
+                                name: (*name).to_string(),
+                            },
+                        ))
                         .ok();
                 }
                 ["profile", "use", name] => {
@@ -1366,10 +1388,7 @@ impl App {
             return out;
         }
 
-        out.push(format!(
-            "unknown command '{}'.  try /help",
-            input
-        ));
+        out.push(format!("unknown command '{}'.  try /help", input));
         out
     }
 
@@ -1438,8 +1457,6 @@ impl App {
         }
     }
 
-
-
     pub(crate) fn submit_text(&mut self, text: String, app_tx: &mpsc::UnboundedSender<AppEvent>) {
         let text = text.trim().to_string();
         if text.is_empty() {
@@ -1460,7 +1477,10 @@ impl App {
 
         if text.starts_with('/') {
             let output = self.handle_command(&text, app_tx);
-            self.push(Entry::User { agent_id: None, text });
+            self.push(Entry::User {
+                agent_id: None,
+                text,
+            });
             for line in output {
                 self.push(Entry::Assistant {
                     agent_id: None,
@@ -1572,17 +1592,27 @@ impl App {
             } => {
                 self.handle_login_prompt_event(user_code, verification_uri, frame_requester);
             }
-            AppEvent::LoginComplete { profile_name, auth_result } => {
-                crate::app_state::handle_login_complete_event(self, profile_name, auth_result, frame_requester)
-                    .await;
+            AppEvent::LoginComplete {
+                profile_name,
+                auth_result,
+            } => {
+                crate::app_state::handle_login_complete_event(
+                    self,
+                    profile_name,
+                    auth_result,
+                    frame_requester,
+                )
+                .await;
             }
             AppEvent::LocalAgentManagement(request) => {
-                crate::app_state::handle_local_agent_management_request(self, request, frame_requester);
+                crate::app_state::handle_local_agent_management_request(
+                    self,
+                    request,
+                    frame_requester,
+                );
             }
         }
     }
-
-
 
     pub(crate) fn handle_draw_event(
         &mut self,
@@ -1594,7 +1624,8 @@ impl App {
             let draw_us = draw_started.elapsed().as_micros() as u64;
             self.runtime.activity_counters.draw_count += 1;
             self.runtime.activity_counters.draw_total_us += draw_us;
-            self.runtime.activity_counters.draw_max_us = self.runtime.activity_counters.draw_max_us.max(draw_us);
+            self.runtime.activity_counters.draw_max_us =
+                self.runtime.activity_counters.draw_max_us.max(draw_us);
             self.dirty.clear();
         } else {
             self.runtime.activity_counters.draw_skip_clean_count += 1;
@@ -1675,8 +1706,6 @@ impl App {
         }
     }
 }
-
-
 
 fn format_human_count(n: u64) -> String {
     if n >= 1_000_000 {
@@ -1810,7 +1839,11 @@ fn build_lines<'a>(
                 }
             }
             #[cfg(feature = "stylos")]
-            Entry::RemoteEvent { agent_id, source, text } => {
+            Entry::RemoteEvent {
+                agent_id,
+                source,
+                text,
+            } => {
                 let mut spans = if let Some(agent_id) = agent_id.as_deref() {
                     agent_tag_spans(Some(agent_id), agents)
                 } else {
@@ -1854,7 +1887,11 @@ fn build_lines<'a>(
                     lines.push(Line::from(spans));
                 }
             }
-            Entry::Status { agent_id, source, text } => {
+            Entry::Status {
+                agent_id,
+                source,
+                text,
+            } => {
                 let mut spans = if let Some(agent_id) = agent_id.as_deref() {
                     agent_tag_spans(Some(agent_id), agents)
                 } else {
@@ -1933,7 +1970,11 @@ fn watchdog_review_area(area: Rect, line_count: usize) -> Rect {
     let width = area.width.saturating_mul(78).saturating_div(100).max(40);
     let desired_height = (line_count as u16).saturating_add(2);
     let min_height = 10u16;
-    let max_height = area.height.saturating_mul(60).saturating_div(100).max(min_height);
+    let max_height = area
+        .height
+        .saturating_mul(60)
+        .saturating_div(100)
+        .max(min_height);
     let height = desired_height.clamp(min_height, max_height);
     Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
@@ -2022,7 +2063,8 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
     }
 
     let project_leaf = app
-        .runtime.project_dir
+        .runtime
+        .project_dir
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("/");
@@ -2071,7 +2113,10 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
         format_human_count(app.runtime.session_tokens.tokens_in),
         format_human_count(app.runtime.session_tokens.tokens_out),
         format_human_count(app.runtime.session_tokens.tokens_cached),
-        build_context_statusline(app.runtime.last_ctx_tokens, app.runtime.status_model_info.as_ref()),
+        build_context_statusline(
+            app.runtime.last_ctx_tokens,
+            app.runtime.status_model_info.as_ref()
+        ),
     );
     f.render_widget(Clear, chunks[2]);
     f.render_widget(
@@ -2087,7 +2132,10 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
 
     if app.review_mode == ReviewMode::Transcript || app.review_mode == ReviewMode::Watchdog {
         let (title, review_lines) = match app.review_mode {
-            ReviewMode::Transcript => (" Transcript review ", build_lines(&app.entries, &None, &app.runtime.agents)),
+            ReviewMode::Transcript => (
+                " Transcript review ",
+                build_lines(&app.entries, &None, &app.runtime.agents),
+            ),
             ReviewMode::Watchdog => (" Watchdog & agents ", build_watchdog_review_lines(app)),
             ReviewMode::Closed => unreachable!(),
         };
@@ -2162,7 +2210,6 @@ pub(crate) fn current_total_and_height(
     (para.line_count(area.width.max(1)), height)
 }
 
-
 fn build_watchdog_review_lines(app: &App) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let snapshot = app.snapshot_hub.current();
@@ -2175,7 +2222,9 @@ fn build_watchdog_review_lines(app: &App) -> Vec<Line<'static>> {
             .unwrap_or_else(|| "off".to_string());
         lines.push(Line::from(vec![Span::styled(
             "watchdog",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )]));
         lines.push(Line::from(format!("stylos: {}", stylos_state)));
         lines.push(Line::from(format!(
@@ -2194,7 +2243,9 @@ fn build_watchdog_review_lines(app: &App) -> Vec<Line<'static>> {
     }
     lines.push(Line::from(vec![Span::styled(
         "local agents",
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
     )]));
     for agent in &snapshot.local_agents {
         let roles = if agent.roles.is_empty() {
@@ -2208,7 +2259,9 @@ fn build_watchdog_review_lines(app: &App) -> Vec<Line<'static>> {
         )));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from("Ctrl-t transcript review  Ctrl-w watchdog  Esc close"));
+    lines.push(Line::from(
+        "Ctrl-t transcript review  Ctrl-w watchdog  Esc close",
+    ));
     lines
 }
 
@@ -2360,14 +2413,14 @@ mod tests {
     }
 
     #[test]
-    fn sender_side_stylos_talk_log_format_is_exact() {
+    fn sender_side_stylos_message_log_format_is_exact() {
         let event = crate::stylos::sender_side_transport_event_from_tool_detail(
-            "stylos_request_talk instance=node-2:77 to_agent_id=master",
+            "stylos_send_message instance=node-2:77 to_agent_id=master",
             "node-1:42",
             true,
         )
         .unwrap();
-        assert_eq!(event.text, "Stylos talk to=node-2:77 from=node-1:42");
+        assert_eq!(event.text, "Stylos message to=node-2:77 from=node-1:42");
         assert!(!event.text.contains('/'));
     }
 }
@@ -2459,7 +2512,9 @@ fn format_runtime_lifetime_lines(counters: &ActivityCountersSnapshot) -> Vec<Str
 }
 
 #[cfg(feature = "stylos")]
-fn format_stylos_activity_lines(snapshot: crate::app_runtime::StylosActivitySnapshot) -> Vec<String> {
+fn format_stylos_activity_lines(
+    snapshot: crate::app_runtime::StylosActivitySnapshot,
+) -> Vec<String> {
     vec![
         format!(
             "  status_publish count={} avg={} max={}",
