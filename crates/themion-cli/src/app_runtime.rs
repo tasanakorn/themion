@@ -402,7 +402,8 @@ pub(crate) fn wire_stylos_event_streams(
 
 pub(crate) struct AppSnapshotBuildState<'a> {
     pub agents: &'a [crate::tui::AgentHandle],
-    pub agent_activity_by_session: &'a std::collections::HashMap<Uuid, crate::app_state::AgentActivity>,
+    pub agent_activity_by_session:
+        &'a std::collections::HashMap<Uuid, crate::app_state::AgentActivity>,
     pub agent_activity_changed_at_by_session: &'a std::collections::HashMap<Uuid, u64>,
     #[cfg(feature = "stylos")]
     pub incoming_prompts: &'a IncomingPromptState,
@@ -567,7 +568,8 @@ pub(crate) struct AppRuntimeObserverPublishState<'a> {
 pub(crate) struct AppRuntimeSnapshotPublishState<'a> {
     pub agent_busy: bool,
     pub activity_status: String,
-    pub agent_activity_by_session: &'a std::collections::HashMap<Uuid, crate::app_state::AgentActivity>,
+    pub agent_activity_by_session:
+        &'a std::collections::HashMap<Uuid, crate::app_state::AgentActivity>,
     pub agent_activity_changed_at_by_session: &'a std::collections::HashMap<Uuid, u64>,
     #[cfg(feature = "stylos")]
     pub stylos_status: Option<String>,
@@ -584,7 +586,10 @@ impl<'a> AppRuntimeSnapshotPublishState<'a> {
     pub(crate) fn new(
         agent_busy: bool,
         activity_status: String,
-        agent_activity_by_session: &'a std::collections::HashMap<Uuid, crate::app_state::AgentActivity>,
+        agent_activity_by_session: &'a std::collections::HashMap<
+            Uuid,
+            crate::app_state::AgentActivity,
+        >,
         agent_activity_changed_at_by_session: &'a std::collections::HashMap<Uuid, u64>,
     ) -> Self {
         Self {

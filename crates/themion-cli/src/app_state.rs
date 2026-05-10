@@ -772,7 +772,9 @@ pub(crate) fn clear_agent_activity(app: &mut App) {
 
 pub(crate) fn clear_agent_activity_for_session(app: &mut App, sid: Uuid) {
     app.runtime.agent_activity_by_session.remove(&sid);
-    app.runtime.agent_activity_changed_at_by_session.remove(&sid);
+    app.runtime
+        .agent_activity_changed_at_by_session
+        .remove(&sid);
     if sid == app.runtime.session_id {
         app.runtime.agent_activity = None;
         app.runtime.agent_activity_changed_at = None;
@@ -1246,7 +1248,9 @@ pub(crate) fn publish_runtime_snapshot(app: &mut App) {
                         agent_busy: app.runtime.agent_busy,
                         activity_status: activity_status.clone(),
                         agent_activity_by_session: &app.runtime.agent_activity_by_session,
-                        agent_activity_changed_at_by_session: &app.runtime.agent_activity_changed_at_by_session,
+                        agent_activity_changed_at_by_session: &app
+                            .runtime
+                            .agent_activity_changed_at_by_session,
                         stylos_status: Some(stylos_status),
                         watchdog_state: &app.runtime.watchdog_state,
                         incoming_prompts: &app.runtime.incoming_prompts,
