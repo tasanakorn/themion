@@ -1133,6 +1133,10 @@ async fn process_codex_sse_response(
                             }
                             "response.completed" => {
                                 let completion_meta = parse_completion_meta(&data);
+                                state.record_notice(
+                                    "codex stream: response.completed".to_string(),
+                                    on_status,
+                                );
                                 state.usage = combine_usage(
                                     state.usage.take(),
                                     completion_meta.usage.clone(),
