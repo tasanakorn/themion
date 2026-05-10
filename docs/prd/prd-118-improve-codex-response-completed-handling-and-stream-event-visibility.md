@@ -157,10 +157,13 @@ The initial known-ignored set for this PRD is:
 - `ModelVerifications`
 - `ServerReasoningIncluded`
 - `ModelsEtag`
-
-The following events are not part of the initial known-ignored set because they may reflect behavior that is still worth noticing during integration work:
-
 - `response.output_item.done`
+- `response.content_part.done`
+- `response.output_text.done`
+- `response.content_part.added`
+
+The following events are not part of the initial known-ignored set because they may still reflect behavior that is worth noticing during integration work:
+
 - `ReasoningSummaryPartAdded`
 - `ReasoningSummaryDelta`
 - `ReasoningContentDelta`
@@ -233,8 +236,7 @@ Patch scope is appropriate if the change stays within the existing provider/back
 - simulate or unit-test `response.completed` with `end_turn=false` followed by additional usage data → verify: usage is accumulated into one combined logical provider turn result.
 - simulate or unit-test `response.completed` with `end_turn=false` followed by continuation failure → verify: the client emits exactly one `codex stream: completed end_turn=false continuation=failed` notice and stops safely.
 - simulate or unit-test `response.completed` without `end_turn` → verify: fallback behavior matches the documented rule.
-- stream `response.output_item.done` → verify: it produces exactly one `codex stream: unhandled event=response.output_item.done` notice per provider turn.
-- stream repeated known-ignored metadata events such as `Created` or `ServerModel` → verify: transcript output stays silent.
+- stream repeated known-ignored events such as `Created`, `response.output_item.done`, or `response.content_part.added` → verify: transcript output stays silent.
 - stream a reasoning event such as `ReasoningSummaryDelta` → verify: transcript shows exactly one `codex stream: unhandled event=<event_name>` notice for that event name in that turn.
 - stream a fabricated unknown Codex event name → verify: transcript shows exactly one `codex stream: unhandled event=<event_name>` notice for that event name in that turn.
 - run a normal Codex text-only response → verify: assistant text streaming still works.
