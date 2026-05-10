@@ -3,11 +3,12 @@ use leptos::html::Div;
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{Event, MessageEvent, WebSocket};
+use web_sys::{CloseEvent, ErrorEvent, Event, MessageEvent, WebSocket};
 
 #[derive(Clone, Debug, Default, Deserialize)]
 struct WebStatusResponse {
@@ -108,27 +109,401 @@ struct WebSocketEnvelope {
     payload: serde_json::Value,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct SubscriptionTarget {
+    domain: String,
+    target_id: String,
+}
+
+impl SubscriptionTarget {
+    fn new(domain: impl Into<String>, target_id: impl Into<String>) -> Self {
+        Self {
+            domain: domain.into(),
+            target_id: target_id.into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SocketLifecycleState {
+    Connecting,
+    Open,
+    Reconnecting,
+    Closed,
+}
+
+impl SocketLifecycleState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Connecting => "connecting",
+            Self::Open => "open",
+            Self::Reconnecting => "reconnecting",
+            Self::Closed => "closed",
+        }
+    }
+}
+
 #[derive(Clone)]
 struct SharedSocket {
-    socket: Rc<WebSocket>,
-    seq: Rc<RefCell<u64>>,
+    inner: Rc<RefCell<SocketControllerState>>,
+}
+
+struct SocketControllerState {
+    ws_url: String,
+    socket: Option<Rc<WebSocket>>,
+    seq: u64,
+    generation: u64,
+    retry_attempt: u32,
+    reconnect_timer_id: Option<i32>,
+    allow_reconnect: bool,
+    lifecycle_state: SocketLifecycleState,
+    subscriptions: BTreeSet<SubscriptionTarget>,
+    socket_state: RwSignal<String>,
+    agent_stream: RwSignal<Vec<String>>,
+    shell_stream: RwSignal<Vec<String>>,
+    status: RwSignal<Option<WebStatusResponse>>,
+    transcript: RwSignal<Option<WebTranscriptResponse>>,
+    agents: RwSignal<Option<WebAgentsResponse>>,
 }
 
 impl SharedSocket {
-    fn send(&self, kind: &str, domain: &str, target_id: &str, payload: serde_json::Value) {
-        let mut seq = self.seq.borrow_mut();
-        let envelope = WebSocketEnvelope {
-            kind: kind.to_string(),
-            domain: domain.to_string(),
-            target_id: target_id.to_string(),
-            sequence_id: Some(*seq),
-            request_id: Some(format!("req-{}", *seq)),
-            payload,
+    fn new(
+        socket_state: RwSignal<String>,
+        agent_stream: RwSignal<Vec<String>>,
+        shell_stream: RwSignal<Vec<String>>,
+        status: RwSignal<Option<WebStatusResponse>>,
+        transcript: RwSignal<Option<WebTranscriptResponse>>,
+        agents: RwSignal<Option<WebAgentsResponse>>,
+    ) -> Self {
+        let location = web_sys::window().expect("window").location();
+        let protocol = match location.protocol().ok().as_deref() {
+            Some("https:") => "wss:",
+            _ => "ws:",
         };
-        *seq += 1;
-        let _ = self
-            .socket
-            .send_with_str(&serde_json::to_string(&envelope).unwrap_or_default());
+        let host = location
+            .host()
+            .unwrap_or_else(|_| "127.0.0.1:8420".to_string());
+        let state = SocketControllerState {
+            ws_url: format!("{protocol}//{host}/api/ws"),
+            socket: None,
+            seq: 1,
+            generation: 0,
+            retry_attempt: 0,
+            reconnect_timer_id: None,
+            allow_reconnect: true,
+            lifecycle_state: SocketLifecycleState::Connecting,
+            subscriptions: BTreeSet::new(),
+            socket_state,
+            agent_stream,
+            shell_stream,
+            status,
+            transcript,
+            agents,
+        };
+        let shared = Self {
+            inner: Rc::new(RefCell::new(state)),
+        };
+        shared.update_socket_state(SocketLifecycleState::Connecting);
+        shared.connect();
+        shared
+    }
+
+    fn send(&self, kind: &str, domain: &str, target_id: &str, payload: serde_json::Value) -> bool {
+        let envelope = {
+            let mut state = self.inner.borrow_mut();
+            if kind == "subscribe" {
+                state
+                    .subscriptions
+                    .insert(SubscriptionTarget::new(domain, target_id));
+            } else if kind == "unsubscribe" {
+                state
+                    .subscriptions
+                    .remove(&SubscriptionTarget::new(domain, target_id));
+            }
+            if !matches!(state.lifecycle_state, SocketLifecycleState::Open) {
+                return false;
+            }
+            let sequence_id = state.seq;
+            state.seq += 1;
+            WebSocketEnvelope {
+                kind: kind.to_string(),
+                domain: domain.to_string(),
+                target_id: target_id.to_string(),
+                sequence_id: Some(sequence_id),
+                request_id: Some(format!("req-{sequence_id}")),
+                payload,
+            }
+        };
+
+        self.send_envelope(envelope)
+    }
+
+    fn connect(&self) {
+        let (url, generation) = {
+            let mut state = self.inner.borrow_mut();
+            state.generation += 1;
+            let generation = state.generation;
+            state.socket = None;
+            (state.ws_url.clone(), generation)
+        };
+
+        let ws = match WebSocket::new(&url) {
+            Ok(ws) => Rc::new(ws),
+            Err(_) => {
+                self.handle_connect_failure(generation);
+                return;
+            }
+        };
+        ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
+
+        self.install_handlers(ws.clone(), generation);
+
+        let mut state = self.inner.borrow_mut();
+        state.socket = Some(ws);
+    }
+
+    fn install_handlers(&self, ws: Rc<WebSocket>, generation: u64) {
+        let onopen = Closure::<dyn FnMut(Event)>::new({
+            let shared = self.clone();
+            move |_| shared.handle_open(generation)
+        });
+        ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
+        onopen.forget();
+
+        let onclose = Closure::<dyn FnMut(CloseEvent)>::new({
+            let shared = self.clone();
+            move |_| shared.handle_close(generation)
+        });
+        ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
+        onclose.forget();
+
+        let onerror = Closure::<dyn FnMut(ErrorEvent)>::new({
+            let shared = self.clone();
+            move |_| shared.handle_error(generation)
+        });
+        ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+        onerror.forget();
+
+        let onmessage = Closure::<dyn FnMut(MessageEvent)>::new({
+            let shared = self.clone();
+            move |event: MessageEvent| shared.handle_message(generation, event)
+        });
+        ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+        onmessage.forget();
+    }
+
+    fn handle_open(&self, generation: u64) {
+        if !self.is_generation_current(generation) {
+            return;
+        }
+        {
+            let mut state = self.inner.borrow_mut();
+            state.retry_attempt = 0;
+        }
+        self.clear_reconnect_timer();
+        self.update_socket_state(SocketLifecycleState::Open);
+        self.resubscribe_all();
+        self.refresh_snapshots();
+    }
+
+    fn handle_close(&self, generation: u64) {
+        if !self.is_generation_current(generation) {
+            return;
+        }
+        self.schedule_reconnect();
+    }
+
+    fn handle_error(&self, generation: u64) {
+        if !self.is_generation_current(generation) {
+            return;
+        }
+        self.schedule_reconnect();
+    }
+
+    fn handle_connect_failure(&self, generation: u64) {
+        if !self.is_generation_current(generation) {
+            return;
+        }
+        self.schedule_reconnect();
+    }
+
+    fn handle_message(&self, generation: u64, event: MessageEvent) {
+        if !self.is_generation_current(generation) {
+            return;
+        }
+        let Some(text) = event.data().as_string() else {
+            return;
+        };
+        let Ok(envelope) = serde_json::from_str::<WebSocketEnvelope>(&text) else {
+            return;
+        };
+        let line = format!(
+            "seq={:?} target={} payload={}",
+            envelope.sequence_id, envelope.target_id, envelope.payload
+        );
+        let refresh_transcript = matches!(envelope.domain.as_str(), "agent" | "runtime");
+        let refresh_agents = envelope.domain == "runtime";
+        let (agent_stream, shell_stream, status_signal, transcript_signal, agents_signal) = {
+            let state = self.inner.borrow();
+            (
+                state.agent_stream,
+                state.shell_stream,
+                state.status,
+                state.transcript,
+                state.agents,
+            )
+        };
+
+        match envelope.domain.as_str() {
+            "agent" => agent_stream.update(|lines| lines.push(line)),
+            "terminal" => shell_stream.update(|lines| lines.push(line)),
+            "runtime" if envelope.target_id == "status" => {
+                if let Ok(payload) = serde_json::from_value::<WebStatusResponse>(envelope.payload.clone()) {
+                    status_signal.set(Some(payload));
+                }
+            }
+            _ => {}
+        }
+        if refresh_transcript {
+            leptos::task::spawn_local(async move {
+                if let Ok(payload) = fetch_transcript().await {
+                    transcript_signal.set(Some(payload));
+                }
+            });
+        }
+        if refresh_agents {
+            leptos::task::spawn_local(async move {
+                if let Ok(payload) = fetch_agents().await {
+                    agents_signal.set(Some(payload));
+                }
+            });
+        }
+    }
+
+    fn resubscribe_all(&self) {
+        let subscriptions = {
+            let state = self.inner.borrow();
+            state.subscriptions.iter().cloned().collect::<Vec<_>>()
+        };
+        for subscription in subscriptions {
+            let _ = self.send(
+                "subscribe",
+                &subscription.domain,
+                &subscription.target_id,
+                serde_json::json!({}),
+            );
+        }
+    }
+
+    fn refresh_snapshots(&self) {
+        let (status_signal, transcript_signal, agents_signal) = {
+            let state = self.inner.borrow();
+            (state.status, state.transcript, state.agents)
+        };
+        leptos::task::spawn_local(async move {
+            if let Ok(payload) = fetch_status().await {
+                status_signal.set(Some(payload));
+            }
+        });
+        leptos::task::spawn_local(async move {
+            if let Ok(payload) = fetch_transcript().await {
+                transcript_signal.set(Some(payload));
+            }
+        });
+        leptos::task::spawn_local(async move {
+            if let Ok(payload) = fetch_agents().await {
+                agents_signal.set(Some(payload));
+            }
+        });
+    }
+
+    fn send_envelope(&self, envelope: WebSocketEnvelope) -> bool {
+        let socket = {
+            let state = self.inner.borrow();
+            if !matches!(state.lifecycle_state, SocketLifecycleState::Open) {
+                return false;
+            }
+            state.socket.clone()
+        };
+        let Some(socket) = socket else {
+            return false;
+        };
+        socket
+            .send_with_str(&serde_json::to_string(&envelope).unwrap_or_default())
+            .is_ok()
+    }
+
+    fn schedule_reconnect(&self) {
+        let delay_ms = {
+            let mut state = self.inner.borrow_mut();
+            if !state.allow_reconnect {
+                state.lifecycle_state = SocketLifecycleState::Closed;
+                let socket_state = state.socket_state;
+                drop(state);
+                socket_state.set(SocketLifecycleState::Closed.as_str().to_string());
+                return;
+            }
+            if state.reconnect_timer_id.is_some() {
+                if !matches!(state.lifecycle_state, SocketLifecycleState::Reconnecting) {
+                    let socket_state = state.socket_state;
+                    state.lifecycle_state = SocketLifecycleState::Reconnecting;
+                    drop(state);
+                    socket_state.set(SocketLifecycleState::Reconnecting.as_str().to_string());
+                }
+                return;
+            }
+            let delay_ms = retry_delay_ms(state.retry_attempt);
+            state.retry_attempt = state.retry_attempt.saturating_add(1);
+            state.lifecycle_state = SocketLifecycleState::Reconnecting;
+            delay_ms
+        };
+        self.update_socket_state(SocketLifecycleState::Reconnecting);
+
+        let shared = self.clone();
+        let callback = Closure::<dyn FnMut()>::once(move || {
+            {
+                let mut state = shared.inner.borrow_mut();
+                state.reconnect_timer_id = None;
+            }
+            shared.update_socket_state(SocketLifecycleState::Connecting);
+            shared.connect();
+        });
+        if let Some(window) = web_sys::window() {
+            match window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                callback.as_ref().unchecked_ref(),
+                delay_ms,
+            ) {
+                Ok(timer_id) => {
+                    self.inner.borrow_mut().reconnect_timer_id = Some(timer_id);
+                    callback.forget();
+                }
+                Err(_) => {
+                    self.inner.borrow_mut().reconnect_timer_id = None;
+                    self.update_socket_state(SocketLifecycleState::Connecting);
+                    self.connect();
+                }
+            }
+        }
+    }
+
+    fn clear_reconnect_timer(&self) {
+        let timer_id = self.inner.borrow_mut().reconnect_timer_id.take();
+        if let (Some(window), Some(timer_id)) = (web_sys::window(), timer_id) {
+            window.clear_timeout_with_handle(timer_id);
+        }
+    }
+
+    fn update_socket_state(&self, lifecycle_state: SocketLifecycleState) {
+        let socket_state = {
+            let mut state = self.inner.borrow_mut();
+            state.lifecycle_state = lifecycle_state;
+            state.socket_state
+        };
+        socket_state.set(lifecycle_state.as_str().to_string());
+    }
+
+    fn is_generation_current(&self, generation: u64) -> bool {
+        self.inner.borrow().generation == generation
     }
 }
 
@@ -157,6 +532,7 @@ fn App() -> impl IntoView {
     let shell_stream = RwSignal::new(Vec::<String>::new());
     let prompt = RwSignal::new(String::new());
     let active_agent = RwSignal::new(String::from("master"));
+    let prompt_error = RwSignal::new(None::<String>);
     let transcript_history_ref = NodeRef::<Div>::new();
     let transcript_trailing = RwSignal::new(true);
 
@@ -185,9 +561,9 @@ fn App() -> impl IntoView {
                     .unwrap_or_else(|| "master".to_string());
                 active_agent.set(agent_id.clone());
                 status.set(Some(payload));
-                shared.send("subscribe", "runtime", "status", serde_json::json!({}));
-                shared.send("subscribe", "agent", &agent_id, serde_json::json!({}));
-                shared.send("subscribe", "terminal", "list", serde_json::json!({}));
+                let _ = shared.send("subscribe", "runtime", "status", serde_json::json!({}));
+                let _ = shared.send("subscribe", "agent", &agent_id, serde_json::json!({}));
+                let _ = shared.send("subscribe", "terminal", "list", serde_json::json!({}));
             }
             transcript.set(transcript_payload);
             agents.set(agents_payload);
@@ -220,7 +596,7 @@ fn App() -> impl IntoView {
 
     Effect::new(move |_| {
         let selected = active_agent.get();
-        shared_socket.send("subscribe", "agent", &selected, serde_json::json!({}));
+        let _ = shared_socket.send("subscribe", "agent", &selected, serde_json::json!({}));
     });
 
     Effect::new(move |_| {
@@ -249,13 +625,18 @@ fn App() -> impl IntoView {
             return;
         }
         let agent_id = active_agent.get_untracked();
-        shared_socket_for_submit.send(
+        let sent = shared_socket_for_submit.send(
             "input",
             "agent",
             &agent_id,
             serde_json::json!({"prompt": text}),
         );
-        prompt.set(String::new());
+        if sent {
+            prompt.set(String::new());
+            prompt_error.set(None);
+        } else {
+            prompt_error.set(Some("WebSocket reconnecting; prompt not sent.".to_string()));
+        }
     };
 
     let on_prompt_keydown = move |ev: KeyboardEvent| {
@@ -266,13 +647,18 @@ fn App() -> impl IntoView {
                 return;
             }
             let agent_id = active_agent.get_untracked();
-            shared_socket_for_keydown.send(
+            let sent = shared_socket_for_keydown.send(
                 "input",
                 "agent",
                 &agent_id,
                 serde_json::json!({"prompt": text}),
             );
-            prompt.set(String::new());
+            if sent {
+                prompt.set(String::new());
+                prompt_error.set(None);
+            } else {
+                prompt_error.set(Some("WebSocket reconnecting; prompt not sent.".to_string()));
+            }
         }
     };
 
@@ -310,7 +696,7 @@ fn App() -> impl IntoView {
                     <span class=move || format!("status-dot {}", socket_state.get())></span>
                     <div>
                         <small>"shared websocket"</small>
-                        <strong>{move || socket_state.get()}</strong>
+                        <strong>{move || websocket_status_label(&socket_state.get())}</strong>
                     </div>
                 </div>
 
@@ -564,13 +950,17 @@ fn App() -> impl IntoView {
                     <form on:submit=on_submit class="composer-form">
                         <textarea
                             prop:value=move || prompt.get()
-                            on:input=move |ev| prompt.set(event_target_value(&ev))
+                            on:input=move |ev| {
+                                prompt.set(event_target_value(&ev));
+                                prompt_error.set(None);
+                            }
                             on:keydown=on_prompt_keydown
                             rows="3"
                             placeholder="Ask the active agent…"
                         />
                         <button type="submit" class="primary-action">"Send"</button>
                     </form>
+                    {move || prompt_error.get().map(|error| view! { <p class="muted">{error}</p> })}
                 </section>
             </main>
         </div>
@@ -634,6 +1024,16 @@ fn agent_activity_display_label(agent: &WebAgentStatus) -> String {
         .clone()
         .or_else(|| agent.activity_status.as_deref().map(activity_label_from_status))
         .unwrap_or_else(|| "Active".to_string())
+}
+
+fn websocket_status_label(state: &str) -> &'static str {
+    match state {
+        "connecting" => "connecting",
+        "open" => "open",
+        "reconnecting" => "reconnecting…",
+        "closed" => "closed",
+        _ => "connecting",
+    }
 }
 
 #[component]
@@ -765,6 +1165,17 @@ fn prompt_keydown_should_submit(ev: &KeyboardEvent) -> bool {
     ev.key() == "Enter" && !ev.shift_key() && !ev.alt_key() && !ev.ctrl_key() && !ev.meta_key()
 }
 
+fn retry_delay_ms(attempt: u32) -> i32 {
+    match attempt {
+        0 => 0,
+        1 => 250,
+        2 => 500,
+        3 => 1_000,
+        4 => 2_000,
+        _ => 5_000,
+    }
+}
+
 fn create_shared_socket(
     socket_state: RwSignal<String>,
     agent_stream: RwSignal<Vec<String>>,
@@ -773,85 +1184,14 @@ fn create_shared_socket(
     transcript: RwSignal<Option<WebTranscriptResponse>>,
     agents: RwSignal<Option<WebAgentsResponse>>,
 ) -> SharedSocket {
-    let location = web_sys::window().expect("window").location();
-    let protocol = match location.protocol().ok().as_deref() {
-        Some("https:") => "wss:",
-        _ => "ws:",
-    };
-    let host = location
-        .host()
-        .unwrap_or_else(|_| "127.0.0.1:8420".to_string());
-    let ws = WebSocket::new(&format!("{protocol}//{host}/api/ws")).expect("websocket");
-    ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
-
-    let onopen = Closure::<dyn FnMut(Event)>::new({
-        let socket_state = socket_state;
-        move |_| socket_state.set("open".to_string())
-    });
-    ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
-    onopen.forget();
-
-    let onclose = Closure::<dyn FnMut(Event)>::new({
-        let socket_state = socket_state;
-        move |_| socket_state.set("closed".to_string())
-    });
-    ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
-    onclose.forget();
-
-    let onerror = Closure::<dyn FnMut(Event)>::new({
-        let socket_state = socket_state;
-        move |_| socket_state.set("error".to_string())
-    });
-    ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
-    onerror.forget();
-
-    let onmessage = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
-        if let Some(text) = event.data().as_string() {
-            if let Ok(envelope) = serde_json::from_str::<WebSocketEnvelope>(&text) {
-                let line = format!(
-                    "seq={:?} target={} payload={}",
-                    envelope.sequence_id, envelope.target_id, envelope.payload
-                );
-                let refresh_transcript = matches!(envelope.domain.as_str(), "agent" | "runtime");
-                let refresh_agents = envelope.domain == "runtime";
-                match envelope.domain.as_str() {
-                    "agent" => agent_stream.update(|lines| lines.push(line)),
-                    "terminal" => shell_stream.update(|lines| lines.push(line)),
-                    "runtime" if envelope.target_id == "status" => {
-                        if let Ok(payload) =
-                            serde_json::from_value::<WebStatusResponse>(envelope.payload.clone())
-                        {
-                            status.set(Some(payload));
-                        }
-                    }
-                    _ => {}
-                }
-                if refresh_transcript {
-                    let transcript = transcript;
-                    leptos::task::spawn_local(async move {
-                        if let Ok(payload) = fetch_transcript().await {
-                            transcript.set(Some(payload));
-                        }
-                    });
-                }
-                if refresh_agents {
-                    let agents = agents;
-                    leptos::task::spawn_local(async move {
-                        if let Ok(payload) = fetch_agents().await {
-                            agents.set(Some(payload));
-                        }
-                    });
-                }
-            }
-        }
-    });
-    ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
-    onmessage.forget();
-
-    SharedSocket {
-        socket: Rc::new(ws),
-        seq: Rc::new(RefCell::new(1)),
-    }
+    SharedSocket::new(
+        socket_state,
+        agent_stream,
+        shell_stream,
+        status,
+        transcript,
+        agents,
+    )
 }
 
 async fn fetch_status() -> Result<WebStatusResponse, String> {
@@ -889,6 +1229,8 @@ async fn fetch_agents() -> Result<WebAgentsResponse, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::{retry_delay_ms, sentence_case_status, websocket_status_label, SocketLifecycleState, SubscriptionTarget};
+
     fn keydown_should_submit(key: &str, shift: bool, alt: bool, ctrl: bool, meta: bool) -> bool {
         key == "Enter" && !shift && !alt && !ctrl && !meta
     }
@@ -1064,5 +1406,38 @@ mod tests {
     fn transcript_scroll_detects_browse_mode_away_from_bottom() {
         assert!(!super::scroll_position_is_trailing(851, 100, 1_000));
         assert!(!super::scroll_position_is_trailing(400, 100, 1_000));
+    }
+
+    #[test]
+    fn retry_delay_is_bounded_and_starts_immediately() {
+        assert_eq!(retry_delay_ms(0), 0);
+        assert_eq!(retry_delay_ms(1), 250);
+        assert_eq!(retry_delay_ms(2), 500);
+        assert_eq!(retry_delay_ms(4), 2_000);
+        assert_eq!(retry_delay_ms(5), 5_000);
+        assert_eq!(retry_delay_ms(9), 5_000);
+    }
+
+    #[test]
+    fn websocket_state_labels_match_ui_text() {
+        assert_eq!(websocket_status_label(SocketLifecycleState::Connecting.as_str()), "connecting");
+        assert_eq!(websocket_status_label(SocketLifecycleState::Open.as_str()), "open");
+        assert_eq!(websocket_status_label(SocketLifecycleState::Reconnecting.as_str()), "reconnecting…");
+        assert_eq!(websocket_status_label(SocketLifecycleState::Closed.as_str()), "closed");
+    }
+
+    #[test]
+    fn subscription_target_deduplicates_same_domain_and_target() {
+        let mut set = std::collections::BTreeSet::new();
+        set.insert(SubscriptionTarget::new("agent", "master"));
+        set.insert(SubscriptionTarget::new("agent", "master"));
+        set.insert(SubscriptionTarget::new("runtime", "status"));
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn sentence_case_status_normalizes_hyphenated_values() {
+        assert_eq!(sentence_case_status("waiting-after-tool"), "Waiting after tool");
+        assert_eq!(sentence_case_status(""), "Unknown");
     }
 }
