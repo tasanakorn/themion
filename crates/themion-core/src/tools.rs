@@ -799,11 +799,12 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "source_extract_symbols",
-                "description": "Detect language and return bounded symbols for one source file. Symbol-only view; prefer source_outline for app analysis and tracing.",
+                "description": "Use this tool to read source code structure from one source file. Symbol-only view; prefer source_outline for app analysis and tracing.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "Source file path to analyze" }
+                        "path": { "type": "string", "description": "Source file path to analyze" },
+                        "reason": { "type": "string", "description": "Optional reason." }
                     },
                     "required": ["path"]
                 }
@@ -813,12 +814,13 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "source_outline",
-                "description": "Detect language and return a bounded one-file outline. Use detail=normal for compact navigation or full for graph-ready IDs and edges.",
+                "description": "Use this tool to read source code structure from one source file. Return a bounded one-file outline; use detail=normal for compact navigation or full for graph-ready IDs and edges.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "Source file path to analyze" },
-                        "detail": { "type": "string", "enum": ["normal", "full"], "description": "Output detail. Default: normal for compact navigation. Use full for graph-ready IDs and edges." }
+                        "detail": { "type": "string", "enum": ["normal", "full"], "description": "Output detail. Default: normal for compact navigation. Use full for graph-ready IDs and edges." },
+                        "reason": { "type": "string", "description": "Optional reason." }
                     },
                     "required": ["path"]
                 }

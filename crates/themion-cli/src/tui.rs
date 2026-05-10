@@ -525,6 +525,8 @@ pub(crate) fn split_tool_call_detail(name: &str, args_json: &str) -> (String, Op
         "fs_read_file" | "read_file" => with_reason_first(format!("read: {}", t("path"))),
         "fs_write_file" | "write_file" => with_reason_first(format!("write: {}", t("path"))),
         "fs_list_directory" | "list_directory" => with_reason_first(format!("ls: {}", t("path"))),
+        "source_outline" => with_reason_first(format!("outline: {}", t("path"))),
+        "source_extract_symbols" => with_reason_first(format!("symbols: {}", t("path"))),
         "history_recall" | "recall_history" => (
             format!(
                 "history_recall: session={}",
