@@ -131,6 +131,7 @@ pub trait ChatBackend: Send + Sync {
         messages: &[Message],
         tools: &Value,
         on_chunk: Box<dyn FnMut(String) + Send + 'static>,
+        on_status: Box<dyn FnMut(String) + Send + 'static>,
         should_cancel: Option<Box<dyn Fn() -> bool + Send + Sync + 'static>>,
     ) -> Result<(
         ResponseMessage,
@@ -402,6 +403,7 @@ impl ChatBackend for ChatClient {
         messages: &[Message],
         tools: &Value,
         on_chunk: Box<dyn FnMut(String) + Send + 'static>,
+        on_status: Box<dyn FnMut(String) + Send + 'static>,
         should_cancel: Option<Box<dyn Fn() -> bool + Send + Sync + 'static>>,
     ) -> Result<(
         ResponseMessage,
@@ -409,6 +411,7 @@ impl ChatBackend for ChatClient {
         Option<ApiCallRateLimitReport>,
         ChatRoundTrace,
     )> {
+        let _ = on_status;
         self.chat_completion_stream(model, messages, tools, on_chunk, should_cancel.as_deref())
             .await
     }

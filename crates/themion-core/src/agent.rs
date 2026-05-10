@@ -1767,7 +1767,8 @@ impl Agent {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
-            let event_tx = self.event_tx.clone();
+            let stream_event_tx = self.event_tx.clone();
+            let status_event_tx = self.event_tx.clone();
             let cancellation_for_stream = cancellation.clone();
             let backend_name = self.client.backend_name();
             let request_payload =
@@ -1786,8 +1787,22 @@ impl Agent {
                         {
                             return;
                         }
-                        if let Some(ref tx) = event_tx {
+                        if let Some(ref tx) = stream_event_tx {
                             let _ = tx.send(AgentEvent::AssistantChunk(chunk));
+                        }
+                    }),
+                    Box::new({
+                        let cancellation_for_status = cancellation.clone();
+                        move |status| {
+                            if cancellation_for_status
+                                .as_ref()
+                                .is_some_and(|c| c.is_interrupted())
+                            {
+                                return;
+                            }
+                            if let Some(ref tx) = status_event_tx {
+                                let _ = tx.send(AgentEvent::Status(status));
+                            }
                         }
                     }),
                     cancellation.clone().map(|c| {

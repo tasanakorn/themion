@@ -70,7 +70,7 @@ Agent  (agent.rs)
   └─ emits: AgentEvent over mpsc channel
 
 ChatBackend  (trait in client.rs)
-  └─ async fn chat_completion_stream(model, messages, tools, on_chunk)
+  └─ async fn chat_completion_stream(model, messages, tools, on_chunk, on_status)
 
 ChatClient  (client.rs)
   ├─ POST /chat/completions with stream=true
@@ -267,7 +267,7 @@ Each call to `run_loop(user_input)`:
 1. Record turn boundary (`turn_boundaries.push(messages.len())`); open a DB turn row via `begin_turn`.
 2. Push `role="user"` message to history; persist to `agent_messages`.
 3. Build windowed context (see §Context Windowing) and call `chat_completion_stream` on the active backend.
-4. Stream tokens to TUI via `AgentEvent::AssistantChunk`; accumulate full response.
+4. Stream assistant text to TUI via `AgentEvent::AssistantChunk`, and route provider/runtime stream notices separately via `AgentEvent::Status`; accumulate the full assistant response.
 5. Push `role="assistant"` response to history; persist to `agent_messages`.
 6. If response has no `tool_calls` → break.
 7. For each tool call: emit `ToolStart` with raw tool name plus raw arguments JSON and optional display-enriched arguments JSON for frontend formatting, execute via `call_tool`, push `role="tool"` result; persist each.

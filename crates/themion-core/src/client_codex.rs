@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use chrono::{Local, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -14,6 +15,8 @@ use crate::client::{
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const CODEX_CONTINUATION_FAILED_NOTICE: &str =
+    "codex stream: completed end_turn=false continuation=failed";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitWindow {
@@ -159,6 +162,70 @@ struct CodexErrorBody {
     resets_in_seconds: Option<i64>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct CodexCompletionMeta {
+    response_id: Option<String>,
+    usage: Option<Usage>,
+    end_turn: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+enum CodexStreamEventCategory {
+    Handled,
+    KnownIgnored,
+    Unhandled,
+}
+
+#[derive(Debug)]
+struct CodexStreamState {
+    response_message_id: Option<String>,
+    response_id: Option<String>,
+    previous_response_id: Option<String>,
+    content: String,
+    tool_slots: HashMap<String, ToolCallSlot>,
+    usage: Option<Usage>,
+    completion_meta: Option<CodexCompletionMeta>,
+    pending_completion: Option<CodexCompletionMeta>,
+    unhandled_notice_dedup: HashSet<String>,
+    notices: Vec<String>,
+    streamed_notice_count: usize,
+    streamed_rate_limits: Vec<RateLimitSnapshot>,
+}
+
+impl CodexStreamState {
+    fn new() -> Self {
+        Self {
+            response_message_id: None,
+            response_id: None,
+            previous_response_id: None,
+            content: String::new(),
+            tool_slots: HashMap::new(),
+            usage: None,
+            completion_meta: None,
+            pending_completion: None,
+            unhandled_notice_dedup: HashSet::new(),
+            notices: Vec::new(),
+            streamed_notice_count: 0,
+            streamed_rate_limits: Vec::new(),
+        }
+    }
+
+    fn record_notice(&mut self, text: String, on_status: &mut dyn FnMut(String)) {
+        self.notices.push(text.clone());
+        self.streamed_notice_count += 1;
+        on_status(text);
+    }
+
+    fn record_unhandled_event(&mut self, event_name: &str, on_status: &mut dyn FnMut(String)) {
+        if self.unhandled_notice_dedup.insert(event_name.to_string()) {
+            self.record_notice(
+                format!("codex stream: unhandled event={event_name}"),
+                on_status,
+            );
+        }
+    }
+}
+
 fn build_responses_api_body(model: &str, messages: &[Message], tools: &Value) -> Value {
     let (instructions, input_items) = translate_messages(messages);
     let translated_tools = translate_tools(tools);
@@ -172,6 +239,34 @@ fn build_responses_api_body(model: &str, messages: &[Message], tools: &Value) ->
     });
     if let Some(ref instr) = instructions {
         body["instructions"] = Value::String(instr.clone());
+    }
+    body
+}
+
+fn build_codex_continuation_body(
+    model: &str,
+    tools: &Value,
+    previous_response_id: &str,
+    response_message_id: Option<&str>,
+) -> Value {
+    let translated_tools = translate_tools(tools);
+    let mut body = serde_json::json!({
+        "model": model,
+        "store": false,
+        "tools": translated_tools,
+        "stream": true,
+        "previous_response_id": previous_response_id,
+    });
+    if let Some(message_id) = response_message_id {
+        body["input"] = serde_json::json!([
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": message_id,
+                "status": "in_progress",
+                "content": []
+            }
+        ]);
     }
     body
 }
@@ -247,6 +342,26 @@ impl CodexClient {
         self.ensure_fresh_token().await?;
         let guard = self.auth.read().await;
         Ok((guard.access_token.clone(), guard.account_id.clone()))
+    }
+
+    async fn send_responses_request(
+        &self,
+        access_token: &str,
+        account_id: &str,
+        body: &Value,
+    ) -> Result<reqwest::Response> {
+        let response = self
+            .http
+            .post(format!("{}/responses", self.base_url))
+            .header("Authorization", format!("Bearer {}", access_token))
+            .header("chatgpt-account-id", account_id)
+            .header("originator", "pi")
+            .header("OpenAI-Beta", "responses=experimental")
+            .header("accept", "text/event-stream")
+            .json(body)
+            .send()
+            .await?;
+        Ok(response)
     }
 
     pub async fn get_rate_limits(&self) -> Result<RateLimitSnapshot> {
@@ -860,6 +975,212 @@ fn translate_tools(tools: &Value) -> Value {
     Value::Array(translated)
 }
 
+fn combine_usage(existing: Option<Usage>, next: Option<Usage>) -> Option<Usage> {
+    match (existing, next) {
+        (None, None) => None,
+        (Some(usage), None) | (None, Some(usage)) => Some(usage),
+        (Some(existing), Some(next)) => Some(Usage {
+            prompt_tokens: Some(
+                existing.prompt_tokens.unwrap_or(0) + next.prompt_tokens.unwrap_or(0),
+            ),
+            completion_tokens: Some(
+                existing.completion_tokens.unwrap_or(0) + next.completion_tokens.unwrap_or(0),
+            ),
+            prompt_tokens_details: Some(UsageDetails {
+                cached_tokens: Some(
+                    existing
+                        .prompt_tokens_details
+                        .and_then(|d| d.cached_tokens)
+                        .unwrap_or(0)
+                        + next
+                            .prompt_tokens_details
+                            .and_then(|d| d.cached_tokens)
+                            .unwrap_or(0),
+                ),
+            }),
+        }),
+    }
+}
+
+fn parse_completion_meta(data: &Value) -> CodexCompletionMeta {
+    let usage = parse_usage_from_value(&data["response"]["usage"]);
+    CodexCompletionMeta {
+        response_id: data["response"]["id"].as_str().map(ToString::to_string),
+        usage,
+        end_turn: data["response"]["end_turn"].as_bool(),
+    }
+}
+
+fn parse_usage_from_value(usage_val: &Value) -> Option<Usage> {
+    if usage_val.is_null() {
+        return None;
+    }
+    let input_tokens = usage_val["input_tokens"].as_u64();
+    let output_tokens = usage_val["output_tokens"].as_u64();
+    let cached_tokens = usage_val["input_tokens_details"]["cached_tokens"].as_u64();
+    Some(Usage {
+        prompt_tokens: input_tokens,
+        completion_tokens: output_tokens,
+        prompt_tokens_details: Some(UsageDetails { cached_tokens }),
+    })
+}
+
+fn classify_codex_event(event_type: &str) -> CodexStreamEventCategory {
+    match event_type {
+        "response.output_text.delta"
+        | "response.function_call_arguments.delta"
+        | "response.output_item.added"
+        | "codex.rate_limits"
+        | "response.completed"
+        | "response.failed"
+        | "error" => CodexStreamEventCategory::Handled,
+        "Created"
+        | "ServerModel"
+        | "ModelVerifications"
+        | "ServerReasoningIncluded"
+        | "ModelsEtag" => CodexStreamEventCategory::KnownIgnored,
+        _ => CodexStreamEventCategory::Unhandled,
+    }
+}
+
+async fn process_codex_sse_response(
+    mut response: reqwest::Response,
+    state: &mut CodexStreamState,
+    on_chunk: &mut (dyn FnMut(String) + Send),
+    on_status: &mut (dyn FnMut(String) + Send),
+    should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
+) -> Result<()> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut current_event: Option<String> = None;
+    let mut current_data: Option<String> = None;
+    let mut stream_done = false;
+
+    while !stream_done {
+        if should_cancel.is_some_and(|cancel| cancel()) {
+            anyhow::bail!("interrupted");
+        }
+        let Some(bytes) = response.chunk().await? else {
+            break;
+        };
+        buf.extend_from_slice(&bytes);
+
+        loop {
+            let Some(pos) = buf.iter().position(|&b| b == b'\n') else {
+                break;
+            };
+            let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
+            let line_bytes = line_bytes
+                .strip_suffix(b"\r\n")
+                .or_else(|| line_bytes.strip_suffix(b"\n"))
+                .unwrap_or(&line_bytes);
+            let Ok(line) = std::str::from_utf8(line_bytes) else {
+                continue;
+            };
+
+            if line.is_empty() {
+                if let (Some(event_type), Some(data_str)) =
+                    (current_event.take(), current_data.take())
+                {
+                    if data_str == "[DONE]" {
+                        stream_done = true;
+                        break;
+                    }
+                    let data: Value = serde_json::from_str(&data_str).unwrap_or(Value::Null);
+                    match classify_codex_event(&event_type) {
+                        CodexStreamEventCategory::Handled => match event_type.as_str() {
+                            "response.output_text.delta" => {
+                                if let Some(delta) = data["delta"].as_str() {
+                                    if should_cancel.is_some_and(|cancel| cancel()) {
+                                        anyhow::bail!("interrupted");
+                                    }
+                                    state.content.push_str(delta);
+                                    on_chunk(delta.to_string());
+                                }
+                            }
+                            "response.function_call_arguments.delta" => {
+                                if let (Some(item_id), Some(delta)) =
+                                    (data["item_id"].as_str(), data["delta"].as_str())
+                                {
+                                    if let Some(slot) = state.tool_slots.get_mut(item_id) {
+                                        slot.arguments.push_str(delta);
+                                    }
+                                }
+                            }
+                            "response.output_item.added" => {
+                                let item = &data["item"];
+                                if item["type"] == "function_call" {
+                                    let item_id = item["id"].as_str().unwrap_or("").to_string();
+                                    let name = item["name"].as_str().unwrap_or("").to_string();
+                                    let call_id =
+                                        item["call_id"].as_str().unwrap_or("").to_string();
+                                    state.tool_slots.insert(
+                                        item_id,
+                                        ToolCallSlot {
+                                            id: call_id,
+                                            name,
+                                            arguments: String::new(),
+                                        },
+                                    );
+                                } else if item["type"] == "message" {
+                                    state.response_message_id =
+                                        item["id"].as_str().map(ToString::to_string);
+                                }
+                            }
+                            "codex.rate_limits" => {
+                                state
+                                    .streamed_rate_limits
+                                    .push(parse_rate_limit_snapshot(&data));
+                            }
+                            "response.completed" => {
+                                let completion_meta = parse_completion_meta(&data);
+                                state.usage = combine_usage(
+                                    state.usage.take(),
+                                    completion_meta.usage.clone(),
+                                );
+                                state.pending_completion = Some(completion_meta.clone());
+                                state.completion_meta = Some(completion_meta);
+                                stream_done = true;
+                            }
+                            "response.failed" => {
+                                let err_msg = data["response"]["error"]["message"]
+                                    .as_str()
+                                    .unwrap_or("unknown error");
+                                return Err(anyhow!("Codex response failed: {}", err_msg));
+                            }
+                            "error" => {
+                                let err_msg = data["message"].as_str().unwrap_or("unknown error");
+                                return Err(anyhow!("Codex error: {}", err_msg));
+                            }
+                            _ => {}
+                        },
+                        CodexStreamEventCategory::KnownIgnored => {}
+                        CodexStreamEventCategory::Unhandled => {
+                            state.record_unhandled_event(&event_type, on_status);
+                        }
+                    }
+                } else {
+                    current_event = None;
+                    current_data = None;
+                }
+                continue;
+            }
+
+            if let Some(event_str) = line.strip_prefix("event: ") {
+                current_event = Some(event_str.to_string());
+            } else if let Some(data_str) = line.strip_prefix("data: ") {
+                if data_str == "[DONE]" {
+                    stream_done = true;
+                    break;
+                }
+                current_data = Some(data_str.to_string());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug)]
 struct ToolCallSlot {
     id: String,
     name: String,
@@ -887,6 +1208,7 @@ impl ChatBackend for CodexClient {
         messages: &[Message],
         tools: &Value,
         mut on_chunk: Box<dyn FnMut(String) + Send + 'static>,
+        mut on_status: Box<dyn FnMut(String) + Send + 'static>,
         should_cancel: Option<Box<dyn Fn() -> bool + Send + Sync + 'static>>,
     ) -> Result<(
         ResponseMessage,
@@ -896,18 +1218,10 @@ impl ChatBackend for CodexClient {
     )> {
         let (access_token, account_id) = self.auth_headers().await?;
 
-        let body = build_responses_api_body(model, messages, tools);
-
+        let initial_body = build_responses_api_body(model, messages, tools);
+        let mut trace_request = initial_body.clone();
         let response = self
-            .http
-            .post(format!("{}/responses", self.base_url))
-            .header("Authorization", format!("Bearer {}", access_token))
-            .header("chatgpt-account-id", &account_id)
-            .header("originator", "pi")
-            .header("OpenAI-Beta", "responses=experimental")
-            .header("accept", "text/event-stream")
-            .json(&body)
-            .send()
+            .send_responses_request(&access_token, &account_id, &initial_body)
             .await?;
 
         let response_headers = response.headers().clone();
@@ -920,148 +1234,94 @@ impl ChatBackend for CodexClient {
             return Err(build_codex_api_error(response_status, text).into());
         }
 
-        let mut buf: Vec<u8> = Vec::new();
-        let mut content = String::new();
-        let mut tool_slots: std::collections::HashMap<String, ToolCallSlot> =
-            std::collections::HashMap::new();
-        let mut usage: Option<Usage> = None;
-        let mut done = false;
-
-        let mut current_event: Option<String> = None;
-        let mut current_data: Option<String> = None;
-
         let active_limit = parse_header_string(&response_headers, "x-codex-active-limit");
-        let header_snapshots = parse_all_rate_limits_from_headers(&response_headers);
+        let mut rate_limit_snapshots = parse_all_rate_limits_from_headers(&response_headers);
+        let mut state = CodexStreamState::new();
+
+        process_codex_sse_response(
+            response,
+            &mut state,
+            &mut *on_chunk,
+            &mut *on_status,
+            should_cancel.as_deref(),
+        )
+        .await?;
+
+        if let Some(meta) = state.pending_completion.take() {
+            state.response_id = meta.response_id.clone();
+            if meta.end_turn == Some(false) {
+                let previous_response_id = meta
+                    .response_id
+                    .clone()
+                    .or_else(|| state.previous_response_id.clone());
+                if let Some(previous_response_id) = previous_response_id {
+                    state.previous_response_id = Some(previous_response_id.clone());
+                    let continuation_body = build_codex_continuation_body(
+                        model,
+                        tools,
+                        &previous_response_id,
+                        state.response_message_id.as_deref(),
+                    );
+                    trace_request = serde_json::json!({
+                        "initial": initial_body,
+                        "continuations": [continuation_body.clone()]
+                    });
+                    let continuation_response = self
+                        .send_responses_request(&access_token, &account_id, &continuation_body)
+                        .await;
+                    match continuation_response {
+                        Ok(response) if response.status().is_success() => {
+                            let headers = response.headers().clone();
+                            rate_limit_snapshots
+                                .extend(parse_all_rate_limits_from_headers(&headers));
+                            process_codex_sse_response(
+                                response,
+                                &mut state,
+                                &mut *on_chunk,
+                                &mut *on_status,
+                                should_cancel.as_deref(),
+                            )
+                            .await?;
+                            if let Some(meta) = state.pending_completion.take() {
+                                state.response_id = meta.response_id.clone();
+                                state.completion_meta = Some(meta);
+                            }
+                        }
+                        Ok(response) => {
+                            let body = response.text().await.unwrap_or_default();
+                            let _ = body;
+                            state
+                                .notices
+                                .push(CODEX_CONTINUATION_FAILED_NOTICE.to_string());
+                        }
+                        Err(_) => {
+                            state
+                                .notices
+                                .push(CODEX_CONTINUATION_FAILED_NOTICE.to_string());
+                        }
+                    }
+                } else {
+                    state
+                        .notices
+                        .push(CODEX_CONTINUATION_FAILED_NOTICE.to_string());
+                }
+            }
+        }
+
+        rate_limit_snapshots.extend(state.streamed_rate_limits.clone());
         let rate_limit_report = Some(report_for_api_call(
             "responses",
             "response_headers",
             Some(response_status.as_u16()),
             active_limit,
-            header_snapshots,
+            rate_limit_snapshots,
         ));
 
-        let mut response = response;
-
-        while !done {
-            if should_cancel.as_ref().is_some_and(|cancel| cancel()) {
-                anyhow::bail!("interrupted");
-            }
-            let Some(bytes) = response.chunk().await? else {
-                break;
-            };
-            buf.extend_from_slice(&bytes);
-
-            loop {
-                let Some(pos) = buf.iter().position(|&b| b == b'\n') else {
-                    break;
-                };
-                let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
-                let line_bytes = line_bytes
-                    .strip_suffix(b"\r\n")
-                    .or_else(|| line_bytes.strip_suffix(b"\n"))
-                    .unwrap_or(&line_bytes);
-                let Ok(line) = std::str::from_utf8(line_bytes) else {
-                    continue;
-                };
-
-                if line.is_empty() {
-                    if let (Some(event_type), Some(data_str)) =
-                        (current_event.take(), current_data.take())
-                    {
-                        if data_str == "[DONE]" {
-                            done = true;
-                            break;
-                        }
-                        let data: Value = serde_json::from_str(&data_str).unwrap_or(Value::Null);
-                        match event_type.as_str() {
-                            "response.output_text.delta" => {
-                                if let Some(delta) = data["delta"].as_str() {
-                                    if should_cancel.as_ref().is_some_and(|cancel| cancel()) {
-                                        anyhow::bail!("interrupted");
-                                    }
-                                    content.push_str(delta);
-                                    on_chunk(delta.to_string());
-                                }
-                            }
-                            "response.function_call_arguments.delta" => {
-                                if let (Some(item_id), Some(delta)) =
-                                    (data["item_id"].as_str(), data["delta"].as_str())
-                                {
-                                    if let Some(slot) = tool_slots.get_mut(item_id) {
-                                        slot.arguments.push_str(delta);
-                                    }
-                                }
-                            }
-                            "response.output_item.added" => {
-                                let item = &data["item"];
-                                if item["type"] == "function_call" {
-                                    let item_id = item["id"].as_str().unwrap_or("").to_string();
-                                    let name = item["name"].as_str().unwrap_or("").to_string();
-                                    let call_id =
-                                        item["call_id"].as_str().unwrap_or("").to_string();
-                                    tool_slots.insert(
-                                        item_id,
-                                        ToolCallSlot {
-                                            id: call_id,
-                                            name,
-                                            arguments: String::new(),
-                                        },
-                                    );
-                                }
-                            }
-                            "codex.rate_limits" => {
-                                let _ = parse_rate_limit_snapshot(&data);
-                            }
-                            "response.completed" => {
-                                let usage_val = &data["response"]["usage"];
-                                if !usage_val.is_null() {
-                                    let input_tokens = usage_val["input_tokens"].as_u64();
-                                    let output_tokens = usage_val["output_tokens"].as_u64();
-                                    let cached_tokens =
-                                        usage_val["input_tokens_details"]["cached_tokens"].as_u64();
-                                    usage = Some(Usage {
-                                        prompt_tokens: input_tokens,
-                                        completion_tokens: output_tokens,
-                                        prompt_tokens_details: Some(UsageDetails { cached_tokens }),
-                                    });
-                                }
-                                done = true;
-                            }
-                            "response.failed" => {
-                                let err_msg = data["response"]["error"]["message"]
-                                    .as_str()
-                                    .unwrap_or("unknown error");
-                                return Err(anyhow!("Codex response failed: {}", err_msg));
-                            }
-                            "error" => {
-                                let err_msg = data["message"].as_str().unwrap_or("unknown error");
-                                return Err(anyhow!("Codex error: {}", err_msg));
-                            }
-                            _ => {}
-                        }
-                    } else {
-                        current_event = None;
-                        current_data = None;
-                    }
-                    continue;
-                }
-
-                if let Some(event_str) = line.strip_prefix("event: ") {
-                    current_event = Some(event_str.to_string());
-                } else if let Some(data_str) = line.strip_prefix("data: ") {
-                    if data_str == "[DONE]" {
-                        done = true;
-                        break;
-                    }
-                    current_data = Some(data_str.to_string());
-                }
-            }
-        }
-
-        let tool_calls = if tool_slots.is_empty() {
+        let tool_calls = if state.tool_slots.is_empty() {
             None
         } else {
-            let mut calls: Vec<ToolCall> = tool_slots
+            let mut calls: Vec<ToolCall> = state
+                .tool_slots
                 .into_values()
                 .map(|slot| ToolCall {
                     id: slot.id,
@@ -1075,26 +1335,31 @@ impl ChatBackend for CodexClient {
             Some(calls)
         };
 
+        let final_content = state.content;
+
         let message = ResponseMessage {
             role: "assistant".to_string(),
-            content: if content.is_empty() {
+            content: if final_content.is_empty() {
                 None
             } else {
-                Some(content)
+                Some(final_content)
             },
             tool_calls,
         };
         let trace = ChatRoundTrace {
             backend: "responses".to_string(),
-            request: body,
-            response: Some(serde_json::to_value(&message)?),
+            request: trace_request,
+            response: Some(serde_json::json!({
+                "message": message,
+                "codex_completion": state.completion_meta,
+            })),
             error: None,
             http_status: Some(response_status.as_u16()),
-            usage: usage.clone(),
+            usage: state.usage.clone(),
             rate_limits: rate_limit_report.clone(),
         };
 
-        Ok((message, usage, rate_limit_report, trace))
+        Ok((message, state.usage, rate_limit_report, trace))
     }
 
     async fn fetch_model_info(&self, model: &str) -> Result<Option<ModelInfo>> {

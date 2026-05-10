@@ -1977,15 +1977,28 @@ fn build_lines<'a>(
                 source,
                 text,
             } => {
+                let is_low_emphasis_provider_notice = text.starts_with("codex stream:");
                 let mut spans = if let Some(agent_id) = agent_id.as_deref() {
-                    agent_tag_spans(Some(agent_id), agents)
+                    if is_low_emphasis_provider_notice {
+                        vec![
+                            Span::raw("  "),
+                            Span::styled(
+                                format!("[{agent_id}] "),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                        ]
+                    } else {
+                        agent_tag_spans(Some(agent_id), agents)
+                    }
                 } else {
                     non_agent_source_spans(*source)
                 };
-                spans.push(Span::styled(
-                    format!("󰇺 {}", text),
-                    Style::default().fg(source.unwrap_or(NonAgentSource::Runtime).color()),
-                ));
+                let status_style = if is_low_emphasis_provider_notice {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default().fg(source.unwrap_or(NonAgentSource::Runtime).color())
+                };
+                spans.push(Span::styled(format!("󰇺 {}", text), status_style));
                 lines.push(Line::from(spans));
             }
             Entry::ToolDone { .. } => {

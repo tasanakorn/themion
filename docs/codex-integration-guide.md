@@ -150,10 +150,78 @@ Current behavior:
 
 - text deltas append to assistant content incrementally
 - function call arguments are accumulated by `item_id`
-- `response.output_item.added` is used to register function calls
-- `response.completed` provides usage accounting
+- `response.output_item.added` is used to register function calls and capture assistant message ids for continuation
+- `response.completed` provides usage accounting and `end_turn` handling
 - `response.failed` and `error` are surfaced as request errors
-- `codex.rate_limits` is currently parsed opportunistically but is not the primary source for immediate status extraction
+- `codex.rate_limits` is parsed best-effort and appended to provider reporting
+- known metadata-only events stay silent
+- other unhandled events emit one compact provider/runtime-visible notice per distinct event name per provider turn
+
+Routing rule:
+
+- assistant text from `response.output_text.delta` goes only through the assistant chunk callback and renders as normal assistant output
+- provider diagnostics such as `codex stream: ...` notices go through the separate status callback and render as status rows rather than assistant messages
+- do not inject provider notices into assistant chunk streaming, or they will appear as normal agent text in transcript surfaces
+
+### Current implementation checklist
+
+- [x] stream assistant text from `response.output_text.delta`
+- [x] accumulate function-call arguments from `response.function_call_arguments.delta`
+- [x] register function-call slots from `response.output_item.added` when `item.type == "function_call"`
+- [x] capture assistant message ids from `response.output_item.added` when `item.type == "message"`
+- [x] read usage from `response.completed`
+- [x] parse provider `end_turn` from `response.completed`
+- [x] try continuation when `response.completed` reports `end_turn=false`
+- [x] combine usage across continuation segments into one logical provider-turn usage result
+- [x] surface provider errors from `response.failed`
+- [x] surface transport/provider errors from `error`
+- [x] parse streamed rate-limit payloads from `codex.rate_limits` on a best-effort basis
+- [x] keep `Created`, `ServerModel`, `ModelVerifications`, `ServerReasoningIncluded`, and `ModelsEtag` silent as known-ignored metadata events
+- [x] emit `codex stream: unhandled event=<event_name>` at most once per distinct unhandled event name per provider turn
+- [ ] handle `response.output_item.done`
+- [ ] handle reasoning-summary/content delta events beyond visible unhandled notices
+- [ ] handle reasoning-summary part-added events beyond visible unhandled notices
+
+### Current event handling table
+
+| SSE event / upstream chunk | Implemented | Current handling in Themion | Current use |
+| --- | --- | --- | --- |
+| `response.output_text.delta` / `OutputTextDelta(String)` | Yes | Appends `delta` to accumulated assistant text and forwards the same delta only to the assistant chunk callback. | Live assistant text streaming and final assistant message content. |
+| `response.function_call_arguments.delta` / `ToolCallInputDelta { item_id, call_id, delta }` | Yes, partial | Uses `item_id` to find an existing tool-call slot and appends `delta` to the slot's argument buffer. `call_id` from the delta event is not used here. | Build final tool-call arguments for post-stream tool execution. |
+| `response.output_item.added` / `OutputItemAdded(ResponseItem)` | Yes, partial | Handles function-call items by creating a tool-call slot with `item.id`, `item.call_id`, and `item.name`. Handles message items by capturing the assistant message id for continuation. Other item types are ignored. | Registers tool calls and preserves the assistant message id needed for continuation. |
+| `response.output_item.done` / `OutputItemDone(ResponseItem)` | No, visible | Not handled functionally; emits `codex stream: unhandled event=response.output_item.done` once per provider turn. | Discoverability for still-unsupported event handling. |
+| `response.completed` / `Completed { response_id, token_usage, end_turn }` | Yes | Reads usage from `response.usage`, captures `response.id`, records `end_turn`, and ends only the current SSE segment. If `end_turn=false`, Themion tries one Codex continuation request and keeps accumulating text, tool calls, usage, and notices into the same logical provider turn. If continuation cannot be completed, Themion emits `codex stream: completed end_turn=false continuation=failed` and stops safely. | Provider-turn completion semantics, usage capture, and continuation control. |
+| `response.failed` | Yes | Extracts `response.error.message` and returns an error. | Surfaces provider-declared response failure. |
+| `error` | Yes | Extracts top-level `message` and returns an error. | Surfaces generic stream/provider errors. |
+| `codex.rate_limits` / `RateLimits(RateLimitSnapshot)` | Yes, limited | Parses the payload best-effort and appends it to provider reporting, while response headers remain the primary immediate source. | Opportunistic streamed rate-limit visibility plus header-derived reporting. |
+| provider notices like `codex stream: ...` | Yes | Routed through the status callback rather than assistant chunk streaming. | Low-priority provider/runtime-visible status rows without changing assistant transcript ownership. |
+| `Created` | Yes, known-ignored | Recognized and intentionally silent. | None in the current product slice. |
+| `ServerModel(String)` | Yes, known-ignored | Recognized and intentionally silent. | None in the current product slice. |
+| `ModelVerifications(Vec<ModelVerification>)` | Yes, known-ignored | Recognized and intentionally silent. | None in the current product slice. |
+| `ServerReasoningIncluded(bool)` | Yes, known-ignored | Recognized and intentionally silent. | None in the current product slice. |
+| `ReasoningSummaryDelta { delta, summary_index }` | No, visible | Emits `codex stream: unhandled event=ReasoningSummaryDelta` once per provider turn. | Discoverability for future reasoning-event support. |
+| `ReasoningContentDelta { delta, content_index }` | No, visible | Emits `codex stream: unhandled event=ReasoningContentDelta` once per provider turn. | Discoverability for future reasoning-event support. |
+| `ReasoningSummaryPartAdded { summary_index }` | No, visible | Emits `codex stream: unhandled event=ReasoningSummaryPartAdded` once per provider turn. | Discoverability for future reasoning-event support. |
+| `ModelsEtag(String)` | Yes, known-ignored | Recognized and intentionally silent. | None in the current product slice. |
+
+### `response.completed` and `end_turn`
+
+Themion now distinguishes these separate facts:
+
+- the current SSE stream segment finished
+- the provider said the turn should end or continue
+- Themion ended or continued the provider turn
+- the broader local harness turn may still continue later for normal tool/runtime reasons
+
+Current `response.completed` behavior:
+
+- usage is read from `response.usage`
+- provider `response.id` is captured when present
+- `end_turn=true` finishes the provider turn after the current SSE segment
+- `end_turn=false` makes Themion try to continue the Codex provider turn using the existing continuation flow
+- if continuation succeeds, continued chunks follow normal Codex streaming behavior and accumulate into the same logical provider turn
+- if continuation fails or cannot be attempted, Themion emits exactly `codex stream: completed end_turn=false continuation=failed` and stops safely
+- if `end_turn` is omitted, Themion keeps the existing single-segment stop fallback
 
 ## Usage accounting
 
@@ -164,6 +232,8 @@ On `response.completed`, Themion reads usage from:
 - `response.usage.input_tokens_details.cached_tokens`
 
 These values are mapped into Themion's internal `Usage` and `UsageDetails` structures.
+
+When Codex continuation is used after `end_turn=false`, usage values from each completed segment are accumulated into one combined logical provider-turn usage result.
 
 ## Rate-limit and quota extraction
 
