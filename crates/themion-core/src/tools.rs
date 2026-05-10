@@ -984,30 +984,16 @@ pub fn tool_definitions() -> Value {
         json!({
             "type": "function",
             "function": {
-                "name": "board_move_note",
-                "description": "Move a board note between columns.",
+                "name": "board_update_note",
+                "description": "Update one board note. Change column, result text, or both.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "note_id": { "type": "string" },
-                        "column": { "type": "string", "enum": ["todo", "in_progress", "blocked", "done"] }
+                        "column": { "type": "string", "enum": ["todo", "in_progress", "blocked", "done"], "description": "New column. Omit to keep current column." },
+                        "result_text": { "type": "string", "description": "Result text. Omit to keep current result." }
                     },
-                    "required": ["note_id", "column"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "board_update_note_result",
-                "description": "Set a board note result.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "note_id": { "type": "string" },
-                        "result_text": { "type": "string" }
-                    },
-                    "required": ["note_id", "result_text"]
+                    "required": ["note_id"]
                 }
             }
         }),
@@ -1392,51 +1378,51 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 None => board_note_not_found(note_id, "move").to_string(),
             })
         }
-        "board_move_note" => {
+        "board_update_note" => {
             let note_id = args["note_id"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing note_id"))?;
-            let column = parse_note_column(
-                args["column"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("missing column"))?,
-            )
-            .ok_or_else(|| anyhow::anyhow!("invalid column"))?;
-            let note = ctx.db.move_board_note(note_id, column)?;
-            Ok(match note {
-                Some(note) => board_note_ack(
-                    &note,
-                    "move",
-                    json!({
-                        "column": note.column.as_str(),
-                        "updated_at_ms": note.updated_at_ms,
-                    }),
-                )
-                .to_string(),
-                None => board_note_not_found(note_id, "move").to_string(),
-            })
-        }
-        "board_update_note_result" => {
-            let note_id = args["note_id"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("missing note_id"))?;
-            let result_text = args["result_text"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("missing result_text"))?;
+            let column = match args.get("column").and_then(Value::as_str) {
+                Some(value) => Some(
+                    parse_note_column(value).ok_or_else(|| anyhow::anyhow!("invalid column"))?,
+                ),
+                None => None,
+            };
+            let result_text = args
+                .get("result_text")
+                .map(|value| {
+                    value
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("result_text must be a string"))
+                })
+                .transpose()?;
+
+            if column.is_none() && result_text.is_none() {
+                anyhow::bail!("board_update_note requires column or result_text");
+            }
+
             let note = ctx
                 .db
-                .update_board_note_result(note_id, Some(result_text))?;
+                .update_board_note(note_id, column, result_text.map(Some))?;
             Ok(match note {
-                Some(note) => board_note_ack(
-                    &note,
-                    "update_result",
-                    json!({
-                        "has_result_text": note.result_text.is_some(),
-                        "updated_at_ms": note.updated_at_ms,
-                    }),
-                )
-                .to_string(),
-                None => board_note_not_found(note_id, "update_result").to_string(),
+                Some(note) => {
+                    let mut changed = serde_json::Map::new();
+                    if args.get("column").is_some() {
+                        changed.insert(
+                            "column".to_string(),
+                            Value::String(note.column.as_str().to_string()),
+                        );
+                    }
+                    if args.get("result_text").is_some() {
+                        changed.insert(
+                            "has_result_text".to_string(),
+                            Value::Bool(note.result_text.is_some()),
+                        );
+                    }
+                    changed.insert("updated_at_ms".to_string(), Value::from(note.updated_at_ms));
+                    board_note_ack(&note, "update", Value::Object(changed)).to_string()
+                }
+                None => board_note_not_found(note_id, "update").to_string(),
             })
         }
         "memory_create_node" => {

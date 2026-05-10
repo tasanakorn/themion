@@ -1059,38 +1059,59 @@ impl DbHandle {
         Ok(out)
     }
 
-    pub fn move_board_note(&self, note_id: &str, column: NoteColumn) -> Result<Option<BoardNote>> {
-        let now_ms = now_unix_ms();
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE board_notes
-             SET column_name = ?2,
-                 blocked_until_ms = CASE WHEN ?2 = 'blocked' THEN ?3 ELSE NULL END,
-                 injection_state = CASE WHEN ?2 = 'done' THEN injection_state ELSE 'pending' END,
-                 updated_at_ms = ?4
-             WHERE note_id = ?1",
-            rusqlite::params![
-                note_id,
-                column.as_str(),
-                now_ms + BLOCKED_RETRY_COOLDOWN_MS,
-                now_ms
-            ],
-        )?;
-        drop(conn);
-        self.get_board_note(note_id)
-    }
-
-    pub fn update_board_note_result(
+    pub fn update_board_note(
         &self,
         note_id: &str,
-        result_text: Option<&str>,
+        column: Option<NoteColumn>,
+        result_text: Option<Option<&str>>,
     ) -> Result<Option<BoardNote>> {
         let now_ms = now_unix_ms();
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE board_notes SET result_text = ?2, updated_at_ms = ?3 WHERE note_id = ?1",
-            rusqlite::params![note_id, result_text, now_ms],
-        )?;
+
+        match (column, result_text) {
+            (Some(column), Some(result_text)) => {
+                conn.execute(
+                    "UPDATE board_notes
+                     SET column_name = ?2,
+                         blocked_until_ms = CASE WHEN ?2 = 'blocked' THEN ?3 ELSE NULL END,
+                         injection_state = CASE WHEN ?2 = 'done' THEN injection_state ELSE 'pending' END,
+                         result_text = ?4,
+                         updated_at_ms = ?5
+                     WHERE note_id = ?1",
+                    rusqlite::params![
+                        note_id,
+                        column.as_str(),
+                        now_ms + BLOCKED_RETRY_COOLDOWN_MS,
+                        result_text,
+                        now_ms
+                    ],
+                )?;
+            }
+            (Some(column), None) => {
+                conn.execute(
+                    "UPDATE board_notes
+                     SET column_name = ?2,
+                         blocked_until_ms = CASE WHEN ?2 = 'blocked' THEN ?3 ELSE NULL END,
+                         injection_state = CASE WHEN ?2 = 'done' THEN injection_state ELSE 'pending' END,
+                         updated_at_ms = ?4
+                     WHERE note_id = ?1",
+                    rusqlite::params![
+                        note_id,
+                        column.as_str(),
+                        now_ms + BLOCKED_RETRY_COOLDOWN_MS,
+                        now_ms
+                    ],
+                )?;
+            }
+            (None, Some(result_text)) => {
+                conn.execute(
+                    "UPDATE board_notes SET result_text = ?2, updated_at_ms = ?3 WHERE note_id = ?1",
+                    rusqlite::params![note_id, result_text, now_ms],
+                )?;
+            }
+            (None, None) => return self.get_board_note(note_id),
+        }
+
         drop(conn);
         self.get_board_note(note_id)
     }

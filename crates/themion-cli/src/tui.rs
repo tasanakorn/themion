@@ -606,21 +606,16 @@ pub(crate) fn split_tool_call_detail(name: &str, args_json: &str) -> (String, Op
             )
         }
         "board_read_note" => (format!("board_read_note {}", board_note_display()), None),
-        "board_move_note" => (
-            format!(
-                "board_move_note {} -> {}",
-                board_note_display(),
-                center_trim(
-                    args["column"].as_str().unwrap_or("?"),
-                    TOOL_DETAIL_MAX_CHARS
-                )
-            ),
-            None,
-        ),
-        "board_update_note_result" => (
-            format!("board_update_note_result {}", board_note_display()),
-            None,
-        ),
+        "board_update_note" => {
+            let mut detail = format!("board_update_note {}", board_note_display());
+            if let Some(column) = args["column"].as_str() {
+                detail.push_str(&format!(
+                    " -> {}",
+                    center_trim(column, TOOL_DETAIL_MAX_CHARS)
+                ));
+            }
+            (detail, None)
+        }
         "memory_create_node" => (format!("memory_create_node {}", t("title")), None),
         "memory_update_node" => (format!("memory_update_node {}", t("node_id")), None),
         "memory_link_nodes" => (

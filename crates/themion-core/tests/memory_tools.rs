@@ -497,26 +497,37 @@ async fn board_and_file_mutations_return_compact_acks() {
 
     let moved = call_json(
         &ctx,
-        "board_move_note",
+        "board_update_note",
         json!({"note_id": created["note_id"], "column":"done"}),
     )
     .await;
-    assert_eq!(moved["operation"], "move");
+    assert_eq!(moved["operation"], "update");
+    assert_eq!(moved["changed"]["column"], "done");
     assert!(moved.get("body").is_none());
 
     let updated = call_json(
         &ctx,
-        "board_update_note_result",
+        "board_update_note",
         json!({"note_id": created["note_id"], "result_text":"long text"}),
     )
     .await;
-    assert_eq!(updated["operation"], "update_result");
+    assert_eq!(updated["operation"], "update");
     assert_eq!(updated["changed"]["has_result_text"], true);
     assert!(updated.get("result_text").is_none());
 
+    let combined = call_json(
+        &ctx,
+        "board_update_note",
+        json!({"note_id": created["note_id"], "column":"blocked", "result_text":"done"}),
+    )
+    .await;
+    assert_eq!(combined["operation"], "update");
+    assert_eq!(combined["changed"]["column"], "blocked");
+    assert_eq!(combined["changed"]["has_result_text"], true);
+
     let missing = call_json(
         &ctx,
-        "board_move_note",
+        "board_update_note",
         json!({"note_id": "missing", "column":"done"}),
     )
     .await;
