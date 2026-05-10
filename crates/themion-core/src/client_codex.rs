@@ -17,6 +17,7 @@ const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_CONTINUATION_FAILED_NOTICE: &str =
     "codex stream: completed end_turn=false continuation=failed";
+const DEFAULT_CODEX_REASONING_EFFORT: &str = "medium";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitWindow {
@@ -226,12 +227,19 @@ impl CodexStreamState {
     }
 }
 
+fn build_reasoning_payload() -> Value {
+    serde_json::json!({
+        "effort": DEFAULT_CODEX_REASONING_EFFORT,
+    })
+}
+
 fn build_responses_api_body(model: &str, messages: &[Message], tools: &Value) -> Value {
     let (instructions, input_items) = translate_messages(messages);
     let translated_tools = translate_tools(tools);
 
     let mut body = serde_json::json!({
         "model": model,
+        "reasoning": build_reasoning_payload(),
         "store": false,
         "input": input_items,
         "tools": translated_tools,
@@ -252,6 +260,7 @@ fn build_codex_continuation_body(
     let translated_tools = translate_tools(tools);
     let mut body = serde_json::json!({
         "model": model,
+        "reasoning": build_reasoning_payload(),
         "store": false,
         "tools": translated_tools,
         "stream": true,
