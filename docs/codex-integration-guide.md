@@ -178,7 +178,7 @@ Routing rule:
 - [x] parse streamed rate-limit payloads from `codex.rate_limits` on a best-effort basis
 - [x] keep `Created`, `ServerModel`, `ModelVerifications`, `ServerReasoningIncluded`, and `ModelsEtag` silent as known-ignored metadata events
 - [x] emit `codex stream: unhandled event=<event_name>` at most once per distinct unhandled event name per provider turn
-- [ ] handle `response.output_item.done`
+- [x] keep `response.output_item.done` and related content-part/output-text done events in the known-ignored silent set
 - [ ] handle reasoning-summary/content delta events beyond visible unhandled notices
 - [ ] handle reasoning-summary part-added events beyond visible unhandled notices
 
@@ -189,7 +189,7 @@ Routing rule:
 | `response.output_text.delta` / `OutputTextDelta(String)` | Yes | Appends `delta` to accumulated assistant text and forwards the same delta only to the assistant chunk callback. | Live assistant text streaming and final assistant message content. |
 | `response.function_call_arguments.delta` / `ToolCallInputDelta { item_id, call_id, delta }` | Yes, partial | Uses `item_id` to find an existing tool-call slot and appends `delta` to the slot's argument buffer. `call_id` from the delta event is not used here. | Build final tool-call arguments for post-stream tool execution. |
 | `response.output_item.added` / `OutputItemAdded(ResponseItem)` | Yes, partial | Handles function-call items by creating a tool-call slot with `item.id`, `item.call_id`, and `item.name`. Handles message items by capturing the assistant message id for continuation. Other item types are ignored. | Registers tool calls and preserves the assistant message id needed for continuation. |
-| `response.output_item.done` / `OutputItemDone(ResponseItem)` | No, visible | Not handled functionally; emits `codex stream: unhandled event=response.output_item.done` once per provider turn. | Discoverability for still-unsupported event handling. |
+| `response.output_item.done` / `OutputItemDone(ResponseItem)` | Yes, known-ignored | Recognized and intentionally silent. | None in the current product slice. |
 | `response.completed` / `Completed { response_id, token_usage, end_turn }` | Yes | Reads usage from `response.usage`, captures `response.id`, records `end_turn`, and ends only the current SSE segment. If `end_turn=false`, Themion tries one Codex continuation request and keeps accumulating text, tool calls, usage, and notices into the same logical provider turn. If continuation cannot be completed, Themion emits `codex stream: completed end_turn=false continuation=failed` and stops safely. | Provider-turn completion semantics, usage capture, and continuation control. |
 | `response.failed` | Yes | Extracts `response.error.message` and returns an error. | Surfaces provider-declared response failure. |
 | `error` | Yes | Extracts top-level `message` and returns an error. | Surfaces generic stream/provider errors. |
@@ -203,6 +203,9 @@ Routing rule:
 | `ReasoningContentDelta { delta, content_index }` | No, visible | Emits `codex stream: unhandled event=ReasoningContentDelta` once per provider turn. | Discoverability for future reasoning-event support. |
 | `ReasoningSummaryPartAdded { summary_index }` | No, visible | Emits `codex stream: unhandled event=ReasoningSummaryPartAdded` once per provider turn. | Discoverability for future reasoning-event support. |
 | `ModelsEtag(String)` | Yes, known-ignored | Recognized and intentionally silent. | None in the current product slice. |
+| `response.content_part.done` | Yes, known-ignored | Recognized and intentionally silent. | None in the current product slice. |
+| `response.output_text.done` | Yes, known-ignored | Recognized and intentionally silent. | None in the current product slice. |
+| `response.content_part.added` | Yes, known-ignored | Recognized and intentionally silent. | None in the current product slice. |
 
 ### `response.completed` and `end_turn`
 

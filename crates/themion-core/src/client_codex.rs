@@ -1047,7 +1047,11 @@ fn classify_codex_event(event_type: &str) -> CodexStreamEventCategory {
         | "ServerModel"
         | "ModelVerifications"
         | "ServerReasoningIncluded"
-        | "ModelsEtag" => CodexStreamEventCategory::KnownIgnored,
+        | "ModelsEtag"
+        | "response.output_item.done"
+        | "response.content_part.done"
+        | "response.output_text.done"
+        | "response.content_part.added" => CodexStreamEventCategory::KnownIgnored,
         _ => CodexStreamEventCategory::Unhandled,
     }
 }

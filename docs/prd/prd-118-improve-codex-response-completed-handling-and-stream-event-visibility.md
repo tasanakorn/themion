@@ -1,7 +1,7 @@
 # PRD-118: Improve Codex `response.completed` Handling and Stream-Event Visibility
 
-- **Status:** Draft
-- **Version:** >v0.72.1 +patch
+- **Status:** Implemented
+- **Version:** v0.72.1
 - **Scope:** `themion-core`, `themion-cli`, docs
 - **Author:** Tasanakorn (design intent) + Themion (PRD authoring)
 - **Date:** 2026-05-10
@@ -37,14 +37,9 @@
 
 ### Current state
 
-`crates/themion-core/src/client_codex.rs` currently handles `response.completed` by reading usage and setting the stream loop to done. It does not inspect or store `end_turn`.
+`crates/themion-core/src/client_codex.rs` now parses `response.completed` into compact completion metadata, retains `end_turn`, and uses the existing Codex continuation path when `end_turn=false`.
 
-The same parser ignores several other known Codex event types. Right now that creates two gaps:
-
-1. provider completion semantics are only partially implemented
-2. when upstream sends an event Themion does not use, the product usually stays silent
-
-`docs/codex-integration-guide.md` now documents that `response.completed` is only partially handled and that multiple stream events are ignored.
+The parser also classifies Codex stream events as handled, known-ignored, or unhandled so transcript visibility is intentional instead of accidental. `docs/codex-integration-guide.md` documents the current event matrix, including the silent known-ignored set and the exact unhandled-event notice format.
 
 ### Why this matters now
 
@@ -249,15 +244,15 @@ Patch scope is appropriate if the change stays within the existing provider/back
 
 ## Implementation checklist
 
-- [ ] add a small structured representation for Codex completion metadata
-- [ ] parse and retain `end_turn` from `response.completed`
-- [ ] preserve current usage extraction while separating stream-complete from provider-turn-complete semantics
-- [ ] reuse the existing Codex continuation path to try continuation after `end_turn=false`
-- [ ] keep continued assistant text streaming in the normal Codex way
-- [ ] keep accumulating assistant output, tool calls, usage, and notices across a continued provider turn
-- [ ] emit exactly one `codex stream: completed end_turn=false continuation=failed` notice when continuation cannot be completed successfully
-- [ ] define handled / known-ignored / unhandled event categories in the Codex client
-- [ ] emit exactly one `codex stream: unhandled event=<event_name>` notice per distinct unhandled event name per provider turn
-- [ ] implement the initial metadata-only known-ignored event set exactly as specified in this PRD
-- [ ] render provider/runtime notices cleanly in the TUI transcript without TUI-owned categorization logic
-- [ ] update `docs/codex-integration-guide.md` to match the implemented event matrix
+- [x] add a small structured representation for Codex completion metadata
+- [x] parse and retain `end_turn` from `response.completed`
+- [x] preserve current usage extraction while separating stream-complete from provider-turn-complete semantics
+- [x] reuse the existing Codex continuation path to try continuation after `end_turn=false`
+- [x] keep continued assistant text streaming in the normal Codex way
+- [x] keep accumulating assistant output, tool calls, usage, and notices across a continued provider turn
+- [x] emit exactly one `codex stream: completed end_turn=false continuation=failed` notice when continuation cannot be completed successfully
+- [x] define handled / known-ignored / unhandled event categories in the Codex client
+- [x] emit exactly one `codex stream: unhandled event=<event_name>` notice per distinct unhandled event name per provider turn
+- [x] implement the initial metadata-only known-ignored event set exactly as specified in this PRD
+- [x] render provider/runtime notices cleanly in the TUI transcript without TUI-owned categorization logic
+- [x] update `docs/codex-integration-guide.md` to match the implemented event matrix
