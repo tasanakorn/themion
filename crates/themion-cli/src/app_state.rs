@@ -227,6 +227,7 @@ pub(crate) struct AppRuntimeState {
     pub stream_chars: u64,
     pub recent_events: std::collections::VecDeque<AppRecentEvent>,
     pub activity_counters: crate::tui::ActivityCounters,
+    pub pending_completed_status_entry: Option<(Uuid, usize)>,
     #[cfg(feature = "stylos")]
     pub stylos: Option<crate::stylos::StylosHandle>,
     #[cfg(feature = "stylos")]
@@ -317,6 +318,7 @@ impl AppRuntimeState {
             stream_chars: 0,
             recent_events: std::collections::VecDeque::new(),
             activity_counters: Default::default(),
+            pending_completed_status_entry: None,
             #[cfg(feature = "stylos")]
             stylos: None,
             #[cfg(feature = "stylos")]
@@ -334,6 +336,23 @@ impl AppRuntimeState {
             #[cfg(feature = "stylos")]
             last_assistant_text: None,
         }
+    }
+}
+
+fn mark_completed_status_with_tool_call(app: &mut App, sid: Uuid) {
+    let Some((completed_sid, entry_idx)) = app.runtime.pending_completed_status_entry.take() else {
+        return;
+    };
+    if completed_sid != sid {
+        app.runtime.pending_completed_status_entry = Some((completed_sid, entry_idx));
+        return;
+    }
+    let Some(Entry::Status { text, .. }) = app.entries.get_mut(entry_idx) else {
+        return;
+    };
+    if !text.contains("with tool_calls") {
+        text.push_str(" with tool_calls");
+        app.mark_dirty_all();
     }
 }
 
@@ -437,6 +456,7 @@ impl AppState {
                 stream_chars: 0,
                 recent_events: std::collections::VecDeque::new(),
                 activity_counters: Default::default(),
+                pending_completed_status_entry: None,
                 #[cfg(feature = "stylos")]
                 stylos: None,
                 #[cfg(feature = "stylos")]
@@ -1394,6 +1414,7 @@ pub(crate) fn process_agent_event(
 ) {
     match ev {
         themion_core::agent::AgentEvent::LlmStart => {
+            app.runtime.pending_completed_status_entry = None;
             #[cfg(feature = "stylos")]
             {}
             runtime_reset_stream_counters(&mut app.runtime);
@@ -1454,6 +1475,7 @@ pub(crate) fn process_agent_event(
             arguments_json,
             display_arguments_json,
         } => {
+            mark_completed_status_with_tool_call(app, sid);
             app.runtime.streaming_idx = None;
             let display_args_json = display_arguments_json.as_deref().unwrap_or(&arguments_json);
             let (detail, reason) = crate::tui::split_tool_call_detail(&name, display_args_json);
@@ -1496,11 +1518,15 @@ pub(crate) fn process_agent_event(
             set_agent_activity_for_session(app, sid, AgentActivity::WaitingAfterTool);
         }
         themion_core::agent::AgentEvent::Status(text) => {
+            let mark_completed = text == "codex stream: response.completed";
             app.push(crate::tui::Entry::Status {
                 agent_id: crate::tui::agent_id_for_session(&app.runtime.agents, sid),
                 source: None,
                 text,
             });
+            if mark_completed {
+                app.runtime.pending_completed_status_entry = Some((sid, app.entries.len() - 1));
+            }
         }
         themion_core::agent::AgentEvent::WorkflowStateChanged(state) => {
             app.runtime.workflow_state = state;
