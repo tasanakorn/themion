@@ -80,13 +80,16 @@ Themion now injects compact guidance that teaches agents to choose the lightest 
 
 1. answer directly for simple requests that do not need tracking
 2. create a self-note when the current agent needs durable tracking for non-trivial or branching work
-3. when extra capacity or role separation helps, `master` may create or choose a local worker agent
-4. use durable board notes for delegated work another agent must complete, resume, or report later
-5. use `stylos_send_message` only for short volatile coordination, clarification, participant-facing state updates, urgent nudges, or final wrap-up with no durable result
+3. do not involve another local agent unless the user explicitly asks for delegation, parallel agent work, or another agent's help or review
+4. after delegation is explicitly authorized, `master` may create or choose a local worker agent when extra capacity or role separation helps
+5. use durable board notes for delegated work another agent must complete, resume, or report later
+6. use `stylos_send_message` only for short volatile coordination, clarification, participant-facing state updates, urgent nudges, or final wrap-up with no durable result
 
-Delegated board notes should state the task, expected output, constraints, and return path. If the result must be durable, the note should ask the worker to update the note result or create a done mention through the board workflow. Inbox messages are not a durable task queue and should not be the only record for work that needs completion tracking.
+Requests for depth, thoroughness, research, investigation, review, or large scope do not count as delegation permission by themselves. Role guidance helps choose how to delegate after authorization exists; it does not authorize delegation by itself. Themion keeps "create local agent" and "team member" wording rather than adopting "spawn agent" or a permanent subagent hierarchy.
 
-For multi-agent activity, the guidance tells the coordinator to own authoritative state, use stable activity/turn/note identifiers, state participants and response channels, separate state updates from discussion, broadcast only meaningful state transitions, define completion/timeout/late-input rules up front, and end with a clear final outcome.
+Delegated board notes should state the task, expected output, constraints, ownership, and return path. If the result must be durable, the note should ask the worker to update the note result or create a done mention through the board workflow. Inbox messages are not a durable task queue and should not be the only record for work that needs completion tracking.
+
+For authorized multi-agent activity, the guidance tells the coordinator to own authoritative state, use stable activity/turn/note identifiers, state participants and response channels, separate state updates from discussion, broadcast only meaningful state transitions, define completion/timeout/late-input rules up front, and end with a clear final outcome.
 
 ## CLI-local runtime domains
 

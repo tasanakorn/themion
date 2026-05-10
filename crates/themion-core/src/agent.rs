@@ -226,12 +226,32 @@ fn summarize_tool_calls(tool_calls: &[crate::client::ToolCall]) -> String {
 
 fn role_instruction(role: &str) -> Option<&'static str> {
     match role {
-        "master" => Some("- master: Lead the team and own coordination. For non-trivial work, consider creating or delegating to a local worker agent; use durable board notes for delegated work that must be tracked, and include expected result/return-path instructions. Simple direct Q&A may be answered directly."),
+        "master" => Some("- master: Lead the team and own coordination. Answer simple direct requests yourself. For non-trivial or branching work, use self-tracking when useful. Only create or delegate to another local agent when the user explicitly asks for delegation, parallel agent work, or another agent's help or review. When delegation is authorized, use durable board notes for delegated work that must be tracked, and include expected result and return-path instructions."),
         "interactive" => Some("- interactive: Own human-facing conversation; respond directly to the user when active/targeted."),
         "executor" => Some("- executor: Do general implementation, investigation, and task execution; report concise results to the task originator."),
         "reviewer" => Some("- reviewer: Review, audit, and validate; do not change files unless explicitly asked."),
         "architect" => Some("- architect: Cover system design; explore, clarify, refine requirements, plan, and identify tradeoffs."),
         _ => None,
+    }
+}
+
+fn build_board_guidance_text(
+    local_instance_id: Option<&str>,
+    local_agent_id: Option<&str>,
+) -> String {
+    #[cfg(feature = "stylos")]
+    {
+        let self_instance = local_instance_id.unwrap_or("local");
+        let self_agent_id = local_agent_id.unwrap_or("master");
+        format!(
+            "Board and coordination guidance: choose the lightest durable-enough channel. Answer simple direct requests without notes. Use a self-note when your own non-trivial or branching work needs durable tracking. For self-notes, prefer the magic local target to_instance=local to_agent_id={self_agent_id}; the exact current self target is to_instance={self_instance} to_agent_id={self_agent_id}. Delegation authorization is separate from delegation technique: do not create another local agent, assign delegated board-note work to another agent, or initiate parallel multi-agent work unless the user explicitly asks for delegation, parallel agent work, or another agent's help or review. Requests for depth, thoroughness, research, investigation, review, or large scope do not count as delegation permission by themselves. When delegation is authorized, keep Themion terminology: create or use another local agent or team member; do not describe Themion agents as permanent subagents or use spawn agent as the product term. Prefer durable board notes for delegated work another agent must complete, resume, or report later, not stylos_send_message. Delegated notes should state task, expected output, constraints, ownership, and return path; if a durable response is needed, ask the worker to update the note result or create a done mention. After delegation is explicitly authorized, when extra capacity or role separation helps, master may consider local_agent_create before delegating. Use stylos_send_message only for short volatile coordination: urgent nudges, clarification, participant-facing state updates, or final wrap-up with no durable result; it may queue in the receiver inbox but is not durable task tracking. For authorized multi-agent activity, assign one coordinator as authoritative state owner, use stable activity/turn/note ids, state participants/response channel/expected reply shape, separate authoritative updates from discussion, broadcast only meaningful state transitions, define completion/timeout/late-input rules up front, say who is waiting on whom when needed, and end with a clear final outcome. When you receive a done-mention note, treat it as informational completion notification rather than a fresh work request."
+        )
+    }
+    #[cfg(not(feature = "stylos"))]
+    {
+        let _ = local_instance_id;
+        let _ = local_agent_id;
+        "Board and coordination guidance: choose the lightest durable-enough channel. Answer simple direct requests without notes. Use a self-note when your own non-trivial or branching work needs durable tracking. For self-notes, prefer the magic local target to_instance=local to_agent_id=master. Do not invent remote identifiers for local-only board work. Delegation authorization is separate from delegation technique: do not create another local agent, assign delegated board-note work to another agent, or initiate parallel multi-agent work unless the user explicitly asks for delegation, parallel agent work, or another agent's help or review. Requests for depth, thoroughness, research, investigation, review, or large scope do not count as delegation permission by themselves. When delegation is authorized, keep Themion terminology: create or use another local agent or team member; do not describe Themion agents as permanent subagents or use spawn agent as the product term. Prefer durable board notes for delegated work another local agent must complete, resume, or report later. Delegated notes should state task, expected output, constraints, ownership, and return path; if a durable response is needed, ask the worker to update the note result or create a done mention. After delegation is explicitly authorized, when extra capacity or role separation helps, master may consider local_agent_create before delegating. If volatile peer messaging is available in the current build, use it only for short coordination, not durable task tracking. For authorized multi-agent activity, assign one coordinator as authoritative state owner, use stable activity/turn/note ids, state participants/response channel/expected reply shape, separate authoritative updates from discussion, broadcast only meaningful state transitions, define completion/timeout/late-input rules up front, say who is waiting on whom when needed, and end with a clear final outcome. When you receive a done-mention note, treat it as informational completion notification rather than a fresh work request.".to_string()
     }
 }
 
@@ -771,15 +791,12 @@ impl Agent {
         }
 
         #[cfg(feature = "stylos")]
-        let board_guidance_text = {
-            let self_instance = self.local_instance_id.as_deref().unwrap_or("local");
-            let self_agent_id = self.local_agent_id.as_deref().unwrap_or("master");
-            format!(
-                "Board and coordination guidance: choose the lightest durable-enough channel. Answer simple direct requests without notes. Use a self-note when your own non-trivial or branching work needs durable tracking. For self-notes, prefer the magic local target to_instance=local to_agent_id={self_agent_id}; the exact current self target is to_instance={self_instance} to_agent_id={self_agent_id}. When delegating work another agent must complete or report later, prefer a durable board note, not stylos_send_message. Delegated notes should state task, expected output, constraints, and return path; if a durable response is needed, ask the worker to update the note result or create a done mention. When extra capacity or role separation helps, master should consider local_agent_create before delegating. Use stylos_send_message only for short volatile coordination: urgent nudges, clarification, participant-facing state updates, or final wrap-up with no durable result; it may queue in the receiver inbox but is not durable task tracking. For multi-agent activity, assign one coordinator as authoritative state owner, use stable activity/turn/note ids, state participants/response channel/expected reply shape, separate authoritative updates from discussion, broadcast only meaningful state transitions, define completion/timeout/late-input rules up front, say who is waiting on whom when needed, and end with a clear final outcome. When you receive a done-mention note, treat it as informational completion notification rather than a fresh work request."
-            )
-        };
+        let board_guidance_text = build_board_guidance_text(
+            self.local_instance_id.as_deref(),
+            self.local_agent_id.as_deref(),
+        );
         #[cfg(not(feature = "stylos"))]
-        let board_guidance_text = "Board and coordination guidance: choose the lightest durable-enough channel. Answer simple direct requests without notes. Use a self-note when your own non-trivial or branching work needs durable tracking. For self-notes, prefer the magic local target to_instance=local to_agent_id=master. Do not invent remote identifiers for local-only board work. When delegating work another local agent must complete or report later, prefer a durable board note. Delegated notes should state task, expected output, constraints, and return path; if a durable response is needed, ask the worker to update the note result or create a done mention. When extra capacity or role separation helps, master should consider local_agent_create before delegating. If volatile peer messaging is available in the current build, use it only for short coordination, not durable task tracking. For multi-agent activity, assign one coordinator as authoritative state owner, use stable activity/turn/note ids, state participants/response channel/expected reply shape, separate authoritative updates from discussion, broadcast only meaningful state transitions, define completion/timeout/late-input rules up front, say who is waiting on whom when needed, and end with a clear final outcome. When you receive a done-mention note, treat it as informational completion notification rather than a fresh work request.".to_string();
+        let board_guidance_text = build_board_guidance_text(None, None);
         let board_guidance = vec![Message {
             role: "system".to_string(),
             content: Some(board_guidance_text),
@@ -2417,7 +2434,27 @@ mod tests {
         );
         assert!(text.contains("Your roles are: master, interactive."));
         assert!(text.contains("- master: Lead the team"));
+        assert!(text.contains("Only create or delegate to another local agent"));
+        assert!(text.contains("explicitly asks for delegation"));
+        assert!(text.contains("For non-trivial or branching work, use self-tracking"));
+        assert!(!text.contains("For non-trivial work, consider creating or delegating"));
         assert!(text.contains("- interactive: Own human-facing conversation"));
         assert!(!text.contains("Keep direct chat very short"));
+    }
+
+    #[test]
+    fn board_guidance_requires_authorization_before_local_agent_delegation() {
+        let text = build_board_guidance_text(Some("instance-1"), Some("master"));
+        assert!(text.contains("Delegation authorization is separate from delegation technique"));
+        assert!(text.contains("do not create another local agent"));
+        assert!(text.contains("unless the user explicitly asks for delegation"));
+        assert!(text.contains("Requests for depth, thoroughness, research"));
+        assert!(text.contains("do not count as delegation permission by themselves"));
+        assert!(text.contains("After delegation is explicitly authorized"));
+        assert!(text.contains("master may consider local_agent_create before delegating"));
+        assert!(text.contains(
+            "Use a self-note when your own non-trivial or branching work needs durable tracking"
+        ));
+        assert!(!text.contains("master should consider local_agent_create before delegating"));
     }
 }
