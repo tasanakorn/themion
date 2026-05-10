@@ -1592,7 +1592,11 @@ pub(crate) fn handle_agent_ready_event(
     );
     app.runtime.agent_busy =
         runtime_any_agent_busy(&app.runtime) || app.runtime.agent_activity.is_some();
+    if !app.runtime.agent_busy {
+        app.runtime.pending = None;
+    }
     app.mark_dirty_status();
+    publish_runtime_snapshot(app);
     app.request_draw(frame_requester);
 }
 
