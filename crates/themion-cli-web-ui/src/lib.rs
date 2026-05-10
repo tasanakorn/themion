@@ -358,7 +358,9 @@ impl SharedSocket {
             "agent" => agent_stream.update(|lines| lines.push(line)),
             "terminal" => shell_stream.update(|lines| lines.push(line)),
             "runtime" if envelope.target_id == "status" => {
-                if let Ok(payload) = serde_json::from_value::<WebStatusResponse>(envelope.payload.clone()) {
+                if let Ok(payload) =
+                    serde_json::from_value::<WebStatusResponse>(envelope.payload.clone())
+                {
                     status_signal.set(Some(payload));
                 }
             }
@@ -990,7 +992,12 @@ fn active_agent_activities(
         .unwrap_or_default();
     source_agents
         .into_iter()
-        .filter(|agent| agent.activity_status.as_deref().is_some_and(activity_status_is_active))
+        .filter(|agent| {
+            agent
+                .activity_status
+                .as_deref()
+                .is_some_and(activity_status_is_active)
+        })
         .collect()
 }
 
@@ -1035,7 +1042,12 @@ fn agent_activity_display_label(agent: &WebAgentStatus) -> String {
     agent
         .activity_label
         .clone()
-        .or_else(|| agent.activity_status.as_deref().map(activity_label_from_status))
+        .or_else(|| {
+            agent
+                .activity_status
+                .as_deref()
+                .map(activity_label_from_status)
+        })
         .unwrap_or_else(|| "Active".to_string())
 }
 
@@ -1107,7 +1119,8 @@ fn ActivityStrip(agents: Vec<WebAgentStatus>) -> impl IntoView {
                 }
             />
         </div>
-    }.into_any()
+    }
+    .into_any()
 }
 
 fn chat_entry_label(entry: &WebChatEntry) -> String {
@@ -1268,7 +1281,11 @@ async fn fetch_agents() -> Result<WebAgentsResponse, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{retry_delay_ms, sentence_case_status, websocket_connection_class, websocket_connection_short_label, websocket_connection_title, websocket_status_label, SocketLifecycleState, SubscriptionTarget};
+    use super::{
+        retry_delay_ms, sentence_case_status, websocket_connection_class,
+        websocket_connection_short_label, websocket_connection_title, websocket_status_label,
+        SocketLifecycleState, SubscriptionTarget,
+    };
 
     fn keydown_should_submit(key: &str, shift: bool, alt: bool, ctrl: bool, meta: bool) -> bool {
         key == "Enter" && !shift && !alt && !ctrl && !meta
@@ -1408,10 +1425,22 @@ mod tests {
 
     #[test]
     fn activity_status_labels_are_human_readable() {
-        assert_eq!(super::activity_label_from_status("waiting-model"), "Waiting for model");
-        assert_eq!(super::activity_label_from_status("streaming c:3 ch:42"), "Receiving response");
-        assert_eq!(super::activity_label_from_status("running-tool"), "Running tool");
-        assert_eq!(super::activity_label_from_status("unknown-state"), "Unknown state");
+        assert_eq!(
+            super::activity_label_from_status("waiting-model"),
+            "Waiting for model"
+        );
+        assert_eq!(
+            super::activity_label_from_status("streaming c:3 ch:42"),
+            "Receiving response"
+        );
+        assert_eq!(
+            super::activity_label_from_status("running-tool"),
+            "Running tool"
+        );
+        assert_eq!(
+            super::activity_label_from_status("unknown-state"),
+            "Unknown state"
+        );
     }
 
     #[test]
@@ -1432,7 +1461,13 @@ mod tests {
             recent_events: Vec::new(),
         };
         let active = super::active_agent_activities(Some(status), None);
-        assert_eq!(active.iter().map(|agent| agent.agent_id.as_str()).collect::<Vec<_>>(), vec!["master", "smith-1"]);
+        assert_eq!(
+            active
+                .iter()
+                .map(|agent| agent.agent_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["master", "smith-1"]
+        );
     }
 
     #[test]
@@ -1459,21 +1494,54 @@ mod tests {
 
     #[test]
     fn websocket_state_labels_match_ui_text() {
-        assert_eq!(websocket_status_label(SocketLifecycleState::Connecting.as_str()), "connecting");
-        assert_eq!(websocket_status_label(SocketLifecycleState::Open.as_str()), "open");
-        assert_eq!(websocket_status_label(SocketLifecycleState::Reconnecting.as_str()), "reconnecting…");
-        assert_eq!(websocket_status_label(SocketLifecycleState::Closed.as_str()), "closed");
+        assert_eq!(
+            websocket_status_label(SocketLifecycleState::Connecting.as_str()),
+            "connecting"
+        );
+        assert_eq!(
+            websocket_status_label(SocketLifecycleState::Open.as_str()),
+            "open"
+        );
+        assert_eq!(
+            websocket_status_label(SocketLifecycleState::Reconnecting.as_str()),
+            "reconnecting…"
+        );
+        assert_eq!(
+            websocket_status_label(SocketLifecycleState::Closed.as_str()),
+            "closed"
+        );
     }
 
     #[test]
     fn websocket_prompt_indicator_maps_lost_states() {
-        assert_eq!(websocket_connection_class(SocketLifecycleState::Open.as_str()), "open");
-        assert_eq!(websocket_connection_class(SocketLifecycleState::Connecting.as_str()), "connecting");
-        assert_eq!(websocket_connection_class(SocketLifecycleState::Reconnecting.as_str()), "lost");
-        assert_eq!(websocket_connection_class(SocketLifecycleState::Closed.as_str()), "lost");
-        assert_eq!(websocket_connection_short_label(SocketLifecycleState::Open.as_str()), "Live");
-        assert_eq!(websocket_connection_short_label(SocketLifecycleState::Reconnecting.as_str()), "Lost");
-        assert_eq!(websocket_connection_title(SocketLifecycleState::Reconnecting.as_str()), "WebSocket lost; reconnecting");
+        assert_eq!(
+            websocket_connection_class(SocketLifecycleState::Open.as_str()),
+            "open"
+        );
+        assert_eq!(
+            websocket_connection_class(SocketLifecycleState::Connecting.as_str()),
+            "connecting"
+        );
+        assert_eq!(
+            websocket_connection_class(SocketLifecycleState::Reconnecting.as_str()),
+            "lost"
+        );
+        assert_eq!(
+            websocket_connection_class(SocketLifecycleState::Closed.as_str()),
+            "lost"
+        );
+        assert_eq!(
+            websocket_connection_short_label(SocketLifecycleState::Open.as_str()),
+            "Live"
+        );
+        assert_eq!(
+            websocket_connection_short_label(SocketLifecycleState::Reconnecting.as_str()),
+            "Lost"
+        );
+        assert_eq!(
+            websocket_connection_title(SocketLifecycleState::Reconnecting.as_str()),
+            "WebSocket lost; reconnecting"
+        );
     }
 
     #[test]
@@ -1487,7 +1555,10 @@ mod tests {
 
     #[test]
     fn sentence_case_status_normalizes_hyphenated_values() {
-        assert_eq!(sentence_case_status("waiting-after-tool"), "Waiting after tool");
+        assert_eq!(
+            sentence_case_status("waiting-after-tool"),
+            "Waiting after tool"
+        );
         assert_eq!(sentence_case_status(""), "Unknown");
     }
 }
