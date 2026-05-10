@@ -948,16 +948,29 @@ fn App() -> impl IntoView {
                         <span class="shortcut">"Enter to submit · Shift+Enter for newline"</span>
                     </div>
                     <form on:submit=on_submit class="composer-form">
-                        <textarea
-                            prop:value=move || prompt.get()
-                            on:input=move |ev| {
-                                prompt.set(event_target_value(&ev));
-                                prompt_error.set(None);
-                            }
-                            on:keydown=on_prompt_keydown
-                            rows="3"
-                            placeholder="Ask the active agent…"
-                        />
+                        <div class="composer-input-wrap">
+                            <div
+                                class=move || format!(
+                                    "composer-connection {}",
+                                    websocket_connection_class(&socket_state.get())
+                                )
+                                title=move || websocket_connection_title(&socket_state.get())
+                                aria-label=move || websocket_connection_title(&socket_state.get())
+                            >
+                                <span class="composer-connection-dot" aria-hidden="true"></span>
+                                <span class="composer-connection-label">{move || websocket_connection_short_label(&socket_state.get())}</span>
+                            </div>
+                            <textarea
+                                prop:value=move || prompt.get()
+                                on:input=move |ev| {
+                                    prompt.set(event_target_value(&ev));
+                                    prompt_error.set(None);
+                                }
+                                on:keydown=on_prompt_keydown
+                                rows="3"
+                                placeholder="Ask the active agent…"
+                            />
+                        </div>
                         <button type="submit" class="primary-action">"Send"</button>
                     </form>
                     {move || prompt_error.get().map(|error| view! { <p class="muted">{error}</p> })}
@@ -1033,6 +1046,32 @@ fn websocket_status_label(state: &str) -> &'static str {
         "reconnecting" => "reconnecting…",
         "closed" => "closed",
         _ => "connecting",
+    }
+}
+
+fn websocket_connection_class(state: &str) -> &'static str {
+    match state {
+        "open" => "open",
+        "reconnecting" | "closed" => "lost",
+        _ => "connecting",
+    }
+}
+
+fn websocket_connection_short_label(state: &str) -> &'static str {
+    match state {
+        "open" => "Live",
+        "reconnecting" => "Lost",
+        "closed" => "Lost",
+        _ => "Conn",
+    }
+}
+
+fn websocket_connection_title(state: &str) -> &'static str {
+    match state {
+        "open" => "WebSocket connected",
+        "reconnecting" => "WebSocket lost; reconnecting",
+        "closed" => "WebSocket closed",
+        _ => "WebSocket connecting",
     }
 }
 
@@ -1229,7 +1268,7 @@ async fn fetch_agents() -> Result<WebAgentsResponse, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{retry_delay_ms, sentence_case_status, websocket_status_label, SocketLifecycleState, SubscriptionTarget};
+    use super::{retry_delay_ms, sentence_case_status, websocket_connection_class, websocket_connection_short_label, websocket_connection_title, websocket_status_label, SocketLifecycleState, SubscriptionTarget};
 
     fn keydown_should_submit(key: &str, shift: bool, alt: bool, ctrl: bool, meta: bool) -> bool {
         key == "Enter" && !shift && !alt && !ctrl && !meta
@@ -1424,6 +1463,17 @@ mod tests {
         assert_eq!(websocket_status_label(SocketLifecycleState::Open.as_str()), "open");
         assert_eq!(websocket_status_label(SocketLifecycleState::Reconnecting.as_str()), "reconnecting…");
         assert_eq!(websocket_status_label(SocketLifecycleState::Closed.as_str()), "closed");
+    }
+
+    #[test]
+    fn websocket_prompt_indicator_maps_lost_states() {
+        assert_eq!(websocket_connection_class(SocketLifecycleState::Open.as_str()), "open");
+        assert_eq!(websocket_connection_class(SocketLifecycleState::Connecting.as_str()), "connecting");
+        assert_eq!(websocket_connection_class(SocketLifecycleState::Reconnecting.as_str()), "lost");
+        assert_eq!(websocket_connection_class(SocketLifecycleState::Closed.as_str()), "lost");
+        assert_eq!(websocket_connection_short_label(SocketLifecycleState::Open.as_str()), "Live");
+        assert_eq!(websocket_connection_short_label(SocketLifecycleState::Reconnecting.as_str()), "Lost");
+        assert_eq!(websocket_connection_title(SocketLifecycleState::Reconnecting.as_str()), "WebSocket lost; reconnecting");
     }
 
     #[test]
