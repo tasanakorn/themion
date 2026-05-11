@@ -541,15 +541,21 @@ pub(crate) fn split_tool_call_detail(name: &str, args_json: &str) -> (String, Op
             ),
             None,
         ),
-        "workflow_get_state" | "get_workflow_state" => ("workflow: inspect".to_string(), None),
-        "workflow_set_active" | "set_workflow" => {
-            (format!("workflow: set {}", t("workflow")), None)
-        }
-        "workflow_set_phase" | "set_workflow_phase" => {
-            (format!("workflow: phase {}", t("phase")), None)
-        }
-        "workflow_complete" | "complete_workflow" => {
-            (format!("workflow: complete {}", t("outcome")), None)
+        "workflow_get_state" => ("workflow: inspect".to_string(), None),
+        "workflow_set" => {
+            let target = args["workflow"]
+                .as_str()
+                .or_else(|| args["phase"].as_str())
+                .or_else(|| args["phase_result"].as_str())
+                .or_else(|| args["workflow_status"].as_str())
+                .unwrap_or("?");
+            (
+                format!(
+                    "workflow: set {}",
+                    center_trim(target, TOOL_DETAIL_MAX_CHARS)
+                ),
+                None,
+            )
         }
         "stylos_send_message" => (
             format!(

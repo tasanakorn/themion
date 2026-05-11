@@ -38,7 +38,7 @@ Because current-session runtime state can now change through explicit session-on
 5. The active backend streams the assistant response.
 6. If the model requests tools, the harness executes them and appends tool results to the conversation.
 7. The harness calls the model again with the updated conversation.
-8. Workflow tools may also inspect or mutate the current workflow state between model calls.
+8. Workflow tools may also inspect or mutate the current workflow state between model calls. The active workflow tool surface is now `workflow_get_state` for inspection and `workflow_set` for mutation. `workflow_set` supports only a narrow patch-style shape: workflow activation, phase-result update, phase change, terminal workflow-status update, plus the supported combined cases `phase_result + phase` and `phase_result + workflow_status`.
 9. This repeats until the model returns a normal assistant response with no more tool calls, or another existing runtime stop condition ends the turn.
 10. The turn is finalized in SQLite with message, workflow, token, and turn-level runtime metadata.
 

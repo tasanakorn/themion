@@ -145,6 +145,179 @@ fn patch_file_ack(
     })
 }
 
+fn workflow_state_to_json(state: &WorkflowState) -> Value {
+    json!({
+        "workflow": state.workflow_name,
+        "phase": state.phase_name,
+        "status": state.status,
+        "phase_result": state.phase_result,
+        "agent": state.agent_name,
+        "last_updated_turn_seq": state.last_updated_turn_seq,
+        "retry_state": state.retry_state,
+        "allowed_next_phases": allowed_transitions(&state.workflow_name, &state.phase_name),
+        "allowed_retry_current_phase": can_retry_current_phase(&state.workflow_name, &state.phase_name),
+        "allowed_retry_previous_phase": can_retry_previous_phase(&state.workflow_name, &state.phase_name),
+        "previous_phase": previous_phase(&state.workflow_name, &state.phase_name),
+        "phase_instructions": phase_instructions(&state.workflow_name, &state.phase_name),
+    })
+}
+
+fn parse_workflow_set_phase_result(value: &str) -> Result<PhaseResult> {
+    match value {
+        "passed" => Ok(PhaseResult::Passed),
+        "failed" => Ok(PhaseResult::Failed),
+        "user_feedback_required" => Ok(PhaseResult::UserFeedbackRequired),
+        other => anyhow::bail!("invalid phase_result: {other}"),
+    }
+}
+
+fn parse_workflow_set_status(value: &str) -> Result<WorkflowStatus> {
+    let status = WorkflowStatus::from_str(value);
+    match status {
+        WorkflowStatus::Completed | WorkflowStatus::Failed => Ok(status),
+        _ => anyhow::bail!("invalid workflow_status: {value}"),
+    }
+}
+
+fn build_workflow_set_state(
+    args: &Value,
+    current: &WorkflowState,
+    turn_seq: Option<u32>,
+) -> Result<WorkflowState> {
+    let workflow = args.get("workflow").and_then(Value::as_str);
+    let phase_result_raw = args.get("phase_result").and_then(Value::as_str);
+    let phase = args.get("phase").and_then(Value::as_str);
+    let workflow_status_raw = args.get("workflow_status").and_then(Value::as_str);
+
+    if workflow.is_none()
+        && phase_result_raw.is_none()
+        && phase.is_none()
+        && workflow_status_raw.is_none()
+    {
+        anyhow::bail!("workflow_set requires at least one field");
+    }
+
+    if let Some(workflow_name) = workflow {
+        if phase_result_raw.is_some() || phase.is_some() || workflow_status_raw.is_some() {
+            anyhow::bail!(
+                "workflow cannot be combined with phase_result, phase, or workflow_status"
+            );
+        }
+        let workflow = normalize_workflow_name(workflow_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown workflow: {workflow_name}"))?;
+        let start_phase = start_phase_for_workflow(workflow)
+            .ok_or_else(|| anyhow::anyhow!("workflow missing start phase: {workflow}"))?;
+        return Ok(WorkflowState {
+            workflow_name: workflow.to_string(),
+            phase_name: start_phase.to_string(),
+            status: WorkflowStatus::Running,
+            phase_result: PhaseResult::Pending,
+            agent_name: DEFAULT_AGENT.to_string(),
+            last_updated_turn_seq: turn_seq,
+            retry_state: WorkflowState::default().retry_state,
+        });
+    }
+
+    let phase_result = phase_result_raw
+        .map(parse_workflow_set_phase_result)
+        .transpose()?;
+    let workflow_status = workflow_status_raw
+        .map(parse_workflow_set_status)
+        .transpose()?;
+
+    if phase.is_some() && workflow_status.is_some() {
+        anyhow::bail!("phase cannot be combined with workflow_status");
+    }
+
+    match (phase_result, phase, workflow_status) {
+        (Some(PhaseResult::Passed), Some(next_phase), None) | (None, Some(next_phase), None) => {
+            if !can_transition(&current.workflow_name, &current.phase_name, next_phase) {
+                anyhow::bail!(
+                    "cannot transition workflow {} from {} to {}",
+                    current.workflow_name,
+                    current.phase_name,
+                    next_phase
+                );
+            }
+            let mut next = current.clone();
+            next.phase_name = next_phase.to_string();
+            next.status = WorkflowStatus::Running;
+            next.phase_result = PhaseResult::Pending;
+            next.last_updated_turn_seq = turn_seq;
+            next.retry_state = WorkflowState::default().retry_state;
+            Ok(next)
+        }
+        (Some(PhaseResult::Failed), Some(_), None) => {
+            anyhow::bail!("phase_result=failed cannot be combined with phase")
+        }
+        (Some(PhaseResult::UserFeedbackRequired), Some(_), None) => {
+            anyhow::bail!("phase_result=user_feedback_required cannot be combined with phase")
+        }
+        (Some(PhaseResult::Pending), Some(_), None) => {
+            anyhow::bail!("invalid phase_result")
+        }
+        (Some(PhaseResult::Passed), None, Some(WorkflowStatus::Completed)) => {
+            let mut next = current.clone();
+            next.status = WorkflowStatus::Completed;
+            next.phase_result = PhaseResult::Passed;
+            next.last_updated_turn_seq = turn_seq;
+            Ok(next)
+        }
+        (Some(PhaseResult::Failed), None, Some(WorkflowStatus::Failed)) => {
+            let mut next = current.clone();
+            next.status = WorkflowStatus::Failed;
+            next.phase_result = PhaseResult::Failed;
+            next.last_updated_turn_seq = turn_seq;
+            Ok(next)
+        }
+        (Some(PhaseResult::Failed), None, Some(WorkflowStatus::Completed)) => {
+            anyhow::bail!("phase_result=failed cannot be combined with workflow_status=completed")
+        }
+        (Some(PhaseResult::UserFeedbackRequired), None, Some(_)) => {
+            anyhow::bail!(
+                "phase_result=user_feedback_required cannot be combined with workflow_status"
+            )
+        }
+        (Some(PhaseResult::Passed), None, Some(WorkflowStatus::Failed)) => {
+            anyhow::bail!("phase_result=passed cannot be combined with workflow_status=failed")
+        }
+        (Some(PhaseResult::Pending), None, Some(_)) => {
+            anyhow::bail!("invalid phase_result")
+        }
+        (None, None, Some(WorkflowStatus::Completed)) => {
+            if current.phase_result != PhaseResult::Passed {
+                anyhow::bail!(
+                    "workflow can only complete successfully when current phase_result=passed"
+                );
+            }
+            let mut next = current.clone();
+            next.status = WorkflowStatus::Completed;
+            next.last_updated_turn_seq = turn_seq;
+            Ok(next)
+        }
+        (None, None, Some(WorkflowStatus::Failed)) => {
+            let mut next = current.clone();
+            next.status = WorkflowStatus::Failed;
+            next.last_updated_turn_seq = turn_seq;
+            Ok(next)
+        }
+        (Some(result), None, None) => {
+            let mut next = current.clone();
+            next.phase_result = result;
+            if result == PhaseResult::UserFeedbackRequired {
+                next.status = WorkflowStatus::WaitingUser;
+            }
+            next.last_updated_turn_seq = turn_seq;
+            Ok(next)
+        }
+        (None, Some(_), Some(_)) => unreachable!(),
+        (Some(_), Some(_), Some(_)) => unreachable!(),
+        (None, None, Some(_)) => anyhow::bail!("invalid workflow_status"),
+        (None, None, None) => unreachable!(),
+        _ => anyhow::bail!("invalid workflow_set combination"),
+    }
+}
+
 const MAX_PATCH_BYTES: usize = 256 * 1024;
 const MAX_PATCH_TARGETS: usize = 32;
 const MAX_PATCH_HUNKS: usize = 256;
@@ -1341,45 +1514,17 @@ pub fn tool_definitions() -> Value {
         json!({
             "type": "function",
             "function": {
-                "name": "workflow_set_active",
-                "description": "Activate a workflow and reset to its start phase.",
+                "name": "workflow_set",
+                "description": "Apply workflow state changes.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "workflow": { "type": "string", "description": "Workflow name." },
-                        "reason": { "type": "string", "description": "Reason." }
+                        "workflow": { "type": "string", "description": "Workflow name to activate." },
+                        "phase_result": { "type": "string", "enum": ["passed", "failed", "user_feedback_required"], "description": "Current phase result." },
+                        "phase": { "type": "string", "description": "Next phase in the active workflow." },
+                        "workflow_status": { "type": "string", "enum": ["completed", "failed"], "description": "Terminal workflow status to set." }
                     },
-                    "required": ["workflow"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "workflow_set_phase",
-                "description": "Request a phase transition in the active workflow.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "phase": { "type": "string", "description": "Next phase." },
-                        "reason": { "type": "string", "description": "Reason." }
-                    },
-                    "required": ["phase"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "workflow_set_phase_result",
-                "description": "Set the current phase result.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "result": { "type": "string", "enum": ["passed", "failed", "user_feedback_required"] },
-                        "reason": { "type": "string", "description": "Reason." }
-                    },
-                    "required": ["result"]
+                    "required": []
                 }
             }
         }),
@@ -1484,21 +1629,6 @@ pub fn tool_definitions() -> Value {
                         "reason": { "type": "string", "description": "Optional reason." }
                     },
                     "required": ["agent_id"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "workflow_complete",
-                "description": "Complete or fail the current workflow. Success requires phase_result=passed.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "outcome": { "type": "string", "enum": ["completed", "failed"] },
-                        "reason": { "type": "string", "description": "Reason." }
-                    },
-                    "required": ["outcome"]
                 }
             }
         }),
@@ -2159,134 +2289,20 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             result.tools.tool_count = result.tools.available_names.len();
             Ok(serde_json::to_string(&result)?)
         }
-        "workflow_get_state" | "get_workflow_state" => {
+        "workflow_get_state" => {
             let state = ctx
                 .workflow_state
                 .clone()
                 .unwrap_or_else(WorkflowState::default);
-            Ok(json!({
-                "workflow": state.workflow_name,
-                "phase": state.phase_name,
-                "status": state.status,
-                "phase_result": state.phase_result,
-                "agent": state.agent_name,
-                "last_updated_turn_seq": state.last_updated_turn_seq,
-                "retry_state": state.retry_state,
-                "allowed_next_phases": allowed_transitions(&state.workflow_name, &state.phase_name),
-                "allowed_retry_current_phase": can_retry_current_phase(&state.workflow_name, &state.phase_name),
-                "allowed_retry_previous_phase": can_retry_previous_phase(&state.workflow_name, &state.phase_name),
-                "previous_phase": previous_phase(&state.workflow_name, &state.phase_name),
-                "phase_instructions": phase_instructions(&state.workflow_name, &state.phase_name),
-            })
-            .to_string())
+            Ok(workflow_state_to_json(&state).to_string())
         }
-        "workflow_set_active" | "set_workflow" => {
-            let workflow = args["workflow"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("missing workflow"))?;
-            let workflow = normalize_workflow_name(workflow)
-                .ok_or_else(|| anyhow::anyhow!("unknown workflow: {workflow}"))?;
-            let start_phase = start_phase_for_workflow(workflow)
-                .ok_or_else(|| anyhow::anyhow!("workflow missing start phase: {workflow}"))?;
-            Ok(json!({
-                "workflow": workflow,
-                "phase": start_phase,
-                "status": WorkflowStatus::Running,
-                "phase_result": PhaseResult::Pending,
-                "agent": DEFAULT_AGENT,
-                "reason": args["reason"].as_str(),
-                "retry_state": WorkflowState::default().retry_state,
-            })
-            .to_string())
-        }
-        "workflow_set_phase" | "set_workflow_phase" => {
-            let phase = args["phase"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("missing phase"))?;
-            let state = ctx
+        "workflow_set" => {
+            let current = ctx
                 .workflow_state
                 .clone()
                 .unwrap_or_else(WorkflowState::default);
-            if !can_transition(&state.workflow_name, &state.phase_name, phase) {
-                anyhow::bail!(
-                    "cannot transition workflow {} from {} to {}",
-                    state.workflow_name,
-                    state.phase_name,
-                    phase
-                );
-            }
-            Ok(json!({
-                "workflow": state.workflow_name,
-                "phase": phase,
-                "status": WorkflowStatus::Running,
-                "phase_result": PhaseResult::Pending,
-                "agent": state.agent_name,
-                "reason": args["reason"].as_str(),
-                "retry_state": state.retry_state,
-            })
-            .to_string())
-        }
-        "workflow_set_phase_result" => {
-            let result = args["result"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("missing result"))?;
-            let normalized = match result {
-                "passed" => PhaseResult::Passed,
-                "failed" => PhaseResult::Failed,
-                "user_feedback_required" => PhaseResult::UserFeedbackRequired,
-                other => anyhow::bail!("invalid phase result: {other}"),
-            };
-            let state = ctx
-                .workflow_state
-                .clone()
-                .unwrap_or_else(WorkflowState::default);
-            Ok(json!({
-                "workflow": state.workflow_name,
-                "phase": state.phase_name,
-                "status": state.status,
-                "phase_result": normalized,
-                "agent": state.agent_name,
-                "reason": args["reason"].as_str(),
-                "retry_state": state.retry_state,
-            })
-            .to_string())
-        }
-        "workflow_complete" | "complete_workflow" => {
-            let outcome = args["outcome"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("missing outcome"))?;
-            let state = ctx
-                .workflow_state
-                .clone()
-                .unwrap_or_else(WorkflowState::default);
-            match outcome {
-                "completed" => {
-                    if state.phase_result != PhaseResult::Passed {
-                        anyhow::bail!("workflow can only complete successfully when current phase_result=passed");
-                    }
-                    Ok(json!({
-                        "workflow": state.workflow_name,
-                        "phase": state.phase_name,
-                        "status": WorkflowStatus::Completed,
-                        "phase_result": state.phase_result,
-                        "agent": state.agent_name,
-                        "reason": args["reason"].as_str(),
-                        "retry_state": state.retry_state,
-                    })
-                    .to_string())
-                }
-                "failed" => Ok(json!({
-                    "workflow": state.workflow_name,
-                    "phase": state.phase_name,
-                    "status": WorkflowStatus::Failed,
-                    "phase_result": state.phase_result,
-                    "agent": state.agent_name,
-                    "reason": args["reason"].as_str(),
-                    "retry_state": state.retry_state,
-                })
-                .to_string()),
-                other => anyhow::bail!("invalid outcome: {other}"),
-            }
+            let next = build_workflow_set_state(&args, &current, ctx.turn_seq)?;
+            Ok(workflow_state_to_json(&next).to_string())
         }
         _ => anyhow::bail!("unknown tool: {name}"),
     }
@@ -2294,6 +2310,27 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
 
 #[cfg(test)]
 mod tests {
+    use crate::workflow::{PhaseResult, WorkflowState, WorkflowStatus};
+
+    fn workflow_test_ctx(state: WorkflowState) -> ToolCtx {
+        let project_dir = tempdir().unwrap();
+        let project_dir_path = project_dir.keep();
+        let db = DbHandle::open_in_memory().unwrap();
+        let session_id = Uuid::new_v4();
+        db.insert_session(session_id, &project_dir_path, true)
+            .unwrap();
+        ToolCtx {
+            db,
+            session_id,
+            project_dir: project_dir_path,
+            workflow_state: Some(state),
+            turn_seq: Some(7),
+            local_agent_tool_invoker: None,
+            source_analysis_tool_invoker: None,
+            system_inspection: None,
+        }
+    }
+
     use super::*;
     use serde_json::json;
     use std::fs;
@@ -2301,6 +2338,106 @@ mod tests {
 
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
+
+    #[tokio::test]
+    async fn workflow_tool_definitions_expose_only_get_and_set() {
+        let defs = tool_definitions();
+        let functions = defs.as_array().expect("tool definitions array");
+        assert!(functions
+            .iter()
+            .any(|entry| entry["function"]["name"] == "workflow_get_state"));
+        let workflow_set = functions
+            .iter()
+            .find(|entry| entry["function"]["name"] == "workflow_set")
+            .expect("workflow_set definition");
+        assert_eq!(
+            workflow_set["function"]["parameters"]["properties"]["workflow_status"]["enum"],
+            json!(["completed", "failed"])
+        );
+        for removed in [
+            "workflow_set_active",
+            "workflow_set_phase",
+            "workflow_set_phase_result",
+            "workflow_complete",
+        ] {
+            assert!(functions
+                .iter()
+                .all(|entry| entry["function"]["name"] != removed));
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_set_combines_pass_and_phase_move() {
+        let mut state = WorkflowState::default();
+        state.workflow_name = "LITE".to_string();
+        state.phase_name = "EXECUTE".to_string();
+        state.phase_result = PhaseResult::Failed;
+        state.status = WorkflowStatus::WaitingUser;
+        state.retry_state.current_phase_retries = 2;
+        let ctx = workflow_test_ctx(state);
+
+        let result = execute_tool(
+            "workflow_set",
+            r#"{"phase_result":"passed","phase":"VALIDATE"}"#,
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["workflow"], json!("LITE"));
+        assert_eq!(parsed["phase"], json!("VALIDATE"));
+        assert_eq!(parsed["status"], json!("running"));
+        assert_eq!(parsed["phase_result"], json!("pending"));
+        assert_eq!(parsed["retry_state"]["current_phase_retries"], json!(0));
+    }
+
+    #[tokio::test]
+    async fn workflow_set_user_feedback_required_sets_waiting_user() {
+        let mut state = WorkflowState::default();
+        state.workflow_name = "LITE".to_string();
+        state.phase_name = "CLARIFY".to_string();
+        let ctx = workflow_test_ctx(state);
+
+        let result = execute_tool(
+            "workflow_set",
+            r#"{"phase_result":"user_feedback_required"}"#,
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["status"], json!("waiting_user"));
+        assert_eq!(parsed["phase_result"], json!("user_feedback_required"));
+    }
+
+    #[tokio::test]
+    async fn workflow_set_rejects_invalid_combination() {
+        let ctx = workflow_test_ctx(WorkflowState::default());
+        let result = execute_tool(
+            "workflow_set",
+            r#"{"phase_result":"failed","phase":"EXECUTE"}"#,
+            &ctx,
+        )
+        .await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be combined with phase"));
+    }
+
+    #[tokio::test]
+    async fn workflow_set_rejects_completion_without_passed_phase() {
+        let mut state = WorkflowState::default();
+        state.phase_result = PhaseResult::Failed;
+        let ctx = workflow_test_ctx(state);
+        let result = execute_tool("workflow_set", r#"{"workflow_status":"completed"}"#, &ctx).await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("phase_result=passed"));
+    }
 
     #[test]
     fn tool_definitions_include_fs_patch_schema() {

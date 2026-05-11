@@ -4879,7 +4879,7 @@ dependencies = [
 
 [[package]]
 name = "themion-cli"
-version = "0.74.0"
+version = "0.75.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -4910,7 +4910,7 @@ dependencies = [
 
 [[package]]
 name = "themion-cli-web-ui"
-version = "0.74.0"
+version = "0.75.0"
 dependencies = [
  "console_error_panic_hook",
  "gloo-net",
@@ -4924,7 +4924,7 @@ dependencies = [
 
 [[package]]
 name = "themion-core"
-version = "0.74.0"
+version = "0.75.0"
 dependencies = [
  "anyhow",
  "async-trait",
