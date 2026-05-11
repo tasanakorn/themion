@@ -17,7 +17,7 @@ const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_CONTINUATION_FAILED_NOTICE: &str =
     "codex stream: completed end_turn=false continuation=failed";
-const DEFAULT_CODEX_REASONING_EFFORT: &str = "medium";
+const DEFAULT_CODEX_REASONING_EFFORT: &str = "high";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitWindow {
