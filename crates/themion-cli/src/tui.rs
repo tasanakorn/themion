@@ -2331,14 +2331,6 @@ fn build_watchdog_review_lines(app: &App) -> Vec<Line<'static>> {
         )]));
         lines.push(Line::from(format!("stylos: {}", stylos_state)));
         lines.push(Line::from(format!(
-            "pending_watchdog_note: {}",
-            snapshot.pending_watchdog_note
-        )));
-        lines.push(Line::from(format!(
-            "active_incoming_prompts: {}",
-            snapshot.active_incoming_prompt_count
-        )));
-        lines.push(Line::from(format!(
             "aggregate_busy: {}",
             snapshot.aggregate_busy_agents
         )));
@@ -2357,8 +2349,8 @@ fn build_watchdog_review_lines(app: &App) -> Vec<Line<'static>> {
             agent.roles.join(",")
         };
         lines.push(Line::from(format!(
-            "{} | label={} | roles={} | busy={} | incoming={}",
-            agent.agent_id, agent.label, roles, agent.busy, agent.incoming
+            "{} | label={} | roles={} | busy={}",
+            agent.agent_id, agent.label, roles, agent.busy
         )));
     }
     lines.push(Line::from(""));

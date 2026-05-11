@@ -508,7 +508,6 @@ pub struct StylosHandle {
     queryable_task: Option<JoinHandle<()>>,
     cmd_task: Option<JoinHandle<()>>,
     cmd_rx: Option<mpsc::UnboundedReceiver<StylosCmdRequest>>,
-    prompt_rx: Option<mpsc::UnboundedReceiver<IncomingPromptRequest>>,
     event_rx: Option<mpsc::UnboundedReceiver<String>>,
     query_context: StylosQueryContext,
     activity_counters: Arc<StylosActivityCounters>,
@@ -516,7 +515,6 @@ pub struct StylosHandle {
 
 impl StylosHandle {
     pub fn off() -> Self {
-        let (_prompt_tx, prompt_rx) = mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let notes_db = themion_core::db::DbHandle::open_in_memory().expect("in-memory notes db");
         Self {
@@ -526,7 +524,6 @@ impl StylosHandle {
             queryable_task: None,
             cmd_task: None,
             cmd_rx: None,
-            prompt_rx: Some(prompt_rx),
             event_rx: Some(event_rx),
             query_context: StylosQueryContext {
                 event_tx,
@@ -544,10 +541,6 @@ impl StylosHandle {
 
     pub fn take_cmd_rx(&mut self) -> Option<mpsc::UnboundedReceiver<StylosCmdRequest>> {
         self.cmd_rx.take()
-    }
-
-    pub fn take_prompt_rx(&mut self) -> Option<mpsc::UnboundedReceiver<IncomingPromptRequest>> {
-        self.prompt_rx.take()
     }
 
     pub fn take_event_rx(&mut self) -> Option<mpsc::UnboundedReceiver<String>> {
@@ -948,7 +941,6 @@ async fn start_inner(
     );
 
     let ct = CancellationToken::new();
-    let (_prompt_tx, prompt_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let message_inbox = MessageInbox::default();
     let activity_counters = Arc::new(StylosActivityCounters::default());
@@ -1181,7 +1173,6 @@ async fn start_inner(
         queryable_task: Some(queryable_task),
         cmd_task: Some(cmd_task),
         cmd_rx: Some(cmd_rx),
-        prompt_rx: Some(prompt_rx),
         event_rx: Some(event_rx),
         query_context,
         activity_counters,

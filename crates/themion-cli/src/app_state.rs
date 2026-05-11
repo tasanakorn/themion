@@ -31,12 +31,6 @@ pub(crate) enum AppRuntimeEvent {
     AgentReady(Box<themion_core::agent::Agent>, Uuid),
     #[cfg(feature = "stylos")]
     StylosCmd(crate::stylos::StylosCmdRequest),
-    #[cfg(feature = "stylos")]
-    IncomingPrompt(crate::local_prompts::IncomingPromptRequest),
-    #[cfg(feature = "stylos")]
-    DrainMessageInbox {
-        agent_id: String,
-    },
     WatchdogTick,
     #[cfg(feature = "stylos")]
     StylosEvent(String),
@@ -116,7 +110,6 @@ pub struct AppSnapshotAgent {
     pub label: String,
     pub roles: Vec<String>,
     pub busy: bool,
-    pub incoming: bool,
     pub activity_status: Option<String>,
     pub activity_label: Option<String>,
     pub activity_changed_at_ms: Option<u64>,
@@ -148,10 +141,6 @@ pub struct AppSnapshot {
     pub local_agents: Vec<AppSnapshotAgent>,
     #[cfg(feature = "stylos")]
     pub stylos_status: Option<String>,
-    #[cfg(feature = "stylos")]
-    pub pending_watchdog_note: bool,
-    #[cfg(feature = "stylos")]
-    pub active_incoming_prompt_count: usize,
     #[cfg(feature = "stylos")]
     pub aggregate_busy_agents: bool,
 }
@@ -241,7 +230,7 @@ pub(crate) struct AppRuntimeState {
     #[cfg(feature = "stylos")]
     pub last_sender_side_transport_event: Option<crate::stylos::SenderSideTransportEvent>,
     #[cfg(feature = "stylos")]
-    pub incoming_prompts: crate::app_runtime::IncomingPromptState,
+    pub last_board_note_prompt_by_agent: std::collections::HashMap<String, String>,
     #[cfg(feature = "stylos")]
     pub last_assistant_text: Option<String>,
 }
@@ -332,7 +321,7 @@ impl AppRuntimeState {
             #[cfg(feature = "stylos")]
             last_sender_side_transport_event: None,
             #[cfg(feature = "stylos")]
-            incoming_prompts: Default::default(),
+            last_board_note_prompt_by_agent: Default::default(),
             #[cfg(feature = "stylos")]
             last_assistant_text: None,
         }
@@ -396,7 +385,6 @@ impl AppState {
                 label: "master".to_string(),
                 roles: vec!["master".to_string(), "interactive".to_string()],
                 busy: false,
-                incoming: false,
                 activity_status: None,
                 activity_label: None,
                 activity_changed_at_ms: None,
@@ -404,9 +392,6 @@ impl AppState {
             #[cfg(feature = "stylos")]
             stylos_status: Some("off".to_string()),
             #[cfg(feature = "stylos")]
-            pending_watchdog_note: false,
-            #[cfg(feature = "stylos")]
-            active_incoming_prompt_count: 0,
             #[cfg(feature = "stylos")]
             aggregate_busy_agents: false,
         });
@@ -470,7 +455,7 @@ impl AppState {
                 #[cfg(feature = "stylos")]
                 last_sender_side_transport_event: None,
                 #[cfg(feature = "stylos")]
-                incoming_prompts: Default::default(),
+                last_board_note_prompt_by_agent: Default::default(),
                 #[cfg(feature = "stylos")]
                 last_assistant_text: None,
             },
@@ -1234,10 +1219,8 @@ pub(crate) fn publish_runtime_snapshot(app: &mut App) {
         .unwrap_or_else(|| "off".to_string());
     #[cfg(feature = "stylos")]
     let stylos = app.runtime.stylos.as_ref().map(|_| {
-        let agent_status_entries = crate::app_runtime::build_local_agent_status_entries(
-            &app.runtime.agents,
-            &app.runtime.incoming_prompts,
-        );
+        let agent_status_entries =
+            crate::app_runtime::build_local_agent_status_entries(&app.runtime.agents);
         crate::app_runtime::StylosRuntimeStatusPublishState {
             hub: &app.runtime.shared_status_hub,
             startup_project_dir: &app.runtime.startup_project_dir,
@@ -1272,8 +1255,6 @@ pub(crate) fn publish_runtime_snapshot(app: &mut App) {
                             .runtime
                             .agent_activity_changed_at_by_session,
                         stylos_status: Some(stylos_status),
-                        watchdog_state: &app.runtime.watchdog_state,
-                        incoming_prompts: &app.runtime.incoming_prompts,
                     }
                 }
                 #[cfg(not(feature = "stylos"))]
@@ -1309,25 +1290,6 @@ pub(crate) fn publish_runtime_snapshot(app: &mut App) {
             stylos,
         },
     );
-}
-
-#[cfg(feature = "stylos")]
-pub(crate) fn handle_incoming_prompt_event(
-    app: &mut App,
-    request: crate::local_prompts::IncomingPromptRequest,
-    app_tx: &mpsc::UnboundedSender<crate::tui::AppEvent>,
-) {
-    app.runtime.activity_counters.incoming_prompt_count += 1;
-    process_incoming_prompt_request(app, request, app_tx);
-}
-
-#[cfg(feature = "stylos")]
-fn schedule_message_inbox_drain(app: &App, agent_id: &str) {
-    let tx = app.runtime.runtime_tx.clone();
-    let agent_id = agent_id.to_string();
-    app.runtime.background_domain().spawn(async move {
-        let _ = tx.send(AppRuntimeEvent::DrainMessageInbox { agent_id });
-    });
 }
 
 #[cfg(feature = "stylos")]
@@ -1378,10 +1340,7 @@ fn drain_one_inbox_message_for_agent(
         }
         return;
     };
-    if app.runtime.agents[index].busy
-        || crate::app_runtime::incoming_prompt_request(&app.runtime.incoming_prompts, &agent_id)
-            .is_some()
-    {
+    if app.runtime.agents[index].busy {
         return;
     }
     let Some(item) = handle.query_context().message_inbox().pop_next(&agent_id) else {
@@ -1579,11 +1538,6 @@ pub(crate) fn process_agent_event(
             app.runtime.activity_counters.agent_turn_completed_count += 1;
             app.runtime.agent_busy =
                 runtime_any_agent_busy(&app.runtime) || app.runtime.agent_activity.is_some();
-            #[cfg(feature = "stylos")]
-            if let Some(agent_index) = completed_agent_index {
-                let agent_id = app.runtime.agents[agent_index].agent_id.clone();
-                schedule_message_inbox_drain(app, &agent_id);
-            }
             if let Some(last_api_call_tokens_in) = stats.last_api_call_tokens_in {
                 app.runtime.last_ctx_tokens = last_api_call_tokens_in;
             }
@@ -1615,10 +1569,6 @@ pub(crate) fn handle_agent_ready_event(
         &mut app.runtime.workflow_state,
         sid,
         agent,
-        #[cfg(feature = "stylos")]
-        &app.runtime.watchdog_state,
-        #[cfg(feature = "stylos")]
-        &app.runtime.incoming_prompts,
     );
     app.runtime.agent_busy =
         runtime_any_agent_busy(&app.runtime) || app.runtime.agent_activity.is_some();
@@ -1772,55 +1722,17 @@ pub(crate) fn resolve_and_submit_text(
     text: String,
     _app_tx: &mpsc::UnboundedSender<crate::tui::AppEvent>,
 ) {
-    let active_request = app.runtime.agents.iter().find_map(|h| {
-        crate::app_runtime::incoming_prompt_request(&app.runtime.incoming_prompts, &h.agent_id)
+    let agent_index = app
+        .runtime
+        .agents
+        .iter()
+        .position(crate::app_runtime::is_interactive_agent_handle)
+        .expect("interactive agent");
+    let submitted_agent_id = app.runtime.agents[agent_index].agent_id.clone();
+    app.push(crate::tui::Entry::User {
+        agent_id: Some(submitted_agent_id),
+        text: text.clone(),
     });
-    let resolution = crate::app_runtime::resolve_submit_target(
-        &crate::app_runtime::build_local_agent_status_entries(
-            &app.runtime.agents,
-            &app.runtime.incoming_prompts,
-        ),
-        active_request,
-    );
-    let agent_index = match resolution {
-        crate::app_runtime::SubmitTargetResolution::Interactive { agent_index }
-        | crate::app_runtime::SubmitTargetResolution::IncomingPromptTarget { agent_index } => {
-            agent_index
-        }
-        crate::app_runtime::SubmitTargetResolution::MissingIncomingPromptTarget {
-            active_agent_index,
-            ..
-        } => {
-            let effect = crate::app_runtime::submit_target_failure_effect(&resolution)
-                .expect("missing target resolution has failure effect");
-            app.push(crate::tui::Entry::RemoteEvent {
-                agent_id: None,
-                source: Some(crate::tui::NonAgentSource::Board),
-                text: effect.log_text,
-            });
-            crate::app_runtime::clear_active_incoming_prompt(
-                &app.runtime.agents,
-                &mut app.runtime.incoming_prompts,
-                &app.runtime.watchdog_state,
-                active_agent_index,
-            );
-            return;
-        }
-    };
-
-    if crate::app_runtime::incoming_prompt_request(
-        &app.runtime.incoming_prompts,
-        &app.runtime.agents[agent_index].agent_id,
-    )
-    .is_none()
-    {
-        let submitted_agent_id = app.runtime.agents[agent_index].agent_id.clone();
-        app.push(crate::tui::Entry::User {
-            agent_id: Some(submitted_agent_id),
-            text: text.clone(),
-        });
-    }
-
     submit_text_to_agent(app, agent_index, text);
 }
 
@@ -1870,14 +1782,7 @@ fn process_incoming_prompt_request(
                 .iter()
                 .find(|agent| agent.agent_id == agent_id)
         })
-        .map(|agent| {
-            agent.busy
-                || crate::app_runtime::incoming_prompt_request(
-                    &app.runtime.incoming_prompts,
-                    &agent.agent_id,
-                )
-                .is_some()
-        })
+        .map(|agent| agent.busy)
         .unwrap_or(false);
     if request_is_peer_message && agent_busy_for_request {
         if let Some(handle) = app.runtime.stylos.as_ref() {
@@ -1937,10 +1842,7 @@ fn process_incoming_prompt_request(
     }
 
     let outcome = crate::app_runtime::plan_incoming_prompt(
-        &crate::app_runtime::build_local_agent_status_entries(
-            &app.runtime.agents,
-            &app.runtime.incoming_prompts,
-        ),
+        &crate::app_runtime::build_local_agent_status_entries(&app.runtime.agents),
         &app.runtime.board_claims,
         request,
     );
@@ -1957,14 +1859,15 @@ fn process_incoming_prompt_request(
         Ok(apply_plan) => apply_plan,
         Err(_outcome) => return,
     };
-    crate::app_runtime::apply_active_incoming_prompt(
-        &app.runtime.agents,
-        &mut app.runtime.incoming_prompts,
-        &app.runtime.watchdog_state,
-        apply_plan.accepted_agent_index,
-        apply_plan.accepted_request,
-        apply_plan.pending_watchdog_note,
-    );
+    let accepted_agent_id = app.runtime.agents[apply_plan.accepted_agent_index]
+        .agent_id
+        .clone();
+    if crate::local_prompts::is_board_note_prompt(&apply_plan.accepted_request.prompt) {
+        app.runtime.last_board_note_prompt_by_agent.insert(
+            accepted_agent_id,
+            apply_plan.accepted_request.prompt.clone(),
+        );
+    }
     submit_text_to_agent(
         app,
         apply_plan.accepted_agent_index,
@@ -1991,19 +1894,6 @@ pub(crate) fn handle_stylos_cmd_event(
             cmd.prompt.lines().next().unwrap_or("")
         ),
     });
-    if let Some(index) = app
-        .runtime
-        .agents
-        .iter()
-        .position(crate::app_runtime::is_interactive_agent_handle)
-    {
-        crate::app_runtime::clear_active_incoming_prompt(
-            &app.runtime.agents,
-            &mut app.runtime.incoming_prompts,
-            &app.runtime.watchdog_state,
-            index,
-        );
-    }
     resolve_and_submit_text(app, cmd.prompt, app_tx);
 }
 
@@ -2011,30 +1901,29 @@ pub(crate) fn handle_stylos_cmd_event(
 pub(crate) fn maybe_emit_done_mention_for_completed_note(
     app: &mut App,
     agent_index: usize,
-    app_tx: &mpsc::UnboundedSender<crate::tui::AppEvent>,
+    _app_tx: &mpsc::UnboundedSender<crate::tui::AppEvent>,
 ) -> bool {
-    let Some(remote) = crate::app_runtime::incoming_prompt_request(
-        &app.runtime.incoming_prompts,
-        &app.runtime.agents[agent_index].agent_id,
-    )
-    .cloned() else {
+    let agent_id = app.runtime.agents[agent_index].agent_id.clone();
+    let Some(remote_prompt) = app
+        .runtime
+        .last_board_note_prompt_by_agent
+        .remove(&agent_id)
+    else {
         return false;
+    };
+    let remote = crate::local_prompts::IncomingPromptRequest {
+        prompt: remote_prompt,
+        source: crate::local_prompts::IncomingPromptSource::WatchdogBoardNote,
+        agent_id: Some(agent_id),
+        request_id: None,
+        from: None,
+        from_agent_id: None,
+        to: None,
+        to_agent_id: None,
     };
     let apply_plan = crate::app_runtime::completed_note_follow_up_apply_plan(
         crate::app_runtime::plan_completed_note_follow_up(&app.runtime.db, &remote),
     );
-    if let (Some(request), Some(prompt)) = (apply_plan.continue_request, apply_plan.continue_prompt)
-    {
-        crate::app_runtime::continue_current_note_follow_up(
-            &app.runtime.agents,
-            &mut app.runtime.incoming_prompts,
-            &app.runtime.watchdog_state,
-            agent_index,
-            request,
-        );
-        resolve_and_submit_text(app, prompt, app_tx);
-        return true;
-    }
     match apply_plan.emission {
         Some(crate::app_runtime::CompletedNoteFollowUpEmission::RemoteEvent { text }) => {
             app.push(crate::tui::Entry::RemoteEvent {
@@ -2042,6 +1931,7 @@ pub(crate) fn maybe_emit_done_mention_for_completed_note(
                 source: Some(crate::tui::NonAgentSource::Board),
                 text,
             });
+            true
         }
         Some(crate::app_runtime::CompletedNoteFollowUpEmission::Status { text }) => {
             app.push(crate::tui::Entry::Status {
@@ -2049,10 +1939,10 @@ pub(crate) fn maybe_emit_done_mention_for_completed_note(
                 source: Some(crate::tui::NonAgentSource::Board),
                 text,
             });
+            true
         }
-        None => return false,
+        None => false,
     }
-    false
 }
 
 #[cfg(feature = "stylos")]
@@ -2069,7 +1959,10 @@ fn current_local_instance_id(_app: &App) -> String {
     crate::instance_id::derive_local_instance_id()
 }
 
-fn handle_watchdog_tick_local_event(app: &mut App) {
+fn handle_watchdog_tick_local_event(
+    app: &mut App,
+    _app_tx: &mpsc::UnboundedSender<crate::tui::AppEvent>,
+) {
     #[cfg(feature = "stylos")]
     let inbox_messages_by_agent = inbox_counts_by_agent(app);
     let agent_statuses =
@@ -2106,12 +1999,12 @@ fn handle_watchdog_tick_local_event(app: &mut App) {
         let Some(handle) = agent_statuses.iter().find(|h| h.agent_id == agent_id) else {
             continue;
         };
-        if handle.busy || handle.has_active_incoming_prompt {
+        if handle.busy {
             continue;
         }
         #[cfg(feature = "stylos")]
         if inbox_messages_by_agent.get(&agent_id).copied().unwrap_or(0) > 0 {
-            schedule_message_inbox_drain(app, &agent_id);
+            drain_one_inbox_message_for_agent(app, agent_id, _app_tx);
             return;
         }
         if let Some(no_pending_since) = app
@@ -2182,16 +2075,6 @@ pub(crate) async fn handle_runtime_event(
     match event {
         AppRuntimeEvent::AgentReady(agent, sid) => {
             handle_agent_ready_event(app, agent, sid, frame_requester);
-            #[cfg(feature = "stylos")]
-            if let Some(agent_id) = app
-                .runtime
-                .agents
-                .iter()
-                .find(|h| h.session_id == sid)
-                .map(|h| h.agent_id.clone())
-            {
-                schedule_message_inbox_drain(app, &agent_id);
-            }
         }
         AppRuntimeEvent::ShellComplete { output, exit_code } => {
             handle_shell_complete_event(app, output, exit_code, frame_requester)
@@ -2199,20 +2082,12 @@ pub(crate) async fn handle_runtime_event(
         #[cfg(feature = "stylos")]
         AppRuntimeEvent::StylosCmd(cmd) => handle_stylos_cmd_event(app, cmd, _app_tx),
         #[cfg(feature = "stylos")]
-        AppRuntimeEvent::IncomingPrompt(request) => {
-            handle_incoming_prompt_event(app, request, _app_tx)
-        }
-        #[cfg(feature = "stylos")]
-        AppRuntimeEvent::DrainMessageInbox { agent_id } => {
-            drain_one_inbox_message_for_agent(app, agent_id, _app_tx)
-        }
-        #[cfg(feature = "stylos")]
         AppRuntimeEvent::StylosEvent(text) => app.push(crate::tui::Entry::RemoteEvent {
             agent_id: None,
             source: Some(crate::tui::NonAgentSource::Stylos),
             text,
         }),
-        AppRuntimeEvent::WatchdogTick => handle_watchdog_tick_local_event(app),
+        AppRuntimeEvent::WatchdogTick => handle_watchdog_tick_local_event(app, _app_tx),
         AppRuntimeEvent::Agent(sid, ev) => {
             app.runtime.activity_counters.agent_event_count += 1;
             process_agent_event(

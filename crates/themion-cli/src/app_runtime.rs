@@ -1,8 +1,5 @@
-#[cfg(feature = "stylos")]
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use std::time::Duration;
 
@@ -40,33 +37,6 @@ pub(crate) type StylosSnapshotFuture =
 #[cfg(feature = "stylos")]
 pub(crate) type StylosSnapshotProvider =
     std::sync::Arc<dyn Fn() -> StylosSnapshotFuture + Send + Sync>;
-
-#[cfg(feature = "stylos")]
-pub(crate) type IncomingPromptState = HashMap<String, crate::local_prompts::IncomingPromptRequest>;
-
-#[cfg(feature = "stylos")]
-pub(crate) fn incoming_prompt_request<'a>(
-    incoming_prompts: &'a IncomingPromptState,
-    agent_id: &str,
-) -> Option<&'a crate::local_prompts::IncomingPromptRequest> {
-    incoming_prompts.get(agent_id)
-}
-
-#[cfg(feature = "stylos")]
-pub(crate) fn set_incoming_prompt_request(
-    incoming_prompts: &mut IncomingPromptState,
-    agent_id: String,
-    request: Option<crate::local_prompts::IncomingPromptRequest>,
-) {
-    match request {
-        Some(request) => {
-            incoming_prompts.insert(agent_id, request);
-        }
-        None => {
-            incoming_prompts.remove(&agent_id);
-        }
-    }
-}
 
 #[cfg(feature = "stylos")]
 #[derive(Clone, Debug, Default)]
@@ -212,7 +182,6 @@ pub(crate) struct LocalAgentStatusEntry {
     pub workflow: Option<WorkflowState>,
     pub project_dir: Option<PathBuf>,
     pub busy: bool,
-    pub has_active_incoming_prompt: bool,
 }
 
 pub(crate) fn local_agent_status_entry(
@@ -223,7 +192,6 @@ pub(crate) fn local_agent_status_entry(
     workflow: Option<WorkflowState>,
     project_dir: Option<PathBuf>,
     busy: bool,
-    has_active_incoming_prompt: bool,
 ) -> LocalAgentStatusEntry {
     LocalAgentStatusEntry {
         agent_id: agent_id.into(),
@@ -233,7 +201,6 @@ pub(crate) fn local_agent_status_entry(
         workflow,
         project_dir,
         busy,
-        has_active_incoming_prompt,
     }
 }
 
@@ -382,14 +349,6 @@ pub(crate) fn wire_stylos_event_streams(
             }
         });
     }
-    if let Some(mut prompt_rx) = handle.take_prompt_rx() {
-        let runtime_tx_prompt = runtime_tx.clone();
-        surface_domain.spawn(async move {
-            while let Some(prompt) = prompt_rx.recv().await {
-                let _ = runtime_tx_prompt.send(AppRuntimeEvent::IncomingPrompt(prompt));
-            }
-        });
-    }
     if let Some(mut event_rx) = handle.take_event_rx() {
         let runtime_tx_event = runtime_tx.clone();
         surface_domain.spawn(async move {
@@ -405,14 +364,10 @@ pub(crate) struct AppSnapshotBuildState<'a> {
     pub agent_activity_by_session:
         &'a std::collections::HashMap<Uuid, crate::app_state::AgentActivity>,
     pub agent_activity_changed_at_by_session: &'a std::collections::HashMap<Uuid, u64>,
-    #[cfg(feature = "stylos")]
-    pub incoming_prompts: &'a IncomingPromptState,
     pub agent_busy: bool,
     pub activity_status: String,
     #[cfg(feature = "stylos")]
     pub stylos_status: Option<String>,
-    #[cfg(feature = "stylos")]
-    pub watchdog_state: &'a crate::app_runtime::WatchdogRuntimeState,
 }
 
 pub(crate) fn build_app_snapshot(
@@ -440,10 +395,6 @@ pub(crate) fn build_app_snapshot(
                 label: handle.label.clone(),
                 roles: handle.roles.clone(),
                 busy: handle.busy,
-                #[cfg(feature = "stylos")]
-                incoming: state.incoming_prompts.contains_key(&handle.agent_id),
-                #[cfg(not(feature = "stylos"))]
-                incoming: false,
                 activity_status: state
                     .agent_activity_by_session
                     .get(&handle.session_id)
@@ -460,14 +411,6 @@ pub(crate) fn build_app_snapshot(
             .collect(),
         #[cfg(feature = "stylos")]
         stylos_status: state.stylos_status,
-        #[cfg(feature = "stylos")]
-        pending_watchdog_note: state.watchdog_state.pending_watchdog_note(),
-        #[cfg(feature = "stylos")]
-        active_incoming_prompt_count: state
-            .agents
-            .iter()
-            .filter(|handle| state.incoming_prompts.contains_key(&handle.agent_id))
-            .count(),
         #[cfg(feature = "stylos")]
         aggregate_busy_agents: state.agents.iter().any(|handle| handle.busy),
     }
@@ -519,14 +462,10 @@ impl AppRuntimeObserverPublisher {
             agents: &*agents,
             agent_activity_by_session: snapshot.agent_activity_by_session,
             agent_activity_changed_at_by_session: snapshot.agent_activity_changed_at_by_session,
-            #[cfg(feature = "stylos")]
-            incoming_prompts: snapshot.incoming_prompts,
             agent_busy: snapshot.agent_busy,
             activity_status: snapshot.activity_status,
             #[cfg(feature = "stylos")]
             stylos_status: snapshot.stylos_status,
-            #[cfg(feature = "stylos")]
-            watchdog_state: snapshot.watchdog_state,
         });
 
         refresh_interactive_agent_system_inspection_from_runtime(agents, system_inspection);
@@ -573,10 +512,6 @@ pub(crate) struct AppRuntimeSnapshotPublishState<'a> {
     pub agent_activity_changed_at_by_session: &'a std::collections::HashMap<Uuid, u64>,
     #[cfg(feature = "stylos")]
     pub stylos_status: Option<String>,
-    #[cfg(feature = "stylos")]
-    pub watchdog_state: &'a crate::app_runtime::WatchdogRuntimeState,
-    #[cfg(feature = "stylos")]
-    pub incoming_prompts: &'a IncomingPromptState,
     #[cfg(not(feature = "stylos"))]
     _marker: std::marker::PhantomData<&'a ()>,
 }
@@ -1299,8 +1234,6 @@ pub(crate) fn apply_agent_ready_update(
     workflow_state: &mut WorkflowState,
     sid: Uuid,
     agent: Agent,
-    #[cfg(feature = "stylos")] watchdog_state: &Arc<WatchdogRuntimeState>,
-    #[cfg(feature = "stylos")] incoming_prompts: &IncomingPromptState,
 ) {
     *status_model_info = agent.model_info().cloned();
     *workflow_state = agent.workflow_state().clone();
@@ -1309,8 +1242,6 @@ pub(crate) fn apply_agent_ready_update(
         handle.busy = false;
         handle.turn_cancellation = None;
     }
-    #[cfg(feature = "stylos")]
-    sync_watchdog_runtime_state(watchdog_state, agents, incoming_prompts);
 }
 
 pub(crate) fn apply_system_inspection_to_interactive_agent(
@@ -1544,7 +1475,6 @@ pub(crate) fn build_local_agent_status_entries_local(
                     .map(|agent| agent.workflow_state().clone()),
                 handle.agent.as_ref().map(|agent| agent.project_dir.clone()),
                 handle.busy,
-                false,
             )
         })
         .collect()
@@ -1553,7 +1483,6 @@ pub(crate) fn build_local_agent_status_entries_local(
 #[cfg(feature = "stylos")]
 pub(crate) fn build_local_agent_status_entries(
     agents: &[crate::tui::AgentHandle],
-    incoming_prompts: &IncomingPromptState,
 ) -> Vec<LocalAgentStatusEntry> {
     agents
         .iter()
@@ -1569,7 +1498,6 @@ pub(crate) fn build_local_agent_status_entries(
                     .map(|agent| agent.workflow_state().clone()),
                 handle.agent.as_ref().map(|agent| agent.project_dir.clone()),
                 handle.busy,
-                incoming_prompts.contains_key(&handle.agent_id),
             )
         })
         .collect()
@@ -1822,32 +1750,7 @@ fn delete_local_agent(
 
 #[derive(Default)]
 #[cfg_attr(not(feature = "stylos"), allow(dead_code))]
-pub(crate) struct WatchdogRuntimeState {
-    pending_watchdog_note: Mutex<bool>,
-}
-
-impl WatchdogRuntimeState {
-    #[cfg_attr(not(feature = "stylos"), allow(dead_code))]
-    pub(crate) fn sync_from_runtime_state(
-        &self,
-        _agent_busy: bool,
-        _has_active_incoming_prompt: bool,
-        pending_watchdog_note: bool,
-    ) {
-        *self
-            .pending_watchdog_note
-            .lock()
-            .expect("watchdog state lock") = pending_watchdog_note;
-    }
-
-    #[cfg_attr(not(feature = "stylos"), allow(dead_code))]
-    pub(crate) fn pending_watchdog_note(&self) -> bool {
-        *self
-            .pending_watchdog_note
-            .lock()
-            .expect("watchdog state lock")
-    }
-}
+pub(crate) struct WatchdogRuntimeState;
 
 pub(crate) fn start_watchdog_task(
     background_domain: &DomainHandle,
@@ -1881,7 +1784,6 @@ pub(crate) enum IncomingPromptDisposition {
         log_text: String,
         prompt: String,
         request: crate::local_prompts::IncomingPromptRequest,
-        pending_watchdog_note: bool,
     },
 }
 
@@ -1911,7 +1813,7 @@ pub(crate) fn resolve_incoming_prompt_disposition(
         };
     };
 
-    if agents[agent_index].busy || agents[agent_index].has_active_incoming_prompt {
+    if agents[agent_index].busy {
         if let Some(note_id) = board_note_id_from_prompt(&request.prompt) {
             release_board_note_claim(board_claims, note_id);
         }
@@ -1952,211 +1854,19 @@ pub(crate) fn resolve_incoming_prompt_disposition(
         log_agent_id: Some(target),
         log_text,
         prompt: request.prompt.clone(),
-        pending_watchdog_note: matches!(
-            request.source,
-            crate::local_prompts::IncomingPromptSource::WatchdogBoardNote
-        ),
         request,
     }
 }
 
 #[cfg(feature = "stylos")]
-pub(crate) struct SubmitTargetFailureEffect {
-    pub log_text: String,
-}
-
-#[cfg(feature = "stylos")]
-pub(crate) fn submit_target_failure_effect(
-    resolution: &SubmitTargetResolution,
-) -> Option<SubmitTargetFailureEffect> {
-    match resolution {
-        SubmitTargetResolution::MissingIncomingPromptTarget { log_text, .. } => {
-            Some(SubmitTargetFailureEffect {
-                log_text: log_text.clone(),
-            })
-        }
-        _ => None,
-    }
-}
-
-#[cfg(feature = "stylos")]
-pub(crate) enum SubmitTargetResolution {
-    Interactive {
-        agent_index: usize,
-    },
-    IncomingPromptTarget {
-        agent_index: usize,
-    },
-    MissingIncomingPromptTarget {
-        active_agent_index: usize,
-        log_text: String,
-    },
-}
-
-#[cfg(feature = "stylos")]
-pub(crate) fn resolve_submit_target(
-    agents: &[LocalAgentStatusEntry],
-    active_request: Option<&crate::local_prompts::IncomingPromptRequest>,
-) -> SubmitTargetResolution {
-    let interactive_index = agents
-        .iter()
-        .position(|h| h.roles.iter().any(|r| r == "interactive"))
-        .expect("interactive agent");
-    let Some(active_agent_index) = agents.iter().position(|h| h.has_active_incoming_prompt) else {
-        return SubmitTargetResolution::Interactive {
-            agent_index: interactive_index,
-        };
-    };
-    let Some(request) = active_request else {
-        return SubmitTargetResolution::Interactive {
-            agent_index: interactive_index,
-        };
-    };
-    let Some(target_agent_id) = request.agent_id.as_deref() else {
-        return SubmitTargetResolution::Interactive {
-            agent_index: interactive_index,
-        };
-    };
-    match agents.iter().position(|h| h.agent_id == target_agent_id) {
-        Some(agent_index) => SubmitTargetResolution::IncomingPromptTarget { agent_index },
-        None => {
-            let sender = request.from.as_deref().unwrap_or("unknown sender");
-            let sender_agent = request.from_agent_id.as_deref().unwrap_or("unknown");
-            let target_instance = request.to.as_deref().unwrap_or("unknown target");
-            let target_agent = request.to_agent_id.as_deref().unwrap_or(target_agent_id);
-            let log_text = if crate::local_prompts::is_board_note_prompt(&request.prompt) {
-                let note_identifier = stylos_note_display_identifier(&request.prompt);
-                format!(
-                    "Board note intake {} from={} from_agent_id={} to={} to_agent_id={} rejected: target agent missing locally",
-                    note_identifier, sender, sender_agent, target_instance, target_agent
-                )
-            } else {
-                format!(
-                    "Stylos incoming message from={} from_agent_id={} to={} to_agent_id={} rejected: target agent missing locally",
-                    sender, sender_agent, target_instance, target_agent
-                )
-            };
-            SubmitTargetResolution::MissingIncomingPromptTarget {
-                active_agent_index,
-                log_text,
-            }
-        }
-    }
-}
-
 #[cfg(feature = "stylos")]
 pub(crate) struct IncomingPromptApplyPlan {
     pub accepted_agent_index: usize,
     pub accepted_prompt: String,
     pub accepted_request: crate::local_prompts::IncomingPromptRequest,
-    pub pending_watchdog_note: bool,
 }
 
 #[cfg(feature = "stylos")]
-pub(crate) fn recompute_watchdog_state_from_app(
-    agents: &[crate::tui::AgentHandle],
-    incoming_prompts: &IncomingPromptState,
-) -> (bool, bool, bool) {
-    let agent_busy = agents.iter().any(|handle| handle.busy);
-    let has_active_incoming_prompt = agents
-        .iter()
-        .any(|handle| incoming_prompts.contains_key(&handle.agent_id));
-    let pending_watchdog_note = has_active_incoming_prompt;
-    (
-        agent_busy,
-        has_active_incoming_prompt,
-        pending_watchdog_note,
-    )
-}
-
-#[cfg(feature = "stylos")]
-pub(crate) fn sync_watchdog_runtime_state(
-    watchdog_state: &Arc<WatchdogRuntimeState>,
-    agents: &[crate::tui::AgentHandle],
-    incoming_prompts: &IncomingPromptState,
-) {
-    let (agent_busy, has_active_incoming_prompt, pending_watchdog_note) =
-        recompute_watchdog_state_from_app(agents, incoming_prompts);
-    watchdog_state.sync_from_runtime_state(
-        agent_busy,
-        has_active_incoming_prompt,
-        pending_watchdog_note,
-    );
-}
-
-#[cfg(feature = "stylos")]
-pub(crate) fn set_active_incoming_prompt(
-    agents: &[crate::tui::AgentHandle],
-    incoming_prompts: &mut IncomingPromptState,
-    watchdog_state: &Arc<WatchdogRuntimeState>,
-    agent_index: usize,
-    request: Option<crate::local_prompts::IncomingPromptRequest>,
-    _pending_watchdog_note: bool,
-) {
-    let agent_id = agents
-        .get(agent_index)
-        .expect("agent index valid")
-        .agent_id
-        .clone();
-    set_incoming_prompt_request(incoming_prompts, agent_id, request);
-    sync_watchdog_runtime_state(watchdog_state, agents, incoming_prompts);
-}
-
-#[cfg(feature = "stylos")]
-pub(crate) fn clear_active_incoming_prompt(
-    agents: &[crate::tui::AgentHandle],
-    incoming_prompts: &mut IncomingPromptState,
-    watchdog_state: &Arc<WatchdogRuntimeState>,
-    agent_index: usize,
-) {
-    set_active_incoming_prompt(
-        agents,
-        incoming_prompts,
-        watchdog_state,
-        agent_index,
-        None,
-        false,
-    );
-}
-
-#[cfg(feature = "stylos")]
-pub(crate) fn continue_current_note_follow_up(
-    agents: &[crate::tui::AgentHandle],
-    incoming_prompts: &mut IncomingPromptState,
-    watchdog_state: &Arc<WatchdogRuntimeState>,
-    agent_index: usize,
-    request: crate::local_prompts::IncomingPromptRequest,
-) {
-    let pending_watchdog_note = watchdog_state.pending_watchdog_note();
-    set_active_incoming_prompt(
-        agents,
-        incoming_prompts,
-        watchdog_state,
-        agent_index,
-        Some(request),
-        pending_watchdog_note,
-    );
-}
-
-#[cfg(feature = "stylos")]
-pub(crate) fn apply_active_incoming_prompt(
-    agents: &[crate::tui::AgentHandle],
-    incoming_prompts: &mut IncomingPromptState,
-    watchdog_state: &Arc<WatchdogRuntimeState>,
-    agent_index: usize,
-    request: crate::local_prompts::IncomingPromptRequest,
-    pending_watchdog_note: bool,
-) {
-    set_active_incoming_prompt(
-        agents,
-        incoming_prompts,
-        watchdog_state,
-        agent_index,
-        Some(request),
-        pending_watchdog_note,
-    );
-}
-
 #[cfg(feature = "stylos")]
 pub(crate) fn incoming_prompt_apply_plan(
     outcome: IncomingPromptOutcome,
@@ -2166,13 +1876,11 @@ pub(crate) fn incoming_prompt_apply_plan(
             accepted_agent_index: Some(accepted_agent_index),
             accepted_prompt: Some(accepted_prompt),
             accepted_request: Some(accepted_request),
-            pending_watchdog_note,
             ..
         } => Ok(IncomingPromptApplyPlan {
             accepted_agent_index,
             accepted_prompt,
             accepted_request,
-            pending_watchdog_note,
         }),
         other => Err(other),
     }
@@ -2185,7 +1893,6 @@ pub(crate) struct IncomingPromptOutcome {
     pub accepted_agent_index: Option<usize>,
     pub accepted_prompt: Option<String>,
     pub accepted_request: Option<crate::local_prompts::IncomingPromptRequest>,
-    pub pending_watchdog_note: bool,
 }
 
 #[cfg(feature = "stylos")]
@@ -2204,7 +1911,6 @@ pub(crate) fn plan_incoming_prompt(
             accepted_agent_index: None,
             accepted_prompt: None,
             accepted_request: None,
-            pending_watchdog_note: false,
         },
         IncomingPromptDisposition::BusyTarget {
             log_agent_id,
@@ -2215,7 +1921,6 @@ pub(crate) fn plan_incoming_prompt(
             accepted_agent_index: None,
             accepted_prompt: None,
             accepted_request: None,
-            pending_watchdog_note: false,
         },
         IncomingPromptDisposition::Accepted {
             agent_index,
@@ -2223,14 +1928,12 @@ pub(crate) fn plan_incoming_prompt(
             log_text,
             prompt,
             request,
-            pending_watchdog_note,
         } => IncomingPromptOutcome {
             log_agent_id,
             log_text,
             accepted_agent_index: Some(agent_index),
             accepted_prompt: Some(prompt),
             accepted_request: Some(request),
-            pending_watchdog_note,
         },
     }
 }
@@ -2243,8 +1946,6 @@ pub(crate) enum CompletedNoteFollowUpEmission {
 
 #[cfg(feature = "stylos")]
 pub(crate) struct CompletedNoteFollowUpApplyPlan {
-    pub continue_request: Option<crate::local_prompts::IncomingPromptRequest>,
-    pub continue_prompt: Option<String>,
     pub emission: Option<CompletedNoteFollowUpEmission>,
 }
 
@@ -2253,29 +1954,14 @@ pub(crate) fn completed_note_follow_up_apply_plan(
     plan: CompletedNoteFollowUpPlan,
 ) -> CompletedNoteFollowUpApplyPlan {
     match plan {
-        CompletedNoteFollowUpPlan::None => CompletedNoteFollowUpApplyPlan {
-            continue_request: None,
-            continue_prompt: None,
-            emission: None,
-        },
-        CompletedNoteFollowUpPlan::ContinueCurrentNote { request, prompt } => {
-            CompletedNoteFollowUpApplyPlan {
-                continue_request: Some(request),
-                continue_prompt: Some(prompt),
-                emission: None,
-            }
-        }
+        CompletedNoteFollowUpPlan::None => CompletedNoteFollowUpApplyPlan { emission: None },
         CompletedNoteFollowUpPlan::EmitDoneMentionLog { log_line } => {
             CompletedNoteFollowUpApplyPlan {
-                continue_request: None,
-                continue_prompt: None,
                 emission: Some(CompletedNoteFollowUpEmission::RemoteEvent { text: log_line }),
             }
         }
         CompletedNoteFollowUpPlan::EmitDoneMentionStatus { status_line } => {
             CompletedNoteFollowUpApplyPlan {
-                continue_request: None,
-                continue_prompt: None,
                 emission: Some(CompletedNoteFollowUpEmission::Status { text: status_line }),
             }
         }
@@ -2285,16 +1971,8 @@ pub(crate) fn completed_note_follow_up_apply_plan(
 #[cfg(feature = "stylos")]
 pub(crate) enum CompletedNoteFollowUpPlan {
     None,
-    ContinueCurrentNote {
-        request: crate::local_prompts::IncomingPromptRequest,
-        prompt: String,
-    },
-    EmitDoneMentionLog {
-        log_line: String,
-    },
-    EmitDoneMentionStatus {
-        status_line: String,
-    },
+    EmitDoneMentionLog { log_line: String },
+    EmitDoneMentionStatus { status_line: String },
 }
 
 #[cfg(feature = "stylos")]
@@ -2304,9 +1982,6 @@ pub(crate) fn plan_completed_note_follow_up(
 ) -> CompletedNoteFollowUpPlan {
     match crate::board_runtime::resolve_completed_note_follow_up(db, remote) {
         crate::board_runtime::BoardTurnFollowUp::None => CompletedNoteFollowUpPlan::None,
-        crate::board_runtime::BoardTurnFollowUp::ContinueCurrentNote { request, prompt } => {
-            CompletedNoteFollowUpPlan::ContinueCurrentNote { request, prompt }
-        }
         crate::board_runtime::BoardTurnFollowUp::EmitDoneMention { log_line } => {
             CompletedNoteFollowUpPlan::EmitDoneMentionLog { log_line }
         }

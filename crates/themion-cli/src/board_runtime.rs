@@ -1,6 +1,4 @@
-use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use themion_core::db::BoardNote;
 use themion_core::db::{DbHandle, NoteColumn, NoteKind};
@@ -10,40 +8,17 @@ use crate::local_prompts::build_board_note_prompt;
 use crate::local_prompts::IncomingPromptRequest;
 use crate::local_prompts::IncomingPromptSource;
 
-pub const WATCHDOG_IDLE_DELAY_MS_DEFAULT: u64 = 2_000;
 pub const WATCHDOG_NO_PENDING_COOLDOWN_MS_DEFAULT: u64 = 1_000;
 
 #[derive(Default)]
-pub struct LocalBoardClaimRegistry {
-    claimed_note_ids: Mutex<HashSet<String>>,
-}
-
-impl LocalBoardClaimRegistry {
-    pub fn try_claim(&self, note_id: &str) -> bool {
-        let mut claimed = self.claimed_note_ids.lock().expect("board claims lock");
-        claimed.insert(note_id.to_string())
-    }
-
-    pub fn release(&self, note_id: &str) {
-        let mut claimed = self.claimed_note_ids.lock().expect("board claims lock");
-        claimed.remove(note_id);
-    }
-}
+pub struct LocalBoardClaimRegistry;
 
 #[derive(Clone, Debug)]
 #[cfg_attr(not(feature = "stylos"), allow(dead_code))]
 pub enum BoardTurnFollowUp {
     None,
-    ContinueCurrentNote {
-        request: IncomingPromptRequest,
-        prompt: String,
-    },
-    EmitDoneMention {
-        log_line: String,
-    },
-    EmitDoneMentionError {
-        status_line: String,
-    },
+    EmitDoneMention { log_line: String },
+    EmitDoneMentionError { status_line: String },
 }
 
 fn build_injection_request(
@@ -63,24 +38,6 @@ fn build_injection_request(
         &note.body,
         trigger,
     );
-    let log_line = match trigger {
-        IncomingPromptSource::WatchdogBoardNote => format!(
-            "Watchdog claimed board note note_slug={} to={} to_agent_id={} column={} after_idle_ms={}",
-            note.note_slug,
-            note.to_instance,
-            note.to_agent_id,
-            note.column.as_str(),
-            WATCHDOG_IDLE_DELAY_MS_DEFAULT,
-        ),
-        IncomingPromptSource::RemoteStylos => format!(
-            "Board note claimed note_slug={} to={} to_agent_id={} column={}",
-            note.note_slug,
-            note.to_instance,
-            note.to_agent_id,
-            note.column.as_str()
-        ),
-    };
-    let _ = log_line;
     IncomingPromptRequest {
         prompt,
         source: trigger,
@@ -118,7 +75,7 @@ fn candidate_local_instances(local_instance: &str) -> Vec<String> {
 
 pub fn resolve_pending_board_note_injection(
     db: &Arc<DbHandle>,
-    local_claims: &Arc<LocalBoardClaimRegistry>,
+    _local_claims: &Arc<LocalBoardClaimRegistry>,
     local_instance: &str,
     target_agent_id: &str,
     trigger: IncomingPromptSource,
@@ -128,17 +85,12 @@ pub fn resolve_pending_board_note_injection(
         else {
             continue;
         };
-        if !local_claims.try_claim(&note.note_id) {
-            continue;
-        }
         return Some(build_injection_request(&note, trigger));
     }
     None
 }
 
-pub fn release_board_note_claim(local_claims: &Arc<LocalBoardClaimRegistry>, note_id: &str) {
-    local_claims.release(note_id);
-}
+pub fn release_board_note_claim(_local_claims: &Arc<LocalBoardClaimRegistry>, _note_id: &str) {}
 
 pub fn board_note_id_from_prompt(prompt: &str) -> Option<&str> {
     if !prompt.starts_with("type=stylos_note ") {
@@ -171,15 +123,7 @@ pub fn resolve_completed_note_follow_up(
         return BoardTurnFollowUp::None;
     };
     if note.column != NoteColumn::Done {
-        let prompt = format!(
-            "This turn ended but note {} is still in {}. You still have a pending board task. Continue handling this note now. Decide from the note context whether any real action remains. If no further action is needed, move the note to done in this turn. Otherwise keep progressing it through the board workflow and do not end the turn while it is still pending.",
-            note.note_slug,
-            note.column.as_str(),
-        );
-        return BoardTurnFollowUp::ContinueCurrentNote {
-            request: remote.clone(),
-            prompt,
-        };
+        return BoardTurnFollowUp::None;
     }
     if note.note_kind != NoteKind::WorkRequest {
         return BoardTurnFollowUp::None;
