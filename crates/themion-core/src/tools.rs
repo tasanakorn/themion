@@ -750,7 +750,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "fs_write_file",
-                "description": "Write content to a file. Replaces the entire target file contents; use carefully.",
+                "description": "Write content to a file. Replaces the entire target file contents. For small code patches, use another method.",
                 "parameters": {
                     "type": "object",
                     "properties": {
