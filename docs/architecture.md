@@ -87,7 +87,7 @@ CodexClient  (client_codex.rs)
 tools.rs
   ├─ tool_definitions() → JSON schema array (sent every request)
   ├─ call_tool(name, args, ctx: &ToolCtx) → String
-  │    ├─ fs_read_file, fs_write_file, fs_list_directory  (ignore ctx)
+  │    ├─ fs_read_file, fs_write_file, fs_patch, fs_list_directory  (ignore ctx except project_dir for patch target resolution)
   │    ├─ shell_run_command  ──► resolves the user shell, prefers Unix login-shell execution (`-lc`), and falls back to `sh` or platform default shell behavior when needed
   │    ├─ time_sleep  ──► bounded non-shell wait for short sleeps
   │    ├─ history_recall  ──► ctx.db.recall(RecallArgs)

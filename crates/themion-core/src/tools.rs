@@ -16,8 +16,13 @@ use base64::Engine;
 use chrono::Utc;
 #[cfg(unix)]
 use libc::{getpwuid_r, getuid, passwd, sysconf, ERANGE, _SC_GETPW_R_SIZE_MAX};
+use mpatch::{
+    detect_patch, parse_auto, try_apply_patch_to_content, ApplyOptions, Patch as MpatchPatch,
+    PatchFormat, StrictApplyError,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::ffi::CStr;
 use std::fs;
 use std::future::Future;
@@ -122,6 +127,444 @@ fn write_file_ack(path: &str, mode: &str, written_bytes: usize) -> Value {
         "mode": mode,
         "written_bytes": written_bytes,
     })
+}
+
+fn patch_file_ack(
+    ok: bool,
+    changed_paths: &[String],
+    rejected_paths: &[String],
+    message: &str,
+) -> Value {
+    json!({
+        "ok": ok,
+        "entity": "file_patch",
+        "operation": "apply",
+        "changed_paths": changed_paths,
+        "rejected_paths": rejected_paths,
+        "message": message,
+    })
+}
+
+const MAX_PATCH_BYTES: usize = 256 * 1024;
+const MAX_PATCH_TARGETS: usize = 32;
+const MAX_PATCH_HUNKS: usize = 256;
+const MAX_PATCH_OUTPUT_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug)]
+struct PreparedPatchTarget {
+    path: String,
+    absolute_path: PathBuf,
+    original_content: String,
+    patched_content: String,
+}
+
+fn uses_crlf_line_endings(content: &str, normalized_path: &str) -> FsPatchResult<bool> {
+    let has_crlf = content.contains("\r\n");
+    let without_crlf = content.replace("\r\n", "");
+    if without_crlf.contains('\r') || (has_crlf && without_crlf.contains('\n')) {
+        return Err(fs_patch_failure(
+            format!(
+                "mixed or unsupported line endings in target file: {}",
+                normalized_path
+            ),
+            vec![normalized_path.to_string()],
+        ));
+    }
+    Ok(has_crlf)
+}
+
+#[derive(Debug)]
+struct FsPatchFailure {
+    message: String,
+    rejected_paths: Vec<String>,
+}
+
+type FsPatchResult<T> = std::result::Result<T, FsPatchFailure>;
+
+fn fs_patch_failure(message: impl Into<String>, rejected_paths: Vec<String>) -> FsPatchFailure {
+    FsPatchFailure {
+        message: message.into(),
+        rejected_paths,
+    }
+}
+
+fn strip_single_markdown_diff_fence(patch_text: &str) -> Option<String> {
+    let trimmed = patch_text.trim();
+    if !trimmed.starts_with("```") {
+        return None;
+    }
+
+    let mut lines = trimmed.lines();
+    let first_line = lines.next()?;
+    let first_trimmed = first_line.trim();
+    let fence_len = first_trimmed.chars().take_while(|c| *c == '`').count();
+    if fence_len < 3 {
+        return None;
+    }
+
+    let info = first_trimmed[fence_len..].trim();
+    if !info.is_empty() && info != "diff" && info != "patch" {
+        return None;
+    }
+
+    let mut collected = Vec::new();
+    let mut closed = false;
+    for line in lines {
+        let trimmed_line = line.trim();
+        if trimmed_line.chars().take_while(|c| *c == '`').count() >= fence_len
+            && trimmed_line.chars().all(|c| c == '`')
+        {
+            closed = true;
+            break;
+        }
+        collected.push(line);
+    }
+
+    closed.then(|| collected.join("\n"))
+}
+
+fn normalize_patch_text(patch_text: &str) -> FsPatchResult<String> {
+    if patch_text.len() > MAX_PATCH_BYTES {
+        return Err(fs_patch_failure(
+            format!("patch exceeds maximum {} bytes", MAX_PATCH_BYTES),
+            vec![],
+        ));
+    }
+
+    let trimmed = patch_text.trim();
+    if trimmed.is_empty() {
+        return Err(fs_patch_failure("patch must not be empty", vec![]));
+    }
+
+    let normalized = strip_single_markdown_diff_fence(trimmed)
+        .unwrap_or_else(|| trimmed.to_string())
+        .trim()
+        .to_string();
+    if normalized.is_empty() {
+        return Err(fs_patch_failure("patch must not be empty", vec![]));
+    }
+    if matches!(detect_patch(&normalized), PatchFormat::Conflict) {
+        return Err(fs_patch_failure(
+            "conflict-marker patches are not supported",
+            vec![],
+        ));
+    }
+    Ok(normalized)
+}
+
+fn normalize_patch_target_str(raw: &str) -> FsPatchResult<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(fs_patch_failure(
+            "patch target path must not be empty",
+            vec![],
+        ));
+    }
+
+    let stripped = raw
+        .strip_prefix("a/")
+        .or_else(|| raw.strip_prefix("b/"))
+        .unwrap_or(raw);
+    if stripped.is_empty() {
+        return Err(fs_patch_failure(
+            "patch target path must not be empty",
+            vec![],
+        ));
+    }
+
+    let candidate = Path::new(stripped);
+    if candidate.is_absolute() {
+        return Err(fs_patch_failure(
+            "absolute patch target paths are not allowed",
+            vec![],
+        ));
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in candidate.components() {
+        match component {
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                return Err(fs_patch_failure(
+                    "patch target path must not contain ..",
+                    vec![],
+                ))
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err(fs_patch_failure(
+                    "absolute patch target paths are not allowed",
+                    vec![],
+                ))
+            }
+        }
+    }
+
+    let normalized_str = normalized
+        .to_str()
+        .ok_or_else(|| fs_patch_failure("patch target path must be valid UTF-8", vec![]))?
+        .to_string();
+    if normalized_str.is_empty() {
+        return Err(fs_patch_failure(
+            "patch target path must not be empty",
+            vec![],
+        ));
+    }
+    Ok(normalized_str)
+}
+
+fn normalize_patch_target_path(path: &Path) -> FsPatchResult<String> {
+    let raw = path
+        .to_str()
+        .ok_or_else(|| fs_patch_failure("patch target path must be valid UTF-8", vec![]))?;
+    normalize_patch_target_str(raw)
+}
+
+fn validate_patch_headers(patch_text: &str) -> FsPatchResult<()> {
+    let mut pending_old: Option<String> = None;
+    let mut seen_targets = BTreeSet::new();
+
+    for line in patch_text.lines() {
+        if let Some(old_raw) = line.strip_prefix("--- ") {
+            pending_old = Some(old_raw.trim().to_string());
+            continue;
+        }
+        let Some(new_raw) = line.strip_prefix("+++ ") else {
+            continue;
+        };
+        let Some(old_raw) = pending_old.take() else {
+            continue;
+        };
+        let new_raw = new_raw.trim().to_string();
+
+        if old_raw == "/dev/null" {
+            let path = normalize_patch_target_str(&new_raw)?;
+            return Err(fs_patch_failure(
+                format!("file creation is not supported for fs_patch: {}", path),
+                vec![path],
+            ));
+        }
+        if new_raw == "/dev/null" {
+            let path = normalize_patch_target_str(&old_raw)?;
+            return Err(fs_patch_failure(
+                format!("file deletion is not supported for fs_patch: {}", path),
+                vec![path],
+            ));
+        }
+
+        let old_path = normalize_patch_target_str(&old_raw)?;
+        let new_path = normalize_patch_target_str(&new_raw)?;
+        if old_path != new_path {
+            return Err(fs_patch_failure(
+                format!(
+                    "rename-style patch targets are not supported: {} -> {}",
+                    old_path, new_path
+                ),
+                vec![old_path, new_path],
+            ));
+        }
+        if !seen_targets.insert(old_path.clone()) {
+            return Err(fs_patch_failure(
+                format!("duplicate patch target path: {}", old_path),
+                vec![old_path],
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_patch_structure(patches: &[MpatchPatch]) -> FsPatchResult<Vec<String>> {
+    if patches.is_empty() {
+        return Err(fs_patch_failure(
+            "patch does not contain any file changes",
+            vec![],
+        ));
+    }
+    if patches.len() > MAX_PATCH_TARGETS {
+        return Err(fs_patch_failure(
+            format!("patch exceeds maximum {} target files", MAX_PATCH_TARGETS),
+            vec![],
+        ));
+    }
+
+    let total_hunks: usize = patches.iter().map(|patch| patch.hunks.len()).sum();
+    if total_hunks > MAX_PATCH_HUNKS {
+        return Err(fs_patch_failure(
+            format!("patch exceeds maximum {} hunks", MAX_PATCH_HUNKS),
+            vec![],
+        ));
+    }
+
+    let mut normalized_paths = Vec::with_capacity(patches.len());
+    let mut seen = BTreeSet::new();
+    for patch in patches {
+        let normalized_path = normalize_patch_target_path(&patch.file_path)?;
+        if patch.is_creation() {
+            return Err(fs_patch_failure(
+                format!(
+                    "file creation is not supported for fs_patch: {}",
+                    normalized_path
+                ),
+                vec![normalized_path],
+            ));
+        }
+        if !seen.insert(normalized_path.clone()) {
+            return Err(fs_patch_failure(
+                format!("duplicate patch target path: {}", normalized_path),
+                vec![normalized_path],
+            ));
+        }
+        normalized_paths.push(normalized_path);
+    }
+
+    Ok(normalized_paths)
+}
+
+fn read_patch_target_file(path: &Path, normalized_path: &str) -> FsPatchResult<String> {
+    let metadata = fs::symlink_metadata(path).map_err(|e| {
+        fs_patch_failure(
+            format!("failed to inspect target file {}: {}", normalized_path, e),
+            vec![normalized_path.to_string()],
+        )
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(fs_patch_failure(
+            format!("target is not a regular file: {}", normalized_path),
+            vec![normalized_path.to_string()],
+        ));
+    }
+
+    let bytes = fs::read(path).map_err(|e| {
+        fs_patch_failure(
+            format!("failed to read target file {}: {}", normalized_path, e),
+            vec![normalized_path.to_string()],
+        )
+    })?;
+    if bytes.contains(&0) {
+        return Err(fs_patch_failure(
+            format!("target file contains NUL bytes: {}", normalized_path),
+            vec![normalized_path.to_string()],
+        ));
+    }
+
+    String::from_utf8(bytes).map_err(|e| {
+        fs_patch_failure(
+            format!(
+                "target file is not valid UTF-8: {} ({})",
+                normalized_path, e
+            ),
+            vec![normalized_path.to_string()],
+        )
+    })
+}
+
+fn prepare_fs_patch(
+    patch_text: &str,
+    project_dir: &Path,
+) -> FsPatchResult<Vec<PreparedPatchTarget>> {
+    let normalized = normalize_patch_text(patch_text)?;
+    validate_patch_headers(&normalized)?;
+    let mut patches = parse_auto(&normalized).map_err(|e| {
+        fs_patch_failure(format!("failed to parse unified diff patch: {}", e), vec![])
+    })?;
+    let normalized_paths = validate_patch_structure(&patches)?;
+
+    let mut prepared = Vec::with_capacity(patches.len());
+    for (patch, normalized_path) in patches.iter_mut().zip(normalized_paths.into_iter()) {
+        patch.file_path = PathBuf::from(&normalized_path);
+        let absolute_path = project_dir.join(&normalized_path);
+        let original_content = read_patch_target_file(&absolute_path, &normalized_path)?;
+        let use_crlf = uses_crlf_line_endings(&original_content, &normalized_path)?;
+        let mut patched = try_apply_patch_to_content(
+            patch,
+            Some(original_content.as_str()),
+            &ApplyOptions::exact(),
+        )
+        .map_err(|err| match err {
+            StrictApplyError::Patch(patch_err) => fs_patch_failure(
+                format!(
+                    "failed to apply patch to {}: {}",
+                    normalized_path, patch_err
+                ),
+                vec![normalized_path.clone()],
+            ),
+            StrictApplyError::PartialApply { .. } => fs_patch_failure(
+                format!(
+                    "patch context did not match current file content: {}",
+                    normalized_path
+                ),
+                vec![normalized_path.clone()],
+            ),
+            other => fs_patch_failure(
+                format!("failed to apply patch to {}: {}", normalized_path, other),
+                vec![normalized_path.clone()],
+            ),
+        })?;
+        if use_crlf {
+            patched.new_content = patched.new_content.replace("\n", "\r\n");
+        }
+        if patched.new_content.len() > MAX_PATCH_OUTPUT_BYTES {
+            return Err(fs_patch_failure(
+                format!(
+                    "patched file exceeds maximum {} bytes: {}",
+                    MAX_PATCH_OUTPUT_BYTES, normalized_path
+                ),
+                vec![normalized_path],
+            ));
+        }
+        prepared.push(PreparedPatchTarget {
+            path: normalized_path,
+            absolute_path,
+            original_content,
+            patched_content: patched.new_content,
+        });
+    }
+
+    Ok(prepared)
+}
+
+fn apply_fs_patch(patch_text: &str, project_dir: &Path) -> Value {
+    let prepared = match prepare_fs_patch(patch_text, project_dir) {
+        Ok(prepared) => prepared,
+        Err(err) => return patch_file_ack(false, &[], &err.rejected_paths, &err.message),
+    };
+
+    let changed_paths: Vec<String> = prepared
+        .iter()
+        .filter(|target| target.original_content != target.patched_content)
+        .map(|target| target.path.clone())
+        .collect();
+
+    let mut written_paths: Vec<usize> = Vec::new();
+    for (index, target) in prepared.iter().enumerate() {
+        if target.original_content != target.patched_content {
+            if let Err(error) = fs::write(&target.absolute_path, target.patched_content.as_bytes())
+            {
+                for written_index in written_paths.into_iter().rev() {
+                    let written_target = &prepared[written_index];
+                    let _ = fs::write(
+                        &written_target.absolute_path,
+                        written_target.original_content.as_bytes(),
+                    );
+                }
+                return patch_file_ack(
+                    false,
+                    &[],
+                    std::slice::from_ref(&target.path),
+                    &format!("failed to write patched file {}: {}", target.path, error),
+                );
+            }
+            written_paths.push(index);
+        }
+    }
+
+    let message = if changed_paths.is_empty() {
+        "patch applied with no file changes".to_string()
+    } else {
+        format!("applied patch to {} file(s)", changed_paths.len())
+    };
+    patch_file_ack(true, &changed_paths, &[], &message)
 }
 
 fn memory_tool(name: &str, description: &str, parameters: Value) -> Value {
@@ -750,7 +1193,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "fs_write_file",
-                "description": "Write content to a file. Replaces the entire target file contents. For small code patches, use another method.",
+                "description": "Write content to a file. Replaces the entire target file contents.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -760,6 +1203,21 @@ pub fn tool_definitions() -> Value {
                         ,"reason": { "type": "string", "description": "Optional reason." }
                     },
                     "required": ["path", "content"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "fs_patch",
+                "description": "Apply a targeted patch to existing text files.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "patch": { "type": "string", "description": "Unified-diff patch text to apply." }
+                        ,"reason": { "type": "string", "description": "Optional reason." }
+                    },
+                    "required": ["patch"]
                 }
             }
         }),
@@ -1170,6 +1628,12 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             };
             fs::write(path, &bytes)?;
             Ok(write_file_ack(args["path"].as_str().unwrap(), mode, bytes.len()).to_string())
+        }
+        "fs_patch" => {
+            let patch = args["patch"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing patch"))?;
+            Ok(apply_fs_patch(patch, &ctx.project_dir).to_string())
         }
         "fs_list_directory" | "list_directory" => {
             let path = args["path"]
@@ -1825,5 +2289,237 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             }
         }
         _ => anyhow::bail!("unknown tool: {name}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn tool_definitions_include_fs_patch_schema() {
+        let defs = tool_definitions();
+        let functions = defs.as_array().expect("tool definitions array");
+        let fs_patch = functions
+            .iter()
+            .find(|entry| entry["function"]["name"] == "fs_patch")
+            .expect("fs_patch definition");
+
+        assert_eq!(
+            fs_patch["function"]["description"],
+            "Apply a targeted patch to existing text files."
+        );
+        assert_eq!(
+            fs_patch["function"]["parameters"]["required"],
+            json!(["patch"])
+        );
+        assert_eq!(
+            fs_patch["function"]["parameters"]["properties"]["patch"]["description"],
+            "Unified-diff patch text to apply."
+        );
+
+        let fs_write = functions
+            .iter()
+            .find(|entry| entry["function"]["name"] == "fs_write_file")
+            .expect("fs_write_file definition");
+        assert_eq!(
+            fs_write["function"]["description"],
+            "Write content to a file. Replaces the entire target file contents."
+        );
+    }
+
+    #[test]
+    fn fs_patch_applies_markdown_wrapped_patch() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("src/main.rs");
+        fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        fs::write(&file_path, "fn main() {\n    println!(\"old\");\n}\n").unwrap();
+
+        let result = apply_fs_patch(
+            r#"```diff
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,3 +1,3 @@
+ fn main() {
+-    println!("old");
++    println!("new");
+ }
+```"#,
+            dir.path(),
+        );
+
+        assert_eq!(result["ok"], json!(true));
+        assert_eq!(result["changed_paths"], json!(["src/main.rs"]));
+        assert_eq!(result["rejected_paths"], json!([]));
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "fn main() {\n    println!(\"new\");\n}\n"
+        );
+    }
+
+    #[test]
+    fn fs_patch_preserves_crlf_line_endings() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("notes.txt");
+        fs::write(&file_path, b"alpha\r\nbeta\r\n").unwrap();
+
+        let result = apply_fs_patch(
+            "--- a/notes.txt\n+++ b/notes.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+gamma\n",
+            dir.path(),
+        );
+
+        assert_eq!(result["ok"], json!(true));
+        assert_eq!(fs::read(&file_path).unwrap(), b"alpha\r\ngamma\r\n");
+    }
+
+    #[test]
+    fn fs_patch_rejects_stale_context_atomically() {
+        let dir = tempdir().unwrap();
+        let first = dir.path().join("a.txt");
+        let second = dir.path().join("b.txt");
+        fs::write(&first, "one\n").unwrap();
+        fs::write(&second, "two\n").unwrap();
+
+        let patch = "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+ONE\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-wrong\n+TWO\n";
+        let result = apply_fs_patch(patch, dir.path());
+
+        assert_eq!(result["ok"], json!(false));
+        assert_eq!(result["changed_paths"], json!([]));
+        assert_eq!(result["rejected_paths"], json!(["b.txt"]));
+        assert_eq!(fs::read_to_string(&first).unwrap(), "one\n");
+        assert_eq!(fs::read_to_string(&second).unwrap(), "two\n");
+    }
+
+    #[test]
+    fn fs_patch_rejects_missing_file_with_target_path() {
+        let dir = tempdir().unwrap();
+        let result = apply_fs_patch(
+            "--- a/missing.txt\n+++ b/missing.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            dir.path(),
+        );
+
+        assert_eq!(result["ok"], json!(false));
+        assert_eq!(result["changed_paths"], json!([]));
+        assert_eq!(result["rejected_paths"], json!(["missing.txt"]));
+    }
+
+    #[test]
+    fn fs_patch_rejects_file_creation() {
+        let dir = tempdir().unwrap();
+        let result = apply_fs_patch(
+            "--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hello\n",
+            dir.path(),
+        );
+
+        assert_eq!(result["ok"], json!(false));
+        assert_eq!(result["changed_paths"], json!([]));
+        assert_eq!(result["rejected_paths"], json!(["new.txt"]));
+    }
+
+    #[test]
+    fn fs_patch_rejects_file_deletion() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("delete-me.txt");
+        fs::write(&file_path, "hello\n").unwrap();
+
+        let result = apply_fs_patch(
+            "--- a/delete-me.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-hello\n",
+            dir.path(),
+        );
+
+        assert_eq!(result["ok"], json!(false));
+        assert_eq!(result["changed_paths"], json!([]));
+        assert_eq!(result["rejected_paths"], json!(["delete-me.txt"]));
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "hello\n");
+    }
+
+    #[test]
+    fn fs_patch_allows_empty_final_file_without_deletion() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("empty.txt");
+        fs::write(&file_path, "only\n").unwrap();
+
+        let result = apply_fs_patch(
+            "--- a/empty.txt\n+++ b/empty.txt\n@@ -1 +0,0 @@\n-only\n",
+            dir.path(),
+        );
+
+        assert_eq!(result["ok"], json!(true));
+        assert_eq!(result["changed_paths"], json!(["empty.txt"]));
+        assert!(file_path.exists());
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "");
+    }
+
+    #[test]
+    fn fs_patch_rejects_duplicate_targets() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("dup.txt");
+        fs::write(&file_path, "one\ntwo\n").unwrap();
+
+        let patch = "--- a/dup.txt\n+++ b/dup.txt\n@@ -1 +1 @@\n-one\n+ONE\n--- a/dup.txt\n+++ b/dup.txt\n@@ -2 +2 @@\n-two\n+TWO\n";
+        let result = apply_fs_patch(patch, dir.path());
+
+        assert_eq!(result["ok"], json!(false));
+        assert_eq!(result["changed_paths"], json!([]));
+        assert_eq!(result["rejected_paths"], json!(["dup.txt"]));
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "one\ntwo\n");
+    }
+
+    #[test]
+    fn fs_patch_rejects_binary_targets() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("bin.dat");
+        fs::write(&file_path, b"abc\0def").unwrap();
+
+        let result = apply_fs_patch(
+            "--- a/bin.dat\n+++ b/bin.dat\n@@ -1 +1 @@\n-abc\n+xyz\n",
+            dir.path(),
+        );
+
+        assert_eq!(result["ok"], json!(false));
+        assert_eq!(result["changed_paths"], json!([]));
+        assert_eq!(result["rejected_paths"], json!(["bin.dat"]));
+    }
+
+    #[test]
+    fn fs_patch_rejects_invalid_utf8_targets() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("utf8.dat");
+        fs::write(&file_path, [0xff, 0xfe, 0xfd]).unwrap();
+
+        let result = apply_fs_patch(
+            "--- a/utf8.dat\n+++ b/utf8.dat\n@@ -1 +1 @@\n-old\n+new\n",
+            dir.path(),
+        );
+
+        assert_eq!(result["ok"], json!(false));
+        assert_eq!(result["changed_paths"], json!([]));
+        assert_eq!(result["rejected_paths"], json!(["utf8.dat"]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fs_patch_rejects_symlink_targets() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        let link = dir.path().join("link.txt");
+        fs::write(&target, "hello\n").unwrap();
+        symlink(&target, &link).unwrap();
+
+        let result = apply_fs_patch(
+            "--- a/link.txt\n+++ b/link.txt\n@@ -1 +1 @@\n-hello\n+goodbye\n",
+            dir.path(),
+        );
+
+        assert_eq!(result["ok"], json!(false));
+        assert_eq!(result["changed_paths"], json!([]));
+        assert_eq!(result["rejected_paths"], json!(["link.txt"]));
+        assert_eq!(fs::read_to_string(&target).unwrap(), "hello\n");
     }
 }

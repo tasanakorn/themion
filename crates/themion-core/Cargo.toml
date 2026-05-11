@@ -1,6 +1,6 @@
 [package]
 name = "themion-core"
-version = "0.73.0"
+version = "0.74.0"
 edition = "2021"
 
 [features]
@@ -24,3 +24,7 @@ libc = "0.2"
 fastembed = { workspace = true, optional = true }
 tiktoken-rs.workspace = true
 tree-sitter-language-pack = "1.8.0"
+mpatch = { version = "1.4.4", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"

@@ -182,6 +182,8 @@ Avoid:
 - mutation tools with broad mixed behavior controlled by many flags
 - overloaded mutation tools that act like mini command languages
 
+For file editing, keep whole-file replacement and targeted patching as distinct tools when both are needed. Prefer a patch-style tool for localized edits to existing files, and reserve whole-file write tools for creation or intentional full replacement.
+
 ### Special tokens and bounds
 
 Keep exact special semantics only when they are required for safe or correct use.

@@ -335,8 +335,11 @@ Current behavior:
 - `fs_read_file` rejects `limit` values above `2097152` bytes
 - `fs_read_file` returns the selected byte range together with range metadata such as returned byte count, file size, and EOF state
 - `fs_read_file` only allows `mode=raw` when the selected byte slice is valid UTF-8; otherwise it returns an error directing the caller to `base64`
+- `fs_patch` accepts unified-diff patch text plus optional `reason` and is the preferred tool for small edits to existing UTF-8 text files
+- `fs_patch` supports raw unified diffs and markdown ```diff fences, validates workspace-relative header paths, rejects create/delete/rename/conflict-marker input, and applies the whole request atomically in strict exact mode
+- `fs_patch` returns compact `file_patch` results with `ok`, `changed_paths`, `rejected_paths`, and a short `message`
 - `fs_write_file` accepts optional `mode` and defaults to `base64`, decoding bytes before writing in that default mode
-- `fs_write_file` still supports direct text writes through `mode=raw`
+- `fs_write_file` still supports direct text writes through `mode=raw` and remains the tool for file creation or intentional whole-file replacement
 - `shell_run_command` accepts optional `result_limit` and `timeout_ms`, defaulting to `16384` bytes and `300000` ms
 - `shell_run_command` truncates oversized returned output with an explicit truncation notice
 - `shell_run_command` returns a clear timeout result when the command exceeds the configured timeout
