@@ -206,6 +206,25 @@ This keeps the ownership split explicit:
 - `themion-cli` owns only the scheduling decision of when background pending work may run
 - the TUI does not own indexing policy or worker lifecycle
 
+## Per-agent queued local user prompts while busy
+
+Themion now uses a runtime-owned per-agent queue for normal local user prompts that target a busy local agent.
+
+Current behavior:
+
+- normal local user prompt submission still shows the user text in the live transcript immediately
+- if the target local agent is idle, the turn still starts immediately
+- if the target local agent is already busy, the prompt is queued on that same `AgentHandle` instead of trying to start a second immediate turn
+- queued prompt ownership is strictly per local agent; one local agent does not drain or auto-start another local agent's queue
+- queued prompts are not appended to core `Agent.messages` or persisted to session history until the owning agent actually consumes them
+- while an active turn continues after tool work, `themion-core::Agent::run_loop_with_cancellation(...)` now calls a CLI-wired same-agent drain hook before the next continued model round and appends all currently queued prompts in FIFO order as ordinary `user` messages for that same turn
+- when a full turn ends and the `Agent` object returns to `themion-cli`, runtime ready handling checks that same agent's queue and auto-starts exactly one next queued prompt as the next turn when any remain
+- if more queued prompts remain after that post-turn launch, they stay queued for later continuation-drain points or later turns
+- interrupting the active turn does not silently drop queued prompts; they remain owned by that same agent for later handling under the current policy
+- queue admission, continuation drain wiring, and post-turn auto-continue are runtime-owned behavior in `themion-cli` and `themion-core`; `tui.rs` only renders the resulting busy/pending state
+
+This queueing slice currently covers normal local user prompt submission only. Slash commands, shell commands, login commands, indexing commands, and remote inbox or board-note intake paths keep their existing admission behavior unless another PRD changes them.
+
 ## Local agent membership tools
 
 Themion now exposes two local team-membership tools through the normal tool surface:
