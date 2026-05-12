@@ -171,7 +171,9 @@ impl AppSnapshotHub {
     }
 
     pub fn publish(&self, snapshot: AppSnapshot) {
-        let _ = self.sender.send(snapshot);
+        // Surface-local caches also read via `current()`, so keep the latest value
+        // even when no watcher is currently subscribed.
+        self.sender.send_replace(snapshot);
     }
 }
 
@@ -636,6 +638,23 @@ fn format_queued_prompt_summary(runtime: &AppRuntimeState) -> Option<String> {
     }
 }
 
+fn runtime_activity_status(runtime: &AppRuntimeState) -> String {
+    activity_status_value(
+        runtime.agent_activity.as_ref(),
+        runtime.idle_since,
+        runtime.stream_chunks,
+        runtime.stream_chars,
+    )
+}
+
+#[cfg(feature = "stylos")]
+fn runtime_primary_activity_label(runtime: &AppRuntimeState) -> Option<String> {
+    runtime
+        .agent_activity
+        .as_ref()
+        .map(|activity| activity.label(runtime.stream_chunks, runtime.stream_chars))
+}
+
 pub(crate) fn runtime_reset_stream_counters(runtime: &mut AppRuntimeState) {
     runtime.stream_chunks = 0;
     runtime.stream_chars = 0;
@@ -660,6 +679,26 @@ pub(crate) fn runtime_replace_master_agent(
     new_agent: themion_core::agent::Agent,
     new_session_id: Uuid,
 ) {
+    let previous_session_id = runtime.session_id;
+    runtime.session_id = new_session_id;
+    if let Some(activity) = runtime
+        .agent_activity_by_session
+        .remove(&previous_session_id)
+    {
+        runtime
+            .agent_activity_by_session
+            .insert(new_session_id, activity.clone());
+        runtime.agent_activity = Some(activity);
+    }
+    if let Some(changed_at) = runtime
+        .agent_activity_changed_at_by_session
+        .remove(&previous_session_id)
+    {
+        runtime
+            .agent_activity_changed_at_by_session
+            .insert(new_session_id, changed_at);
+        runtime.agent_activity_changed_at = Some(changed_at);
+    }
     apply_master_agent_replacement(
         &mut runtime.agents,
         &mut runtime.status_model_info,
@@ -1248,12 +1287,10 @@ pub(crate) fn handle_runtime_command(
 
 pub(crate) fn publish_runtime_snapshot(app: &mut App) {
     let debug_runtime_lines = app.debug_runtime_lines();
-    let activity_status = app.activity_status_value();
+    let previous_surface_snapshot = app.current_surface_snapshot();
+    let activity_status = runtime_activity_status(&app.runtime);
     #[cfg(feature = "stylos")]
-    let primary_activity_label =
-        app.runtime.agent_activity.as_ref().map(|activity| {
-            activity.status_bar(app.runtime.stream_chunks, app.runtime.stream_chars)
-        });
+    let primary_activity_label = runtime_primary_activity_label(&app.runtime);
     let recent_window_ms = app
         .recent_runtime_delta()
         .map(|recent| recent.wall_elapsed_ms);
@@ -1269,6 +1306,20 @@ pub(crate) fn publish_runtime_snapshot(app: &mut App) {
             crate::stylos::StylosRuntimeState::Error(_) => "error".to_string(),
         })
         .unwrap_or_else(|| "off".to_string());
+    let next_surface_snapshot = crate::app_runtime::build_app_snapshot(
+        &previous_surface_snapshot,
+        crate::app_runtime::AppSnapshotBuildState {
+            agents: &app.runtime.agents,
+            agent_activity_by_session: &app.runtime.agent_activity_by_session,
+            agent_activity_changed_at_by_session: &app.runtime.agent_activity_changed_at_by_session,
+            agent_busy: app.runtime.agent_busy,
+            activity_status: activity_status.clone(),
+            #[cfg(feature = "stylos")]
+            stylos_status: Some(stylos_status.clone()),
+        },
+    );
+    app.replace_surface_snapshot(next_surface_snapshot);
+
     #[cfg(feature = "stylos")]
     let stylos = app.runtime.stylos.as_ref().map(|_| {
         let agent_status_entries =

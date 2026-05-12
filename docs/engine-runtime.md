@@ -268,6 +268,8 @@ In the current implementation:
 This means Stylos does not bypass the harness loop, call providers directly, or move history/tool execution into the transport layer. It only injects new work into the existing local input path.
 For durable board notes in TUI mode, `board_runtime.rs` is now the CLI-local coordination boundary for selecting the next pending note, claiming one note locally before handoff, mutating injected/completion state only after successful handoff, releasing local claims when a selected target loses the handoff race, and resolving post-turn follow-up into typed actions that the TUI displays or submits. This keeps the watchdog scheduler independent while preventing duplicate in-process injection of the same note across overlapping local-agent activity.
 
+Current per-agent activity status is also runtime-owned rather than TUI-owned. `themion-core` and CLI runtime paths may originate lifecycle/activity transitions such as preparing, waiting, streaming, tool-running, finishing, and idle, but `themion-cli` app-state owns the shared exported snapshot that represents the current truth for each local agent. TUI and Web UI must render activity labels and animations from that shared snapshot or from app-state-delivered notifications derived from it, not from local transcript/output heuristics or presentation-only fallback state.
+
 Sender-side Stylos transport event derivation is also no longer a TUI transcript-inference path. The current implementation derives outbound message and board-note transport events through explicit helper logic in `crates/themion-cli/src/stylos.rs`, and the TUI only renders the returned event line when present.
 
 ## Snapshot-driven request decisions

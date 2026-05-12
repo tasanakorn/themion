@@ -284,7 +284,7 @@ pub(crate) fn launch_agent_turn_runtime(
     text: String,
     runtime_launch: AgentTurnRuntimeLaunch,
 ) {
-    spawn_agent_event_relay(
+    let relay_done = spawn_agent_event_relay(
         background_domain,
         runtime_tx.clone(),
         runtime_launch.submit_setup.handle_session_id,
@@ -297,6 +297,7 @@ pub(crate) fn launch_agent_turn_runtime(
         text,
         runtime_launch.submit_setup.cancellation,
         runtime_launch.agent,
+        relay_done,
     );
 }
 
@@ -307,6 +308,7 @@ pub(crate) fn spawn_agent_turn_core_loop(
     text: String,
     cancellation: TurnCancellation,
     mut agent: Agent,
+    relay_done: tokio::sync::oneshot::Receiver<()>,
 ) {
     core_domain.spawn(async move {
         if let Err(e) = agent
@@ -318,6 +320,8 @@ pub(crate) fn spawn_agent_turn_core_loop(
                 themion_core::agent::AgentEvent::AssistantText(format!("error: {e}")),
             ));
         }
+        agent.clear_event_tx();
+        let _ = relay_done.await;
         let _ = runtime_tx.send(AppRuntimeEvent::AgentReady(
             Box::new(agent),
             handle_session_id,
@@ -330,13 +334,16 @@ pub(crate) fn spawn_agent_event_relay(
     runtime_tx: mpsc::UnboundedSender<AppRuntimeEvent>,
     handle_session_id: Uuid,
     event_rx: mpsc::UnboundedReceiver<themion_core::agent::AgentEvent>,
-) {
+) -> tokio::sync::oneshot::Receiver<()> {
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     background_domain.spawn(async move {
         let mut rx = event_rx;
         while let Some(ev) = rx.recv().await {
             let _ = runtime_tx.send(AppRuntimeEvent::Agent(handle_session_id, ev));
         }
+        let _ = done_tx.send(());
     });
+    done_rx
 }
 
 #[cfg(feature = "stylos")]
@@ -1063,30 +1070,28 @@ pub(crate) fn apply_runtime_command_outcome_to_app_runtime(
     }
 }
 
-pub(crate) fn current_activity_label(
-    activity: Option<&crate::app_state::AgentActivity>,
-) -> Option<String> {
-    activity.map(|activity| match activity {
-        crate::app_state::AgentActivity::PreparingRequest => "preparing_request".to_string(),
-        crate::app_state::AgentActivity::WaitingForModel => "waiting_for_model".to_string(),
-        crate::app_state::AgentActivity::StreamingResponse => "streaming_response".to_string(),
-        crate::app_state::AgentActivity::RunningTool(_) => "running_tool".to_string(),
-        crate::app_state::AgentActivity::WaitingAfterTool => "waiting_after_tool".to_string(),
-        crate::app_state::AgentActivity::LoginStarting => "login_starting".to_string(),
-        crate::app_state::AgentActivity::WaitingForLoginBrowser => {
-            "waiting_for_login_browser".to_string()
-        }
-        crate::app_state::AgentActivity::RunningShellCommand => "running_shell_command".to_string(),
-        crate::app_state::AgentActivity::Finishing => "finishing".to_string(),
-    })
-}
-
 pub(crate) fn current_activity_detail(
     activity: Option<&crate::app_state::AgentActivity>,
     stream_chunks: u64,
     stream_chars: u64,
 ) -> Option<String> {
     activity.map(|activity| activity.label(stream_chunks, stream_chars))
+}
+
+fn inspection_current_activity_from_status(activity_status: &str) -> Option<String> {
+    match activity_status {
+        "idle" | "nap" => None,
+        status if status.starts_with("streaming") => Some("streaming_response".to_string()),
+        "preparing" => Some("preparing_request".to_string()),
+        "waiting-model" => Some("waiting_for_model".to_string()),
+        "running-tool" => Some("running_tool".to_string()),
+        "waiting-after-tool" => Some("waiting_after_tool".to_string()),
+        "login-start" => Some("login_starting".to_string()),
+        "login-wait" => Some("waiting_for_login_browser".to_string()),
+        "shell" => Some("running_shell_command".to_string()),
+        "finalizing" => Some("finishing".to_string()),
+        _ => Some(activity_status.to_string()),
+    }
 }
 
 pub(crate) fn build_task_runtime_snapshot(
@@ -1109,6 +1114,14 @@ pub(crate) fn build_task_runtime_snapshot(
                 .to_string(),
         );
     }
+    let current_activity = inspection_current_activity_from_status(&activity_status);
+    let current_activity_detail = if current_activity.is_some() {
+        current_activity_detail(activity, stream_chunks, stream_chars)
+            .or_else(|| Some(activity_status.clone()))
+    } else {
+        None
+    };
+
     SystemInspectionTaskRuntime {
         status: if recent_window_ms.is_some() {
             "ok"
@@ -1116,8 +1129,8 @@ pub(crate) fn build_task_runtime_snapshot(
             "partial"
         }
         .to_string(),
-        current_activity: current_activity_label(activity),
-        current_activity_detail: current_activity_detail(activity, stream_chunks, stream_chars),
+        current_activity,
+        current_activity_detail,
         busy: Some(agent_busy),
         activity_status: Some(activity_status),
         activity_status_changed_at_ms,
@@ -2384,5 +2397,103 @@ body";
             stylos_note_display_identifier(prompt),
             "note_id=123e4567-e89b-12d3-a456-426614174000"
         );
+    }
+}
+
+#[cfg(test)]
+mod inspection_tests {
+    use super::build_task_runtime_snapshot;
+
+    #[test]
+    fn build_task_runtime_snapshot_clears_current_activity_when_status_is_idle() {
+        let snapshot = build_task_runtime_snapshot(
+            Some(&crate::app_state::AgentActivity::PreparingRequest),
+            0,
+            0,
+            true,
+            "idle".to_string(),
+            Some(123),
+            456,
+            789,
+            Some(1000),
+        );
+        assert_eq!(snapshot.current_activity, None);
+        assert_eq!(snapshot.current_activity_detail, None);
+        assert_eq!(snapshot.activity_status.as_deref(), Some("idle"));
+        assert_eq!(snapshot.busy, Some(true));
+    }
+}
+
+#[cfg(test)]
+mod turn_ordering_tests {
+    use super::{spawn_agent_event_relay, spawn_agent_turn_core_loop, TurnCancellation};
+    use crate::app_state::AppRuntimeEvent;
+    use crate::runtime_domains::RuntimeDomains;
+    use themion_core::agent::Agent;
+    use tokio::sync::mpsc;
+    use uuid::Uuid;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_ready_waits_for_relayed_agent_events() {
+        let runtime_domains = RuntimeDomains::for_print_mode().expect("runtime domains");
+        let background = runtime_domains.background().expect("background runtime");
+        let core = runtime_domains.core();
+        let (runtime_tx, mut runtime_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let handle_session_id = Uuid::new_v4();
+        let relay_done =
+            spawn_agent_event_relay(&background, runtime_tx.clone(), handle_session_id, event_rx);
+
+        let mut agent = Agent::new(
+            Box::new(themion_core::client::ChatClient::new(
+                "http://localhost".to_string(),
+                None,
+            )),
+            "test-model".to_string(),
+            "test-system".to_string(),
+        );
+        agent.set_event_tx(event_tx.clone());
+
+        let _ = event_tx.send(themion_core::agent::AgentEvent::Status(
+            "queued-before-ready".to_string(),
+        ));
+        drop(event_tx);
+
+        spawn_agent_turn_core_loop(
+            &core,
+            runtime_tx,
+            handle_session_id,
+            "hello".to_string(),
+            TurnCancellation::new(),
+            agent,
+            relay_done,
+        );
+
+        let mut saw_status = false;
+        let mut saw_ready = false;
+        while let Some(event) = runtime_rx.recv().await {
+            match event {
+                AppRuntimeEvent::Agent(sid, themion_core::agent::AgentEvent::Status(text)) => {
+                    assert_eq!(sid, handle_session_id);
+                    assert!(!saw_ready, "status arrived after AgentReady");
+                    if text == "queued-before-ready" {
+                        saw_status = true;
+                    }
+                }
+                AppRuntimeEvent::AgentReady(_, sid) => {
+                    assert_eq!(sid, handle_session_id);
+                    assert!(saw_status, "AgentReady arrived before relayed status event");
+                    saw_ready = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_status);
+        assert!(saw_ready);
+        tokio::task::spawn_blocking(move || drop(runtime_domains))
+            .await
+            .expect("drop runtime domains");
     }
 }

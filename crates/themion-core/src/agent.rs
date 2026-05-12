@@ -591,6 +591,10 @@ impl Agent {
         self.event_tx = Some(tx);
     }
 
+    pub fn clear_event_tx(&mut self) {
+        self.event_tx = None;
+    }
+
     pub fn set_continuation_prompt_drain(&mut self, drain: Option<ContinuationPromptDrain>) {
         self.continuation_prompt_drain = drain;
     }

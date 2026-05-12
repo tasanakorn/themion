@@ -1,7 +1,6 @@
 use crate::app_runtime::{LocalAgentManagementRequest, RuntimeCommand};
 use crate::app_state::{
-    activity_status_value, on_tick as app_state_on_tick,
-    publish_runtime_snapshot as app_state_publish_runtime_snapshot,
+    on_tick as app_state_on_tick, publish_runtime_snapshot as app_state_publish_runtime_snapshot,
     push_recent_runtime_event as app_state_push_recent_runtime_event,
     set_agent_activity as app_state_set_agent_activity,
     truncate_recent_event_text as app_state_truncate_recent_event_text, AgentActivity,
@@ -492,6 +491,11 @@ pub(crate) fn format_context_report(report: &PromptContextReport) -> Vec<String>
         }
     }
     out
+}
+
+fn spinner_char(anim_frame: u8) -> char {
+    const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    SPINNER[anim_frame as usize % SPINNER.len()]
 }
 
 fn self_session_id_fallback() -> String {
@@ -1033,15 +1037,9 @@ impl App {
     }
 
     fn advance_status_animation_tick(&mut self) {
-        let previous = self.runtime.pending.clone();
+        let previous = self.current_pending_line();
         self.anim_frame = self.anim_frame.wrapping_add(1);
-        if self.runtime.agent_busy && self.runtime.pending.is_some() {
-            self.runtime.pending = Some(crate::app_state::runtime_pending_str(
-                &self.runtime,
-                self.anim_frame,
-            ));
-        }
-        if self.runtime.pending != previous {
+        if self.current_pending_line() != previous {
             self.mark_dirty_status();
         }
     }
@@ -1124,13 +1122,65 @@ impl App {
         self.snapshot_hub.publish(snapshot);
     }
 
-    pub(crate) fn activity_status_value(&self) -> String {
-        activity_status_value(
-            self.runtime.agent_activity.as_ref(),
-            self.runtime.idle_since,
-            self.runtime.stream_chunks,
-            self.runtime.stream_chars,
-        )
+    pub(crate) fn current_surface_snapshot(&self) -> AppSnapshot {
+        self.current_app_snapshot()
+    }
+
+    fn current_app_snapshot(&self) -> AppSnapshot {
+        self.snapshot_hub.current()
+    }
+
+    fn primary_snapshot_agent<'a>(
+        &self,
+        snapshot: &'a AppSnapshot,
+    ) -> Option<&'a crate::app_state::AppSnapshotAgent> {
+        snapshot
+            .primary_agent_id
+            .as_deref()
+            .and_then(|agent_id| {
+                snapshot
+                    .local_agents
+                    .iter()
+                    .find(|agent| agent.agent_id == agent_id)
+            })
+            .or_else(|| snapshot.local_agents.first())
+    }
+
+    pub(crate) fn current_activity_status(&self) -> String {
+        let snapshot = self.current_app_snapshot();
+        snapshot
+            .activity_status
+            .clone()
+            .or_else(|| {
+                self.primary_snapshot_agent(&snapshot)
+                    .and_then(|agent| agent.activity_status.clone())
+            })
+            .unwrap_or_else(|| "idle".to_string())
+    }
+
+    pub(crate) fn current_pending_line(&self) -> Option<String> {
+        let snapshot = self.current_app_snapshot();
+        let agent = self.primary_snapshot_agent(&snapshot)?;
+        let activity_label = agent.activity_label.as_deref()?;
+        let mut line = format!("  {} {}", spinner_char(self.anim_frame), activity_label);
+        let queued_summary = self
+            .runtime
+            .agents
+            .iter()
+            .filter_map(|handle| {
+                let count = handle.queued_prompts.lock().ok()?.len();
+                if count == 0 {
+                    None
+                } else {
+                    Some(format!("{}={}", handle.agent_id, count))
+                }
+            })
+            .collect::<Vec<_>>();
+        if !queued_summary.is_empty() {
+            line.push_str("  queued: ");
+            line.push_str(&queued_summary.join(" "));
+        }
+        Some(line)
     }
 
     fn current_runtime_snapshot(&self) -> RuntimeMetricsSnapshot {
@@ -1178,7 +1228,7 @@ impl App {
         out.push(format!(
             "app busy={} activity={} session={} project={}",
             self.runtime.agent_busy,
-            self.activity_status_value(),
+            self.current_activity_status(),
             self.runtime
                 .agents
                 .first()
@@ -2121,7 +2171,8 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
         ])
         .split(area);
 
-    let lines = build_lines(&app.entries, &app.runtime.pending, &app.runtime.agents);
+    let pending = app.current_pending_line();
+    let lines = build_lines(&app.entries, &pending, &app.runtime.agents);
     let height = chunks[0].height as usize;
     let width = chunks[0].width;
 
@@ -2184,7 +2235,7 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("/");
-    let activity = app.activity_status_value();
+    let activity = app.current_activity_status();
     #[cfg(feature = "stylos")]
     let stylos_status = match app.runtime.stylos.as_ref().map(|h| h.state()) {
         Some(StylosRuntimeState::Off) => "stylos: off".to_string(),
@@ -2304,10 +2355,11 @@ pub(crate) fn current_total_and_height(
         .size()
         .map(|s| Rect::new(0, 0, s.width, s.height))
         .unwrap_or(Rect::new(0, 0, 80, 24));
+    let closed_pending = app.current_pending_line();
     let lines = match app.review_mode {
         ReviewMode::Transcript => build_lines(&app.entries, &None, &app.runtime.agents),
         ReviewMode::Watchdog => build_watchdog_review_lines(app),
-        ReviewMode::Closed => build_lines(&app.entries, &app.runtime.pending, &app.runtime.agents),
+        ReviewMode::Closed => build_lines(&app.entries, &closed_pending, &app.runtime.agents),
     };
     let area = match app.review_mode {
         ReviewMode::Transcript => review_area(size),
