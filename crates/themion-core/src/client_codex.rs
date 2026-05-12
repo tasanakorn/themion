@@ -1054,6 +1054,7 @@ fn classify_codex_event(event_type: &str) -> CodexStreamEventCategory {
         | "response.output_item.done"
         | "response.content_part.done"
         | "response.output_text.done"
+        | "response.function_call_arguments.done"
         | "response.content_part.added" => CodexStreamEventCategory::KnownIgnored,
         _ => CodexStreamEventCategory::Unhandled,
     }
