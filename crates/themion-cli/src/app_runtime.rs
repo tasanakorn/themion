@@ -669,6 +669,7 @@ pub(crate) fn execute_runtime_command(
         }
         RuntimeCommand::SessionProfileUse { name } => {
             let cleared_model_override = context.session.temporary_model_override.is_some();
+            let cleared_effort_override = context.session.temporary_effort_override.is_some();
             if context.session.switch_profile_temporarily(&name) {
                 match build_replacement_main_agent(AgentReplacementParams {
                     session: context.session,
@@ -685,15 +686,15 @@ pub(crate) fn execute_runtime_command(
                     Ok((new_agent, new_session_id)) => RuntimeCommandOutcome::ReplaceMasterAgent {
                         new_agent,
                         new_session_id,
-                        output_lines: vec![if cleared_model_override {
+                        output_lines: vec![if cleared_model_override || cleared_effort_override {
                             format!(
-                                "temporarily switched to profile '{}' for this session only; cleared temporary model override and reset to profile model  provider={}  model={}",
-                                name, context.session.provider, context.session.model
+                                "temporarily switched to profile '{}' for this session only; cleared temporary session override(s) and reset to profile settings  provider={}  model={}  effort={}",
+                                name, context.session.provider, context.session.model, context.session.effort
                             )
                         } else {
                             format!(
-                                "temporarily switched to profile '{}' for this session only  provider={}  model={}",
-                                name, context.session.provider, context.session.model
+                                "temporarily switched to profile '{}' for this session only  provider={}  model={}  effort={}",
+                                name, context.session.provider, context.session.model, context.session.effort
                             )
                         }],
                     },
@@ -713,13 +714,24 @@ pub(crate) fn execute_runtime_command(
             }
         }
         RuntimeCommand::SessionProfileSet { key, value } => {
-            if key != "model" {
-                return RuntimeCommandOutcome::Lines(vec![format!(
-                    "unknown session key '{}'.  valid: model",
-                    key
-                )]);
+            match key.as_str() {
+                "model" => context.session.set_temporary_model_override(&value),
+                "effort" => {
+                    let Some(effort) = crate::config::normalize_effort(&value) else {
+                        return RuntimeCommandOutcome::Lines(vec![format!(
+                            "invalid effort '{}'.  valid: low, medium, high, xhigh",
+                            value
+                        )]);
+                    };
+                    context.session.set_temporary_effort_override(&effort);
+                }
+                _ => {
+                    return RuntimeCommandOutcome::Lines(vec![format!(
+                        "unknown session key '{}'.  valid: model, effort",
+                        key
+                    )]);
+                }
             }
-            context.session.set_temporary_model_override(&value);
             match build_replacement_main_agent(AgentReplacementParams {
                 session: context.session,
                 project_dir: context.project_dir,
@@ -735,10 +747,17 @@ pub(crate) fn execute_runtime_command(
                 Ok((new_agent, new_session_id)) => RuntimeCommandOutcome::ReplaceMasterAgent {
                     new_agent,
                     new_session_id,
-                    output_lines: vec![format!(
-                        "temporarily using model '{}' for this session only",
-                        context.session.model
-                    )],
+                    output_lines: vec![if key == "model" {
+                        format!(
+                            "temporarily using model '{}' for this session only",
+                            context.session.model
+                        )
+                    } else {
+                        format!(
+                            "temporarily using effort '{}' for this session only",
+                            context.session.effort
+                        )
+                    }],
                 },
                 Err(e) => RuntimeCommandOutcome::Lines(vec![format!(
                     "error building agent: {}",
@@ -764,10 +783,11 @@ pub(crate) fn execute_runtime_command(
                         new_agent,
                         new_session_id,
                         output_lines: vec![format!(
-                            "cleared temporary session overrides; back to configured profile '{}'  provider={}  model={}",
+                            "cleared temporary session overrides; back to configured profile '{}'  provider={}  model={}  effort={}",
                             context.session.active_profile,
                             context.session.provider,
-                            context.session.model
+                            context.session.model,
+                            context.session.effort
                         )],
                     },
                     Err(e) => RuntimeCommandOutcome::Lines(vec![format!(
@@ -787,6 +807,7 @@ pub(crate) fn execute_runtime_command(
                 base_url: Some(context.session.base_url.clone()),
                 model: Some(context.session.model.clone()),
                 api_key: context.session.api_key.clone(),
+                effort: Some(context.session.effort.clone()),
             };
             context.session.profiles.insert(name.clone(), profile);
             context.session.active_profile = name.clone();
@@ -852,14 +873,25 @@ pub(crate) fn execute_runtime_command(
             RuntimeCommandOutcome::Lines(lines)
         }
         RuntimeCommand::ConfigProfileSet { key, value } => {
+            let mut saved_value = value.clone();
             match key.as_str() {
                 "provider" => context.session.provider = value.clone(),
                 "model" => context.session.model = value.clone(),
                 "endpoint" => context.session.base_url = value.clone(),
                 "api_key" => context.session.api_key = Some(value.clone()),
+                "effort" => {
+                    let Some(effort) = crate::config::normalize_effort(&value) else {
+                        return RuntimeCommandOutcome::Lines(vec![format!(
+                            "invalid effort '{}'.  valid: low, medium, high, xhigh",
+                            value
+                        )]);
+                    };
+                    context.session.effort = effort.clone();
+                    saved_value = effort;
+                }
                 _ => {
                     return RuntimeCommandOutcome::Lines(vec![format!(
-                        "unknown key '{}'.  valid: provider, model, endpoint, api_key",
+                        "unknown key '{}'.  valid: provider, model, endpoint, api_key, effort",
                         key
                     )]);
                 }
@@ -871,6 +903,7 @@ pub(crate) fn execute_runtime_command(
                     base_url: Some(context.session.base_url.clone()),
                     model: Some(context.session.model.clone()),
                     api_key: context.session.api_key.clone(),
+                    effort: Some(context.session.effort.clone()),
                 },
             );
             let mut lines = Vec::new();
@@ -881,7 +914,7 @@ pub(crate) fn execute_runtime_command(
             lines.push(format!(
                 "{}={} saved",
                 key,
-                if key == "api_key" { "(set)" } else { value.as_str() }
+                if key == "api_key" { "(set)" } else { saved_value.as_str() }
             ));
             RuntimeCommandOutcome::Lines(lines)
         }

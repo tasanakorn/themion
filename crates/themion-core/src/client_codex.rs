@@ -17,7 +17,6 @@ const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_CONTINUATION_FAILED_NOTICE: &str =
     "codex stream: completed end_turn=false continuation=failed";
-const DEFAULT_CODEX_REASONING_EFFORT: &str = "medium";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitWindow {
@@ -129,6 +128,7 @@ impl std::error::Error for ProviderApiError {}
 pub struct CodexClient {
     http: reqwest::Client,
     base_url: String,
+    reasoning_effort: String,
     auth: Arc<RwLock<CodexAuth>>,
     auth_writer: Box<dyn Fn(&CodexAuth) -> Result<()> + Send + Sync>,
 }
@@ -227,19 +227,19 @@ impl CodexStreamState {
     }
 }
 
-fn build_reasoning_payload() -> Value {
+fn build_reasoning_payload(reasoning_effort: &str) -> Value {
     serde_json::json!({
-        "effort": DEFAULT_CODEX_REASONING_EFFORT,
+        "effort": reasoning_effort,
     })
 }
 
-fn build_responses_api_body(model: &str, messages: &[Message], tools: &Value) -> Value {
+fn build_responses_api_body(model: &str, messages: &[Message], tools: &Value, reasoning_effort: &str) -> Value {
     let (instructions, input_items) = translate_messages(messages);
     let translated_tools = translate_tools(tools);
 
     let mut body = serde_json::json!({
         "model": model,
-        "reasoning": build_reasoning_payload(),
+        "reasoning": build_reasoning_payload(reasoning_effort),
         "store": false,
         "input": input_items,
         "tools": translated_tools,
@@ -256,11 +256,12 @@ fn build_codex_continuation_body(
     tools: &Value,
     previous_response_id: &str,
     response_message_id: Option<&str>,
+    reasoning_effort: &str,
 ) -> Value {
     let translated_tools = translate_tools(tools);
     let mut body = serde_json::json!({
         "model": model,
-        "reasoning": build_reasoning_payload(),
+        "reasoning": build_reasoning_payload(reasoning_effort),
         "store": false,
         "tools": translated_tools,
         "stream": true,
@@ -283,12 +284,14 @@ fn build_codex_continuation_body(
 impl CodexClient {
     pub fn new(
         base_url: String,
+        reasoning_effort: String,
         auth: CodexAuth,
         auth_writer: Box<dyn Fn(&CodexAuth) -> Result<()> + Send + Sync>,
     ) -> Self {
         Self {
             http: reqwest::Client::new(),
             base_url,
+            reasoning_effort,
             auth: Arc::new(RwLock::new(auth)),
             auth_writer,
         }
@@ -1216,7 +1219,7 @@ impl ChatBackend for CodexClient {
         messages: &[Message],
         tools: &Value,
     ) -> Value {
-        build_responses_api_body(model, messages, tools)
+        build_responses_api_body(model, messages, tools, &self.reasoning_effort)
     }
 
     async fn chat_completion_stream(
@@ -1235,7 +1238,7 @@ impl ChatBackend for CodexClient {
     )> {
         let (access_token, account_id) = self.auth_headers().await?;
 
-        let initial_body = build_responses_api_body(model, messages, tools);
+        let initial_body = build_responses_api_body(model, messages, tools, &self.reasoning_effort);
         let mut trace_request = initial_body.clone();
         let response = self
             .send_responses_request(&access_token, &account_id, &initial_body)
@@ -1278,6 +1281,7 @@ impl ChatBackend for CodexClient {
                         tools,
                         &previous_response_id,
                         state.response_message_id.as_deref(),
+                        &self.reasoning_effort,
                     );
                     trace_request = serde_json::json!({
                         "initial": initial_body,

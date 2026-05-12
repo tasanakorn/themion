@@ -10,6 +10,7 @@ pub struct ProfileConfig {
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub api_key: Option<String>,
+    pub effort: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -51,6 +52,7 @@ pub struct Config {
     pub base_url: String,
     pub api_key: Option<String>,
     pub model: String,
+    pub effort: String,
     pub system_prompt: String,
     pub stylos: StylosConfig,
 }
@@ -104,6 +106,7 @@ const LLAMACPP_DEFAULT_MODEL: &str = "local";
 
 pub const CODEX_DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 pub const CODEX_DEFAULT_MODEL: &str = "gpt-5.4";
+pub const DEFAULT_CODEX_EFFORT: &str = "medium";
 
 const CONFIG_TEMPLATE: &str = r#"# themion config — https://github.com/you/themion
 # primary_llm_profile selects which [profile.*] is active at startup.
@@ -116,6 +119,7 @@ primary_llm_profile = "default"
 provider = "openrouter"
 # api_key = "sk-or-v1-..."
 # model   = "minimax/minimax-m2.7"
+# effort  = "medium"
 
 # [profile.local]
 # provider = "llamacpp"
@@ -137,12 +141,26 @@ fn config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("themion").join("config.toml"))
 }
 
-pub fn resolve_profile(profile: &ProfileConfig) -> (String, String, Option<String>, String) {
+pub fn normalize_effort(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "low" | "medium" | "high" | "xhigh" => Some(normalized),
+        _ => None,
+    }
+}
+
+pub fn resolve_profile(profile: &ProfileConfig) -> (String, String, Option<String>, String, String) {
     let provider = std::env::var("THEMION_PROVIDER")
         .ok()
         .filter(|s| !s.is_empty())
         .or_else(|| profile.provider.clone().filter(|s| !s.is_empty()))
         .unwrap_or_else(|| "openrouter".to_string());
+
+    let effort = profile
+        .effort
+        .as_deref()
+        .and_then(normalize_effort)
+        .unwrap_or_else(|| DEFAULT_CODEX_EFFORT.to_string());
 
     let (base_url, api_key, model) = match provider.as_str() {
         "llamacpp" => {
@@ -190,7 +208,7 @@ pub fn resolve_profile(profile: &ProfileConfig) -> (String, String, Option<Strin
         }
     };
 
-    (provider, base_url, api_key, model)
+    (provider, base_url, api_key, model, effort)
 }
 
 pub fn codex_profile_defaults() -> ProfileConfig {
@@ -199,6 +217,7 @@ pub fn codex_profile_defaults() -> ProfileConfig {
         base_url: None,
         model: Some(CODEX_DEFAULT_MODEL.to_string()),
         api_key: None,
+        effort: None,
     }
 }
 
@@ -232,7 +251,7 @@ impl Config {
 
         let mut profiles = file_config.profile.unwrap_or_default();
         let profile = profiles.get(&active_profile).cloned().unwrap_or_default();
-        let (provider, base_url, api_key, model) = resolve_profile(&profile);
+        let (provider, base_url, api_key, model, effort) = resolve_profile(&profile);
 
         profiles
             .entry(active_profile.clone())
@@ -241,6 +260,7 @@ impl Config {
                 base_url: profile.base_url.clone(),
                 model: profile.model.clone(),
                 api_key: profile.api_key.clone(),
+                effort: profile.effort.clone(),
             });
 
         let system_prompt = std::env::var("SYSTEM_PROMPT")
@@ -268,6 +288,7 @@ impl Config {
             base_url,
             api_key,
             model,
+            effort,
             system_prompt,
             stylos: file_config.stylos.unwrap_or_default(),
         })

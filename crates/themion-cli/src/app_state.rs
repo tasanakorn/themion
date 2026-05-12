@@ -7,7 +7,7 @@ use crate::app_runtime::{
 use crate::app_runtime::{
     start_watchdog_task, AppRuntimeObserverPublisher, AppSnapshotPublisher, WatchdogRuntimeState,
 };
-use crate::config::{save_profiles, Config};
+use crate::config::{save_profiles, Config, DEFAULT_CODEX_EFFORT};
 use crate::runtime_domains::RuntimeDomains;
 use crate::tui::{App, AppEvent, Entry, FrameRequester};
 use crate::Session;
@@ -837,10 +837,11 @@ pub(crate) fn session_config_lines(session: &Session) -> Vec<String> {
         format!("profile  : {}", session.active_profile),
         format!("provider : {}", session.provider),
         format!("model    : {}", session.model),
+        format!("effort   : {}", session.effort),
         format!("endpoint : {}", session.base_url),
         format!("api_key  : {}", key_display),
     ];
-    if session.temporary_profile_override.is_some() || session.temporary_model_override.is_some() {
+    if session.temporary_profile_override.is_some() || session.temporary_model_override.is_some() || session.temporary_effort_override.is_some() {
         out.push(
             "note     : temporary session-only override active; config on disk unchanged"
                 .to_string(),
@@ -855,6 +856,8 @@ pub(crate) fn session_show_lines(session: &Session) -> Vec<String> {
         format!("effective profile   : {}", session.active_profile),
         format!("effective provider  : {}", session.provider),
         format!("effective model     : {}", session.model),
+        format!("configured effort   : {}", session.profiles.get(&session.configured_profile).and_then(|profile| profile.effort.as_deref()).and_then(crate::config::normalize_effort).unwrap_or_else(|| DEFAULT_CODEX_EFFORT.to_string())),
+        format!("effective effort    : {}", session.effort),
         format!(
             "temporary profile override : {}",
             session
@@ -866,6 +869,13 @@ pub(crate) fn session_show_lines(session: &Session) -> Vec<String> {
             "temporary model override   : {}",
             session
                 .temporary_model_override
+                .as_deref()
+                .unwrap_or("(none)")
+        ),
+        format!(
+            "temporary effort override  : {}",
+            session
+                .temporary_effort_override
                 .as_deref()
                 .unwrap_or("(none)")
         ),
@@ -2301,6 +2311,7 @@ pub fn build_agent(
             })?;
             Box::new(CodexClient::new(
                 session.base_url.clone(),
+                session.effort.clone(),
                 auth,
                 Box::new(move |a: &themion_core::CodexAuth| {
                     crate::auth_store::save_for_profile(&profile_name, a)

@@ -71,10 +71,12 @@ pub struct Session {
     pub base_url: String,
     pub api_key: Option<String>,
     pub model: String,
+    pub effort: String,
     pub system_prompt: String,
     pub model_info: Option<ModelInfo>,
     pub temporary_profile_override: Option<String>,
     pub temporary_model_override: Option<String>,
+    pub temporary_effort_override: Option<String>,
 }
 
 impl Session {
@@ -88,10 +90,12 @@ impl Session {
             base_url: cfg.base_url,
             api_key: cfg.api_key,
             model: cfg.model,
+            effort: cfg.effort,
             system_prompt: cfg.system_prompt,
             model_info: None,
             temporary_profile_override: None,
             temporary_model_override: None,
+            temporary_effort_override: None,
         }
     }
 
@@ -101,14 +105,18 @@ impl Session {
             Some(p) => p.clone(),
             None => return false,
         };
-        let (provider, base_url, api_key, mut model) = resolve_profile(&profile);
+        let (provider, base_url, api_key, mut model, mut effort) = resolve_profile(&profile);
         if let Some(temporary_model_override) = &self.temporary_model_override {
             model = temporary_model_override.clone();
+        }
+        if let Some(temporary_effort_override) = &self.temporary_effort_override {
+            effort = temporary_effort_override.clone();
         }
         self.provider = provider;
         self.base_url = base_url;
         self.api_key = api_key;
         self.model = model;
+        self.effort = effort;
         self.active_profile = name.to_string();
         self.model_info = None;
         true
@@ -117,6 +125,7 @@ impl Session {
     pub fn switch_profile_temporarily(&mut self, name: &str) -> bool {
         self.temporary_profile_override = Some(name.to_string());
         self.temporary_model_override = None;
+        self.temporary_effort_override = None;
         self.switch_profile(name)
     }
 
@@ -126,11 +135,19 @@ impl Session {
         self.model_info = None;
     }
 
+    pub fn set_temporary_effort_override(&mut self, effort: &str) {
+        self.temporary_effort_override = Some(effort.to_string());
+        self.effort = effort.to_string();
+        self.model_info = None;
+    }
+
     pub fn clear_temporary_overrides(&mut self) -> bool {
-        let had_overrides =
-            self.temporary_profile_override.is_some() || self.temporary_model_override.is_some();
+        let had_overrides = self.temporary_profile_override.is_some()
+            || self.temporary_model_override.is_some()
+            || self.temporary_effort_override.is_some();
         self.temporary_profile_override = None;
         self.temporary_model_override = None;
+        self.temporary_effort_override = None;
         let configured_profile = self.configured_profile.clone();
         let switched = self.switch_profile(&configured_profile);
         had_overrides && switched

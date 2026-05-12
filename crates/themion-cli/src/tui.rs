@@ -48,9 +48,11 @@ fn help_lines() -> Vec<String> {
         "  /config profile set model=<value>    set model on the active saved profile".to_string(),
         "  /config profile set endpoint=<value> set endpoint on the active saved profile".to_string(),
         "  /config profile set api_key=<value>  set api_key on the active saved profile".to_string(),
+        "  /config profile set effort=<value>   set effort on the active saved profile".to_string(),
         "  /session profile show                show configured vs effective session runtime state".to_string(),
         "  /session profile use <name>          temporarily switch profile for this session only".to_string(),
         "  /session profile set model=<value>   temporarily override model for this session only".to_string(),
+        "  /session profile set effort=<value>  temporarily override effort for this session only".to_string(),
         "  /session profile reset               clear temporary session-only overrides".to_string(),
         "  /login codex [profile]               log in for the default or named profile".to_string(),
         "  /debug runtime                       show Themion process/thread/task activity".to_string(),
@@ -83,6 +85,8 @@ fn config_help_lines() -> Vec<String> {
             .to_string(),
         "  /config profile set api_key=<value>  set api_key on the active saved profile"
             .to_string(),
+        "  /config profile set effort=<value>   set effort on the active saved profile"
+            .to_string(),
     ]
 }
 
@@ -94,6 +98,8 @@ fn session_help_lines() -> Vec<String> {
         "  /session profile use <name>          temporarily switch profile for this session only"
             .to_string(),
         "  /session profile set model=<value>   temporarily override model for this session only"
+            .to_string(),
+        "  /session profile set effort=<value>  temporarily override effort for this session only"
             .to_string(),
         "  /session profile reset               clear temporary session-only overrides".to_string(),
     ]
@@ -1380,7 +1386,7 @@ impl App {
                             ))
                             .ok();
                     } else {
-                        out.push("usage: /session profile set model=<value>".to_string());
+                        out.push("usage: /session profile set model=<value>|effort=<low|medium|high|xhigh>".to_string());
                     }
                 }
                 ["profile", "reset"] => {
@@ -1464,7 +1470,7 @@ impl App {
                             }))
                             .ok();
                     } else {
-                        out.push("usage: /config profile set provider=<value>|model=<value>|endpoint=<value>|api_key=<value>".to_string());
+                        out.push("usage: /config profile set provider=<value>|model=<value>|endpoint=<value>|api_key=<value>|effort=<low|medium|high|xhigh>".to_string());
                     }
                 }
                 _ => out.extend(config_help_lines()),
