@@ -1580,8 +1580,31 @@ pub(crate) fn handle_agent_ready_event(
         sid,
         agent,
     );
+
+    let this_session_still_busy = app
+        .runtime
+        .agents
+        .iter()
+        .find(|h| h.session_id == sid)
+        .map(|h| h.busy)
+        .unwrap_or(false);
+    if !this_session_still_busy {
+        app.runtime.agent_activity_by_session.remove(&sid);
+        app.runtime
+            .agent_activity_changed_at_by_session
+            .remove(&sid);
+        if sid == app.runtime.session_id {
+            app.runtime.agent_activity = None;
+            app.runtime.agent_activity_changed_at = None;
+        }
+    }
+
     app.runtime.agent_busy =
         runtime_any_agent_busy(&app.runtime) || app.runtime.agent_activity.is_some();
+    if app.runtime.agent_activity_by_session.is_empty() {
+        app.runtime.idle_since = Some(std::time::Instant::now());
+        app.runtime.idle_status_changed_at = Some(crate::tui::unix_epoch_now_ms());
+    }
     if !app.runtime.agent_busy {
         app.runtime.pending = None;
     }
