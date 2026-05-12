@@ -430,6 +430,8 @@ fn build_tool_start_display_arguments_json(
     serde_json::to_string(&args).ok()
 }
 
+pub type ContinuationPromptDrain = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+
 pub struct Agent {
     client: Box<dyn ChatBackend + Send + Sync>,
     model: String,
@@ -446,6 +448,7 @@ pub struct Agent {
     turn_seq_counter: u32,
     model_info: Option<ModelInfo>,
     workflow_state: WorkflowState,
+    continuation_prompt_drain: Option<ContinuationPromptDrain>,
     local_role_agent_id: Option<String>,
     local_role_label: Option<String>,
     local_role_roles: Vec<String>,
@@ -498,6 +501,7 @@ impl Agent {
             turn_seq_counter: 0,
             model_info: None,
             workflow_state: WorkflowState::default(),
+            continuation_prompt_drain: None,
             local_role_agent_id: None,
             local_role_label: None,
             local_role_roles: Vec::new(),
@@ -565,6 +569,7 @@ impl Agent {
             turn_seq_counter: 0,
             model_info: None,
             workflow_state,
+            continuation_prompt_drain: None,
             local_role_agent_id: None,
             local_role_label: None,
             local_role_roles: Vec::new(),
@@ -584,6 +589,44 @@ impl Agent {
 
     pub fn set_event_tx(&mut self, tx: mpsc::UnboundedSender<AgentEvent>) {
         self.event_tx = Some(tx);
+    }
+
+    pub fn set_continuation_prompt_drain(&mut self, drain: Option<ContinuationPromptDrain>) {
+        self.continuation_prompt_drain = drain;
+    }
+
+    async fn append_user_message_for_current_turn(
+        &mut self,
+        turn_id: i64,
+        content: String,
+    ) -> Result<()> {
+        self.messages.push(Message {
+            role: "user".to_string(),
+            content: Some(content),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        let db = self.db.clone();
+        let sid = self.session_id;
+        let msg = self.messages.last().unwrap().clone();
+        let seq = self.messages.len() as u32;
+        let workflow = self.workflow_state.clone();
+        tokio::task::spawn_blocking(move || db.append_message(turn_id, sid, seq, &msg, &workflow))
+            .await??;
+        Ok(())
+    }
+
+    async fn drain_queued_user_prompts_for_continuation(&mut self, turn_id: i64) -> Result<()> {
+        let drained = self
+            .continuation_prompt_drain
+            .as_ref()
+            .map(|drain| drain())
+            .unwrap_or_default();
+        for prompt in drained {
+            self.append_user_message_for_current_turn(turn_id, prompt)
+                .await?;
+        }
+        Ok(())
     }
 
     pub fn set_system_inspection(
@@ -1698,24 +1741,8 @@ impl Agent {
             .await?;
         }
 
-        self.messages.push(Message {
-            role: "user".to_string(),
-            content: Some(effective_user_input.clone()),
-            tool_calls: None,
-            tool_call_id: None,
-        });
-
-        {
-            let db = self.db.clone();
-            let sid = self.session_id;
-            let msg = self.messages.last().unwrap().clone();
-            let seq = self.messages.len() as u32;
-            let workflow = self.workflow_state.clone();
-            tokio::task::spawn_blocking(move || {
-                db.append_message(turn_id, sid, seq, &msg, &workflow)
-            })
-            .await??;
-        }
+        self.append_user_message_for_current_turn(turn_id, effective_user_input.clone())
+            .await?;
 
         let turn_start = Instant::now();
         let tool_defs = tools::tool_definitions();
@@ -2198,6 +2225,8 @@ impl Agent {
                 turn_end_reason = "phase_waiting_user".to_string();
                 break;
             }
+            self.drain_queued_user_prompts_for_continuation(turn_id)
+                .await?;
         }
 
         if self.workflow_state.status == WorkflowStatus::Completed {

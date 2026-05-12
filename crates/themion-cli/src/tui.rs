@@ -22,6 +22,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use themion_core::agent::{Agent, TurnCancellation};
 use themion_core::client_codex::ApiCallRateLimitReport;
@@ -668,6 +669,7 @@ pub struct AgentHandle {
     pub(crate) roles: Vec<String>,
     pub(crate) busy: bool,
     pub(crate) turn_cancellation: Option<TurnCancellation>,
+    pub(crate) queued_prompts: Arc<Mutex<VecDeque<crate::app_state::QueuedPrompt>>>,
 }
 
 #[derive(Clone, Copy, Default)]

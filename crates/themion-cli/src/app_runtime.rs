@@ -266,7 +266,14 @@ pub(crate) fn prepare_agent_turn_execution(
 ) -> Agent {
     let handle = agents.get_mut(agent_index).expect("agent index valid");
     let mut agent = handle.agent.take().expect("agent available when not busy");
+    let queued_prompts = handle.queued_prompts.clone();
     agent.set_event_tx(event_tx);
+    agent.set_continuation_prompt_drain(Some(Arc::new(move || {
+        queued_prompts
+            .lock()
+            .map(|mut queue| queue.drain(..).map(|item| item.text).collect())
+            .unwrap_or_default()
+    })));
     agent
 }
 
@@ -1231,6 +1238,7 @@ pub(crate) fn build_master_agent_handle(
         roles: vec!["master".to_string(), "interactive".to_string()],
         busy: false,
         turn_cancellation: None,
+        queued_prompts: Default::default(),
     }
 }
 
@@ -1553,6 +1561,7 @@ pub(crate) fn build_local_agent_handle(parts: NewLocalAgentHandleParts) -> crate
         roles: parts.roles,
         busy: false,
         turn_cancellation: None,
+        queued_prompts: Default::default(),
     }
 }
 

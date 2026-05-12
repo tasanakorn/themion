@@ -40,6 +40,12 @@ pub(crate) enum AppRuntimeEvent {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct QueuedPrompt {
+    pub text: String,
+    pub enqueued_at_ms: u64,
+}
+
 #[derive(Clone)]
 pub(crate) enum AgentActivity {
     PreparingRequest,
@@ -540,6 +546,7 @@ fn initialize_runtime_owner(
         roles: vec!["master".to_string(), "interactive".to_string()],
         busy: false,
         turn_cancellation: None,
+        queued_prompts: Default::default(),
     }];
 }
 pub fn start_tick_loop<T, F>(
@@ -608,6 +615,27 @@ pub(crate) fn runtime_any_agent_busy(runtime: &AppRuntimeState) -> bool {
     runtime.agents.iter().any(|h| h.busy)
 }
 
+fn format_queued_prompt_summary(runtime: &AppRuntimeState) -> Option<String> {
+    let mut per_agent = runtime
+        .agents
+        .iter()
+        .filter_map(|handle| {
+            let count = handle.queued_prompts.lock().ok()?.len();
+            if count == 0 {
+                None
+            } else {
+                Some(format!("{}={}", handle.agent_id, count))
+            }
+        })
+        .collect::<Vec<_>>();
+    if per_agent.is_empty() {
+        None
+    } else {
+        per_agent.sort();
+        Some(per_agent.join(" "))
+    }
+}
+
 pub(crate) fn runtime_reset_stream_counters(runtime: &mut AppRuntimeState) {
     runtime.stream_chunks = 0;
     runtime.stream_chars = 0;
@@ -621,7 +649,10 @@ pub(crate) fn runtime_pending_str(runtime: &AppRuntimeState, anim_frame: u8) -> 
         .as_ref()
         .map(|p| p.label(runtime.stream_chunks, runtime.stream_chars))
         .unwrap_or_else(|| "thinking…".to_string());
-    format!("  {} {}", ch, activity)
+    match format_queued_prompt_summary(runtime) {
+        Some(summary) => format!("  {} {}  queued: {}", ch, activity, summary),
+        None => format!("  {} {}", ch, activity),
+    }
 }
 
 pub(crate) fn runtime_replace_master_agent(
@@ -1592,6 +1623,27 @@ pub(crate) fn handle_agent_ready_event(
         agent,
     );
 
+    if let Some(agent_index) = app
+        .runtime
+        .agents
+        .iter()
+        .position(|handle| handle.session_id == sid && !handle.busy)
+    {
+        let next_prompt = app.runtime.agents[agent_index]
+            .queued_prompts
+            .lock()
+            .ok()
+            .and_then(|mut queue| queue.pop_front());
+        if let Some(next_prompt) = next_prompt {
+            app.runtime.watchdog_no_pending_since_by_agent.clear();
+            submit_text_to_agent(app, agent_index, next_prompt.text);
+            app.mark_dirty_status();
+            publish_runtime_snapshot(app);
+            app.request_draw(frame_requester);
+            return;
+        }
+    }
+
     let this_session_still_busy = app
         .runtime
         .agents
@@ -1720,7 +1772,7 @@ pub(crate) fn submit_text_default(app: &mut App, text: String) {
         agent_id: Some(agent_id),
         text: text.clone(),
     });
-    submit_text_to_agent(app, agent_index, text);
+    submit_local_user_text_to_agent(app, agent_index, text);
 }
 
 pub(crate) fn submit_text_to_agent(app: &mut App, agent_index: usize, text: String) {
@@ -1742,6 +1794,37 @@ pub(crate) fn submit_text_to_agent(app: &mut App, agent_index: usize, text: Stri
     );
 }
 
+fn enqueue_prompt_for_agent(app: &mut App, agent_index: usize, text: String) {
+    let queued_prompt = QueuedPrompt {
+        text,
+        enqueued_at_ms: crate::tui::unix_epoch_now_ms(),
+    };
+    if let Some(handle) = app.runtime.agents.get(agent_index) {
+        if let Ok(mut queue) = handle.queued_prompts.lock() {
+            queue.push_back(queued_prompt);
+        }
+    }
+    if app.runtime.agent_busy && app.runtime.pending.is_some() {
+        app.runtime.pending = Some(runtime_pending_str(&app.runtime, app.anim_frame));
+    }
+    app.mark_dirty_status();
+    publish_runtime_snapshot(app);
+}
+
+fn submit_local_user_text_to_agent(app: &mut App, agent_index: usize, text: String) {
+    if app
+        .runtime
+        .agents
+        .get(agent_index)
+        .map(|agent| agent.busy)
+        .unwrap_or(false)
+    {
+        enqueue_prompt_for_agent(app, agent_index, text);
+        return;
+    }
+    submit_text_to_agent(app, agent_index, text);
+}
+
 pub(crate) fn submit_text_to_agent_id(app: &mut App, agent_id: &str, text: String) -> bool {
     let Some(agent_index) = app
         .runtime
@@ -1756,7 +1839,7 @@ pub(crate) fn submit_text_to_agent_id(app: &mut App, agent_id: &str, text: Strin
         agent_id: Some(agent_id),
         text: text.clone(),
     });
-    submit_text_to_agent(app, agent_index, text);
+    submit_local_user_text_to_agent(app, agent_index, text);
     true
 }
 
@@ -1777,7 +1860,7 @@ pub(crate) fn resolve_and_submit_text(
         agent_id: Some(submitted_agent_id),
         text: text.clone(),
     });
-    submit_text_to_agent(app, agent_index, text);
+    submit_local_user_text_to_agent(app, agent_index, text);
 }
 
 #[cfg(feature = "stylos")]
