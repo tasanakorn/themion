@@ -181,7 +181,7 @@ Typical `themion-cli` feature checks:
 - Omit empty placeholder sections.
 - In Testing, write each outcome as `step → verify:`.
 - Put major alternatives as short inline notes in the relevant section.
-- Keep PRDs about product requirements and intended behavior, not only engineering tactics.
+- Keep PRDs as durable requirement or decision documents. They may cover product requirements, bug-fix requirements, or focused issue/incident decisions, not only engineering tactics.
 - If a PRD is hard to skim in a few minutes, shorten it.
 - Do not turn placeholder examples or sketch markers into requirements without confirming they are real requirements.
 - If the user corrects the framing, rewrite the PRD around the corrected product intent.
@@ -213,7 +213,7 @@ Typical `themion-cli` feature checks:
 
 Before finishing PRD implementation, check all of these:
 - PRD behavior is implemented, or any gap is clearly reported.
-- The PRD still reads like a product requirement or historical product contract, not just an engineering task list.
+- The PRD still reads like a durable requirement or decision record, not just an engineering task list.
 - If phased, the landed phase is clear without hiding the broader product goal or deferred phases.
 - `docs/README.md` and PRD status/implementation notes match what actually landed.
 - Version bump expectation was checked against the PRD and repository guidance.

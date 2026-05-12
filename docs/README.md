@@ -10,7 +10,7 @@
 
 ## PRDs
 
-Active and recent product requirements documents live in `docs/prd/`. Older implemented PRDs that are primarily historical context live in `docs/prd/archive/`](prd/archive/).
+Active and recent numbered PRD documents live in `docs/prd/`. The repository keeps the `PRD` name for one numeric sequence and one source of truth, but individual PRDs may describe product requirements, bug fixes, incidents, or focused issue decisions. Older implemented PRDs that are primarily historical context live in `docs/prd/archive/`](prd/archive/).
 
 | ID      | Title                                                                                                       | Status        | Version | Scope                                    |
 | ------- | ----------------------------------------------------------------------------------------------------------- | ------------- | ------- | ---------------------------------------- |

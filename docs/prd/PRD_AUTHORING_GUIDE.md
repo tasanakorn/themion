@@ -1,6 +1,8 @@
 # PRD Authoring Guide
 
-This project keeps Product Requirements Documents in `docs/prd/`.
+This project keeps numbered PRD documents in `docs/prd/`.
+
+The name stays `PRD` so the repository keeps one numeric sequence and one source of truth, but a PRD may be a classic product requirement, a bug-fix requirement, or a focused issue/incident decision record.
 
 Use this guide whenever you create or update a PRD.
 
@@ -80,6 +82,57 @@ After the metadata block, add a short plain-language summary section before the 
 
 This section is for fast comprehension, not for replacing the full PRD.
 
+### Allowed PRD shapes
+
+Use the same numbered PRD system for these document types:
+
+- **Product requirement PRD** — new feature, product behavior, workflow change, or durable user-visible requirement
+- **Bug-fix PRD** — a defect that needs explicit behavioral rules, scope limits, or a durable decision record
+- **Issue / incident PRD** — a focused operational or architectural issue where the repository should keep one numbered source-of-truth document for the problem, decision, and expected fix
+
+Do not force every small bug into a PRD. A PRD is useful when at least one of these is true:
+
+- the fix changes user-visible behavior
+- the fix defines or changes runtime policy
+- the issue crosses multiple components
+- the issue needs a durable scope or non-goal record
+- the team will likely need to refer back to the decision later
+
+For a tiny obvious code fix with no product or policy question, a PRD is optional.
+
+### Choose the right document style
+
+Choose the lightest PRD shape that fits the problem:
+
+- use the full product-style PRD format for new features, broad behavior changes, or larger design work
+- use the minimal bug/issue PRD format for focused defects, regressions, incidents, or implementation-scoped issues that do not need a full product-requirement narrative
+
+The repository still calls both forms `PRD` to keep numbering simple and preserve one source of truth.
+
+### Minimal bug / issue PRD format
+
+When the document is mainly for a bug, issue, regression, or incident follow-up, a shorter format is allowed and preferred.
+
+Use this top-level order when relevant:
+
+1. Problem
+2. Scope
+3. Current behavior
+4. Expected behavior
+5. Fix approach
+6. Risks / edge cases
+7. Validation
+
+Rules for the minimal format:
+
+- keep the same standard metadata header and `## Summary` section
+- omit product-style sections such as `Goals` or `Migration` when they add no value
+- write the problem plainly: what is wrong, who sees it, and why it matters
+- keep `Scope` short and explicit, including non-goals when useful
+- keep `Fix approach` at decision level, not line-by-line implementation detail
+- in `Validation`, keep checks concrete and proportional to the risk
+- add `## Implementation checklist` only when it helps track a multi-step fix
+
 ### Short semver guideline
 
 Use the PRD `Version` field to record the intended release target using semantic versioning.
@@ -100,7 +153,7 @@ When a draft becomes implementation-ready, replace the semantic target with a co
 
 ## Canonical section order
 
-Use these top-level sections in this order when they are relevant:
+For a full product-style PRD, use these top-level sections in this order when they are relevant:
 
 1. Goals
 2. Non-goals
@@ -113,6 +166,7 @@ Use these top-level sections in this order when they are relevant:
 
 Rules:
 - The `## Summary` section appears before these canonical sections.
+- The minimal bug / issue PRD format above is also valid when it fits better than the full product-style order.
 - Omit sections that would only contain placeholders.
 - Omit any section that does not help the reader make a decision.
 - Do not add filler text such as `None` just to preserve numbering.
@@ -207,7 +261,7 @@ Match the style of neighboring PRDs, but prefer clarity over imitation when olde
 - Similar metadata formatting.
 - Similar table formatting.
 - Keep the `## Summary` section plain-language and easy to skim.
-- Keep the document reading like a Product Requirements Document rather than only an engineering implementation plan.
+- Keep the document reading like a durable requirements or decision record rather than only an engineering implementation plan.
 - Prefer bullets, compact paragraphs, and tables over long narrative blocks.
 - Do not repeat the same point across sections unless the later section adds new decision-relevant detail.
 - Prefer plain English that a non-native reader can understand quickly.
@@ -237,9 +291,9 @@ Before finishing:
 - Summary is short and leads with the product problem or outcome.
 - Top-level sections follow the required order.
 - Empty or low-value sections were omitted.
-- Goals describe the product requirement or user/problem outcome, not only the implementation phase.
-- Background explains the actual product problem, not transcript history.
-- Design states what the product must do.
+- For a full product-style PRD, Goals describe the product requirement or user/problem outcome, not only the implementation phase.
+- Background or Current behavior explains the real problem, not transcript history.
+- Design or Expected behavior states what the system must do.
 - Repeated explanation was removed.
 - Most sentences are short and plain enough for non-native English readers.
 - Testing uses `step → verify:` lines.
