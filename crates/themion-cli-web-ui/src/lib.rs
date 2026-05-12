@@ -60,6 +60,7 @@ struct WebAgentStatus {
     label: String,
     roles: Vec<String>,
     busy: bool,
+    #[serde(default)]
     incoming: bool,
     activity_status: Option<String>,
     activity_label: Option<String>,
