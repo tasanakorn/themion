@@ -149,7 +149,9 @@ pub fn normalize_effort(value: &str) -> Option<String> {
     }
 }
 
-pub fn resolve_profile(profile: &ProfileConfig) -> (String, String, Option<String>, String, String) {
+pub fn resolve_profile(
+    profile: &ProfileConfig,
+) -> (String, String, Option<String>, String, String) {
     let provider = std::env::var("THEMION_PROVIDER")
         .ok()
         .filter(|s| !s.is_empty())

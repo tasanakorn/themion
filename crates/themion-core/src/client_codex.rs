@@ -233,7 +233,12 @@ fn build_reasoning_payload(reasoning_effort: &str) -> Value {
     })
 }
 
-fn build_responses_api_body(model: &str, messages: &[Message], tools: &Value, reasoning_effort: &str) -> Value {
+fn build_responses_api_body(
+    model: &str,
+    messages: &[Message],
+    tools: &Value,
+    reasoning_effort: &str,
+) -> Value {
     let (instructions, input_items) = translate_messages(messages);
     let translated_tools = translate_tools(tools);
 

@@ -85,8 +85,7 @@ fn config_help_lines() -> Vec<String> {
             .to_string(),
         "  /config profile set api_key=<value>  set api_key on the active saved profile"
             .to_string(),
-        "  /config profile set effort=<value>   set effort on the active saved profile"
-            .to_string(),
+        "  /config profile set effort=<value>   set effort on the active saved profile".to_string(),
     ]
 }
 
