@@ -98,8 +98,6 @@ Ownership rules:
 
 ## Coding rules
 
-- Make the smallest change that cleanly solves the task.
-- Avoid unrelated refactors.
 - Match the surrounding style and structure.
 - Prefer explicit, readable code.
 - Do not add new dependencies unless clearly justified.
@@ -136,17 +134,13 @@ Ownership rules:
 
 ## Files and edits
 
-- Prefer focused edits to existing files.
-- For file edits, use `fs_patch` as the primary tool for modifying existing source files and other text-based files.
-- Use `fs_write_file` only to create a new file. Do not use it as the normal way to modify an existing text file.
+- For file edits, prefer `fs_patch` for modifying existing source files and other text-based files.
 - `fs_patch` currently supports only paths relative to the current project directory. Do not use absolute paths or `..` traversal outside the project directory.
-- Do not prefer shell commands for normal file modification when `fs_patch` can express the change. Use shell-based file mutation only when it is the only practical way to complete the change cleanly.
 - Create new modules only when they clearly isolate behavior.
 - Put temporary experiments, token-analysis helpers, replay probes, and similar exploratory utilities under `experiments/`.
 - Do not rewrite large files without need.
 - Do not touch generated output such as `target/`.
 - Do not edit lockfiles unless a dependency or version change requires it.
-- Read the relevant file before editing it.
 - Verify tool availability before depending on non-standard local commands.
 
 ## Validation
@@ -228,8 +222,6 @@ Before finishing PRD implementation, check all of these:
 
 ## Git rules
 
-- Do not create commits automatically.
-- Commit only when the user explicitly asks.
 - Stage and commit only files relevant to the requested change.
 - Use clear commit messages.
 - Do not include unrelated changes.
