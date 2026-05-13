@@ -1,6 +1,6 @@
 # PRD-127: Preserve Live Session Continuity Across Profile and Config Changes
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Version:** v0.78.0
 - **Scope:** `themion-cli`, `themion-core`, docs
 - **Author:** Tasanakorn (design intent) + Themion (PRD authoring)
@@ -303,12 +303,16 @@ This change is runtime/session behavior and documentation only. Existing session
 
 ## Implementation checklist
 
-- [ ] preserve the existing live `session_id` across all covered profile/config/session runtime rebuild paths
-- [ ] separate session-owned state from provider-specific runtime wiring so rebuilds do not discard history, transcript continuity, or workflow/runtime ownership
-- [ ] add one deferred-reconfiguration path for busy interactive agents that applies after the current turn completes and before the next queued or manual turn starts
-- [ ] preserve queued prompts, watchdog/board ownership state, and session-scoped activity/status maps across live runtime reconfiguration
-- [ ] update command acknowledgements and session/profile inspection surfaces to reflect immediate-apply versus deferred-next-turn apply clearly
-- [ ] preserve old-turn attribution while recording new effective settings only for later turns
-- [ ] remove replacement-session side effects from runtime, event-routing, and Web/status projection paths that currently key off a newly allocated session UUID
-- [ ] update runtime/docs wording that currently implies live profile/config changes create a fresh session
-- [ ] validate idle, busy, queued-follow-up, and multi-change-last-wins behavior for the covered commands
+- [x] preserve the existing live `session_id` across all covered profile/config/session runtime rebuild paths
+- [x] separate session-owned state from provider-specific runtime wiring so rebuilds do not discard history, transcript continuity, or workflow/runtime ownership
+- [x] add one deferred-reconfiguration path for busy interactive agents that applies after the current turn completes and before the next queued or manual turn starts
+- [x] preserve queued prompts, watchdog/board ownership state, and session-scoped activity/status maps across live runtime reconfiguration
+- [x] update command acknowledgements and session/profile inspection surfaces to reflect immediate-apply versus deferred-next-turn apply clearly
+- [x] preserve old-turn attribution while recording new effective settings only for later turns
+- [x] remove replacement-session side effects from runtime, event-routing, and Web/status projection paths that currently key off a newly allocated session UUID
+- [x] update runtime/docs wording that currently implies live profile/config changes create a fresh session
+- [x] validate idle, busy, queued-follow-up, and multi-change-last-wins behavior for the covered commands
+
+## Implementation notes
+
+Implemented in v0.78.0 by updating `crates/themion-core/src/agent.rs`, `crates/themion-cli/src/app_runtime.rs`, `crates/themion-cli/src/app_state.rs`, and `docs/architecture.md`. The landed behavior preserves the live interactive `session_id`, carries forward session-owned agent state across runtime reconfiguration, preserves queued follow-up work, and defers busy-time reconfiguration until the next turn instead of creating a replacement session.
