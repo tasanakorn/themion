@@ -2,7 +2,7 @@ use crate::app_runtime::{
     apply_master_agent_replacement, build_local_agent_roster, build_local_agent_tool_invoker,
     build_source_analysis_tool_invoker,
     handle_local_agent_management_request as runtime_handle_local_agent_management_request,
-    LocalAgentManagementRequest, LocalAgentRuntimeContext,
+    AgentReplacement, LocalAgentManagementRequest, LocalAgentRuntimeContext,
 };
 use crate::app_runtime::{
     start_watchdog_task, AppRuntimeObserverPublisher, AppSnapshotPublisher, WatchdogRuntimeState,
@@ -225,6 +225,7 @@ pub(crate) struct AppRuntimeState {
     pub recent_events: std::collections::VecDeque<AppRecentEvent>,
     pub activity_counters: crate::tui::ActivityCounters,
     pub pending_completed_status_entry: Option<(Uuid, usize)>,
+    pub pending_interactive_replacement: Option<crate::app_runtime::AgentReplacement>,
     #[cfg(feature = "stylos")]
     pub stylos: Option<crate::stylos::StylosHandle>,
     #[cfg(feature = "stylos")]
@@ -316,6 +317,7 @@ impl AppRuntimeState {
             recent_events: std::collections::VecDeque::new(),
             activity_counters: Default::default(),
             pending_completed_status_entry: None,
+            pending_interactive_replacement: None,
             #[cfg(feature = "stylos")]
             stylos: None,
             #[cfg(feature = "stylos")]
@@ -406,13 +408,15 @@ impl AppState {
 
         let process_started_at = std::time::Instant::now();
         let process_started_at_ms = crate::tui::unix_epoch_now_ms();
+        let mut runtime_session = session.clone();
+        runtime_session.id = session_id;
 
         let background_domain = runtime_domains
             .background()
             .expect("force-red bg runtime in AppState");
         let app_state = Self {
             runtime: AppRuntimeState {
-                session: session.clone(),
+                session: runtime_session,
                 db: db.clone(),
                 project_dir: project_dir.clone(),
                 session_id,
@@ -450,6 +454,7 @@ impl AppState {
                 recent_events: std::collections::VecDeque::new(),
                 activity_counters: Default::default(),
                 pending_completed_status_entry: None,
+                pending_interactive_replacement: None,
                 #[cfg(feature = "stylos")]
                 stylos: None,
                 #[cfg(feature = "stylos")]
@@ -677,9 +682,9 @@ pub(crate) fn runtime_pending_str(runtime: &AppRuntimeState, anim_frame: u8) -> 
 pub(crate) fn runtime_replace_master_agent(
     runtime: &mut AppRuntimeState,
     new_agent: themion_core::agent::Agent,
-    new_session_id: Uuid,
 ) {
     let previous_session_id = runtime.session_id;
+    let new_session_id = previous_session_id;
     runtime.session_id = new_session_id;
     if let Some(activity) = runtime
         .agent_activity_by_session
@@ -703,8 +708,12 @@ pub(crate) fn runtime_replace_master_agent(
         &mut runtime.agents,
         &mut runtime.status_model_info,
         &mut runtime.workflow_state,
-        new_agent,
-        new_session_id,
+        AgentReplacement {
+            new_agent,
+            preserve_session_id: true,
+            deferred_if_busy: false,
+        },
+        Some(new_session_id),
     );
 }
 
@@ -1023,9 +1032,9 @@ pub(crate) async fn handle_login_complete_event(
                     insert_session: true,
                 },
             ) {
-                Ok((mut new_agent, new_session_id)) => {
+                Ok(mut new_agent) => {
                     new_agent.refresh_model_info().await;
-                    runtime_replace_master_agent(&mut app.runtime, new_agent, new_session_id);
+                    runtime_replace_master_agent(&mut app.runtime, new_agent);
                     publish_runtime_snapshot(app);
                     app.push(Entry::Assistant {
                         agent_id: None,
@@ -1254,14 +1263,43 @@ pub(crate) fn handle_runtime_command(
                     local_agent_mgmt_tx: app.runtime.local_agent_mgmt_tx.clone(),
                 },
             );
-            let application = crate::app_runtime::apply_runtime_command_outcome_to_app_runtime(
-                &mut app.runtime.agents,
-                &mut app.runtime.status_model_info,
-                &mut app.runtime.workflow_state,
-                &mut app.runtime.api_log_enabled,
-                &mut app.runtime.last_ctx_tokens,
-                outcome,
-            );
+            let application = match outcome {
+                crate::app_runtime::RuntimeCommandOutcome::ReplaceMasterAgent {
+                    replacement,
+                    output_lines,
+                } if replacement.deferred_if_busy
+                    && app
+                        .runtime
+                        .agents
+                        .iter()
+                        .find(|h| h.roles.iter().any(|role| role == "interactive"))
+                        .map(|h| h.busy)
+                        .unwrap_or(false) =>
+                {
+                    if app.runtime.agent_busy {
+                        app.runtime.pending =
+                            Some("  pending runtime reconfiguration…".to_string());
+                    }
+                    app.runtime.pending_interactive_replacement = Some(replacement);
+                    crate::app_runtime::RuntimeCommandApplication {
+                        output_lines: output_lines
+                            .into_iter()
+                            .map(|line| {
+                                format!("{line} (will take effect after the current turn finishes)")
+                            })
+                            .collect(),
+                        had_effect: true,
+                    }
+                }
+                other => crate::app_runtime::apply_runtime_command_outcome_to_app_runtime(
+                    &mut app.runtime.agents,
+                    &mut app.runtime.status_model_info,
+                    &mut app.runtime.workflow_state,
+                    &mut app.runtime.api_log_enabled,
+                    &mut app.runtime.last_ctx_tokens,
+                    other,
+                ),
+            };
             if is_clear_context && application.had_effect {
                 app.reset_live_transcript_window();
             }
@@ -1674,6 +1712,21 @@ pub(crate) fn handle_agent_ready_event(
         agent,
     );
 
+    if sid == app.runtime.session_id {
+        if let Some(replacement) = app.runtime.pending_interactive_replacement.take() {
+            crate::app_runtime::apply_master_agent_replacement(
+                &mut app.runtime.agents,
+                &mut app.runtime.status_model_info,
+                &mut app.runtime.workflow_state,
+                replacement,
+                Some(sid),
+            );
+            publish_runtime_snapshot(app);
+            app.mark_dirty_status();
+            app.request_draw(frame_requester);
+        }
+    }
+
     if let Some(agent_index) = app
         .runtime
         .agents
@@ -1721,6 +1774,9 @@ pub(crate) fn handle_agent_ready_event(
     }
     if !app.runtime.agent_busy {
         app.runtime.pending = None;
+    }
+    if app.runtime.pending_interactive_replacement.is_some() {
+        app.runtime.pending = Some("  pending runtime reconfiguration…".to_string());
     }
     app.mark_dirty_status();
     publish_runtime_snapshot(app);

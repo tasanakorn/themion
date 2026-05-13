@@ -648,8 +648,7 @@ pub(crate) enum RuntimeCommandOutcome {
     Noop,
     Lines(Vec<String>),
     ReplaceMasterAgent {
-        new_agent: Agent,
-        new_session_id: Uuid,
+        replacement: AgentReplacement,
         output_lines: Vec<String>,
     },
     SetInteractiveApiLogEnabled {
@@ -659,6 +658,12 @@ pub(crate) enum RuntimeCommandOutcome {
     ClearInteractiveContext {
         output_lines: Vec<String>,
     },
+}
+
+pub(crate) struct AgentReplacement {
+    pub new_agent: Agent,
+    pub preserve_session_id: bool,
+    pub deferred_if_busy: bool,
 }
 
 pub(crate) struct RuntimeCommandContext<'a> {
@@ -697,9 +702,12 @@ pub(crate) fn execute_runtime_command(
                     local_agent_mgmt_tx: context.local_agent_mgmt_tx,
                     insert_session: true,
                 }) {
-                    Ok((new_agent, new_session_id)) => RuntimeCommandOutcome::ReplaceMasterAgent {
-                        new_agent,
-                        new_session_id,
+                    Ok(new_agent) => RuntimeCommandOutcome::ReplaceMasterAgent {
+                        replacement: AgentReplacement {
+                            new_agent,
+                            preserve_session_id: true,
+                            deferred_if_busy: true,
+                        },
                         output_lines: vec![if cleared_model_override || cleared_effort_override {
                             format!(
                                 "temporarily switched to profile '{}' for this session only; cleared temporary session override(s) and reset to profile settings  provider={}  model={}  effort={}",
@@ -758,9 +766,12 @@ pub(crate) fn execute_runtime_command(
                 local_agent_mgmt_tx: context.local_agent_mgmt_tx,
                 insert_session: true,
             }) {
-                Ok((new_agent, new_session_id)) => RuntimeCommandOutcome::ReplaceMasterAgent {
-                    new_agent,
-                    new_session_id,
+                Ok(new_agent) => RuntimeCommandOutcome::ReplaceMasterAgent {
+                    replacement: AgentReplacement {
+                        new_agent,
+                        preserve_session_id: true,
+                        deferred_if_busy: true,
+                    },
                     output_lines: vec![if key == "model" {
                         format!(
                             "temporarily using model '{}' for this session only",
@@ -793,9 +804,12 @@ pub(crate) fn execute_runtime_command(
                     local_agent_mgmt_tx: context.local_agent_mgmt_tx,
                     insert_session: true,
                 }) {
-                    Ok((new_agent, new_session_id)) => RuntimeCommandOutcome::ReplaceMasterAgent {
-                        new_agent,
-                        new_session_id,
+                    Ok(new_agent) => RuntimeCommandOutcome::ReplaceMasterAgent {
+                        replacement: AgentReplacement {
+                            new_agent,
+                            preserve_session_id: true,
+                            deferred_if_busy: true,
+                        },
                         output_lines: vec![format!(
                             "cleared temporary session overrides; back to configured profile '{}'  provider={}  model={}  effort={}",
                             context.session.active_profile,
@@ -966,14 +980,17 @@ pub(crate) fn execute_runtime_command(
                     local_agent_mgmt_tx: context.local_agent_mgmt_tx,
                     insert_session: true,
                 }) {
-                    Ok((new_agent, new_session_id)) => {
+                    Ok(new_agent) => {
                         lines.push(format!(
                             "switched to profile '{}'  provider={}  model={}",
                             name, context.session.provider, context.session.model
                         ));
                         RuntimeCommandOutcome::ReplaceMasterAgent {
-                            new_agent,
-                            new_session_id,
+                            replacement: AgentReplacement {
+                                new_agent,
+                                preserve_session_id: true,
+                                deferred_if_busy: true,
+                            },
                             output_lines: lines,
                         }
                     }
@@ -1018,16 +1035,19 @@ pub(crate) fn apply_runtime_command_outcome_to_app_runtime(
             had_effect: true,
         },
         RuntimeCommandOutcome::ReplaceMasterAgent {
-            new_agent,
-            new_session_id,
+            replacement,
             output_lines,
         } => {
+            let target_session_id = agents
+                .iter()
+                .find(|h| h.roles.iter().any(|role| role == "interactive"))
+                .map(|h| h.session_id);
             apply_master_agent_replacement(
                 agents,
                 status_model_info,
                 workflow_state,
-                new_agent,
-                new_session_id,
+                replacement,
+                target_session_id,
             );
             RuntimeCommandApplication {
                 output_lines,
@@ -1240,18 +1260,40 @@ pub(crate) struct SystemInspectionRefreshInput {
 }
 
 pub(crate) fn build_master_agent_handle(
-    new_agent: Agent,
-    new_session_id: Uuid,
+    replacement: AgentReplacement,
+    previous: Option<crate::tui::AgentHandle>,
+    fallback_session_id: Uuid,
 ) -> crate::tui::AgentHandle {
+    let mut new_agent = replacement.new_agent;
+    let mut session_id = if replacement.preserve_session_id {
+        previous
+            .as_ref()
+            .map(|handle| handle.session_id)
+            .unwrap_or(fallback_session_id)
+    } else {
+        new_agent.session_id
+    };
+    let mut queued_prompts = Default::default();
+    if let Some(mut previous) = previous {
+        if let Some(previous_agent) = previous.agent.take() {
+            new_agent.absorb_session_state_from(previous_agent);
+        }
+        if replacement.preserve_session_id {
+            new_agent.session_id = session_id;
+        } else {
+            session_id = new_agent.session_id;
+        }
+        queued_prompts = previous.queued_prompts;
+    }
     crate::tui::AgentHandle {
         agent: Some(new_agent),
-        session_id: new_session_id,
+        session_id,
         agent_id: "master".to_string(),
         label: "master".to_string(),
         roles: vec!["master".to_string(), "interactive".to_string()],
         busy: false,
         turn_cancellation: None,
-        queued_prompts: Default::default(),
+        queued_prompts,
     }
 }
 
@@ -1274,12 +1316,24 @@ pub(crate) fn apply_master_agent_replacement(
     agents: &mut Vec<crate::tui::AgentHandle>,
     status_model_info: &mut Option<ModelInfo>,
     workflow_state: &mut WorkflowState,
-    new_agent: Agent,
-    new_session_id: Uuid,
+    replacement: AgentReplacement,
+    target_session_id: Option<Uuid>,
 ) {
-    *status_model_info = new_agent.model_info().cloned();
-    *workflow_state = new_agent.workflow_state().clone();
-    replace_master_agent_handle(agents, build_master_agent_handle(new_agent, new_session_id));
+    *status_model_info = replacement.new_agent.model_info().cloned();
+    *workflow_state = replacement.new_agent.workflow_state().clone();
+    let previous_index = agents
+        .iter()
+        .position(|handle| handle.roles.iter().any(|role| role == "master"));
+    let previous = previous_index.map(|idx| agents.remove(idx));
+    let fallback_session_id = previous
+        .as_ref()
+        .map(|handle| handle.session_id)
+        .or(target_session_id)
+        .unwrap_or_else(|| replacement.new_agent.session_id);
+    replace_master_agent_handle(
+        agents,
+        build_master_agent_handle(replacement, previous, fallback_session_id),
+    );
 }
 
 pub(crate) fn apply_agent_ready_update(
@@ -1447,12 +1501,11 @@ pub(crate) struct AgentReplacementParams<'a> {
 
 pub(crate) fn build_replacement_main_agent(
     params: AgentReplacementParams<'_>,
-) -> anyhow::Result<(Agent, Uuid)> {
-    let new_session_id = Uuid::new_v4();
+) -> anyhow::Result<Agent> {
     let new_agent = build_main_agent(
         params.session,
         params.db.clone(),
-        new_session_id,
+        params.session.id,
         params.project_dir.clone(),
         params.local_agent_mgmt_tx,
         #[cfg(feature = "stylos")]
@@ -1467,9 +1520,9 @@ pub(crate) fn build_replacement_main_agent(
     if params.insert_session {
         let _ = params
             .db
-            .insert_session(new_session_id, params.project_dir, true);
+            .insert_session(params.session.id, params.project_dir, true);
     }
-    Ok((new_agent, new_session_id))
+    Ok(new_agent)
 }
 
 fn unix_epoch_now_ms() -> u64 {
@@ -2427,6 +2480,7 @@ mod inspection_tests {
 #[cfg(test)]
 mod turn_ordering_tests {
     use super::{spawn_agent_event_relay, spawn_agent_turn_core_loop, TurnCancellation};
+    use crate::app_runtime::{build_master_agent_handle, AgentReplacement};
     use crate::app_state::AppRuntimeEvent;
     use crate::runtime_domains::RuntimeDomains;
     use themion_core::agent::Agent;
@@ -2495,5 +2549,54 @@ mod turn_ordering_tests {
         tokio::task::spawn_blocking(move || drop(runtime_domains))
             .await
             .expect("drop runtime domains");
+    }
+
+    #[test]
+    fn master_replacement_preserves_session_id_and_queue_when_requested() {
+        use std::collections::VecDeque;
+        use std::sync::{Arc, Mutex};
+
+        let session_id = Uuid::new_v4();
+        let queue = Arc::new(Mutex::new(VecDeque::from([
+            crate::app_state::QueuedPrompt {
+                text: "follow-up".to_string(),
+                enqueued_at_ms: 1,
+            },
+        ])));
+        let previous = crate::tui::AgentHandle {
+            agent: Some(Agent::new(
+                Box::new(themion_core::client::ChatClient::new(
+                    "http://localhost".to_string(),
+                    None,
+                )),
+                "old-model".to_string(),
+                "old-system".to_string(),
+            )),
+            session_id,
+            agent_id: "master".to_string(),
+            label: "master".to_string(),
+            roles: vec!["master".to_string(), "interactive".to_string()],
+            busy: false,
+            turn_cancellation: None,
+            queued_prompts: queue.clone(),
+        };
+        let replacement = build_master_agent_handle(
+            AgentReplacement {
+                new_agent: Agent::new(
+                    Box::new(themion_core::client::ChatClient::new(
+                        "http://new".to_string(),
+                        None,
+                    )),
+                    "new-model".to_string(),
+                    "new-system".to_string(),
+                ),
+                preserve_session_id: true,
+                deferred_if_busy: false,
+            },
+            Some(previous),
+            Uuid::new_v4(),
+        );
+        assert_eq!(replacement.session_id, session_id);
+        assert!(Arc::ptr_eq(&replacement.queued_prompts, &queue));
     }
 }

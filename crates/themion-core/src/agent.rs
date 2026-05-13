@@ -1184,9 +1184,17 @@ impl Agent {
         }
     }
 
+    pub fn absorb_session_state_from(&mut self, previous: Agent) {
+        self.messages = previous.messages;
+        self.turn_boundaries = previous.turn_boundaries;
+        self.turn_seq_counter = previous.turn_seq_counter;
+        self.workflow_state = previous.workflow_state;
+    }
+
     pub fn clear_context(&mut self) {
         self.messages.clear();
         self.turn_boundaries.clear();
+        self.turn_seq_counter = 0;
     }
 
     pub async fn refresh_model_info(&mut self) {
@@ -2428,5 +2436,35 @@ mod tests {
             "Use a self-note when your own non-trivial or branching work needs durable tracking"
         ));
         assert!(!text.contains("master should consider local_agent_create before delegating"));
+    }
+
+    #[test]
+    fn absorb_session_state_carries_history_boundaries_and_workflow() {
+        let mut previous = Agent::new(
+            Box::new(crate::client::ChatClient::new(
+                "http://localhost".to_string(),
+                None,
+            )),
+            "old-model".to_string(),
+            "old-system".to_string(),
+        );
+        previous.messages = vec![msg("user", "hello"), msg("assistant", "world")];
+        previous.turn_boundaries = vec![0];
+        previous.turn_seq_counter = 7;
+        previous.workflow_state.phase_name = "EXECUTE".to_string();
+
+        let mut replacement = Agent::new(
+            Box::new(crate::client::ChatClient::new(
+                "http://new".to_string(),
+                None,
+            )),
+            "new-model".to_string(),
+            "new-system".to_string(),
+        );
+        replacement.absorb_session_state_from(previous);
+        assert_eq!(replacement.messages.len(), 2);
+        assert_eq!(replacement.turn_boundaries, vec![0]);
+        assert_eq!(replacement.turn_seq_counter, 7);
+        assert_eq!(replacement.workflow_state.phase_name, "EXECUTE");
     }
 }
