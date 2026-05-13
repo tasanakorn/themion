@@ -1,6 +1,6 @@
 # themion
 
-> A terminal AI agent in Rust with a core local runtime, tool use, persistent history, Project Memory, multi-agent coordination, and optional Stylos-powered mesh visibility.
+> A terminal AI agent in Rust with a core local runtime, tool use, persistent history, Project Memory, semantic search, multi-agent coordination, and Stylos-powered mesh visibility.
 
 ```
 ████████╗██╗  ██╗███████╗███╗   ███╗██╗ ██████╗ ███╗   ██╗
@@ -13,7 +13,7 @@
 
 themion is a Rust-powered AI coding agent with a full-featured terminal UI, headless mode, print mode, and an in-progress browser surface served by `themion-cli --web`. Give it a task in plain English and it can reason, call tools, inspect your workspace, edit files, run commands, remember project knowledge, and coordinate local agent work directly from your machine.
 
-Themion keeps its core runtime local: workflows, tool execution, model calls, prompt budgeting, local agents, board notes, Project Memory, and persistent history all live in the current process. When built with the optional `stylos` feature, it can also participate in a mesh for presence, discovery, direct status queries, and queued peer messages across other Themion processes.
+Themion keeps its core runtime local: workflows, tool execution, model calls, prompt budgeting, local agents, board notes, Project Memory, semantic search, and persistent history all live in the current process. The default build also enables Stylos so Themion can participate in a mesh for presence, discovery, direct status queries, and queued peer messages across other Themion processes.
 
 > After 0.2.0, themion will use themion to help develop itself.
 
@@ -23,7 +23,7 @@ Themion keeps its core runtime local: workflows, tool execution, model calls, pr
 - **A terminal-first UI** — Ratatui-based interaction with streaming output, keyboard navigation, and direct shell shortcuts
 - **A multi-backend coding agent** — Codex is the recommended default, with support for other OpenAI-compatible backends
 - **A local multi-agent workspace** — board notes, local agent team members, watchdog follow-up, and queued prompts support longer work without turning Stylos into the runtime
-- **An optional Stylos consumer** — Stylos extends Themion with mesh visibility, status queries, and peer messages; it does not replace Themion's execution engine
+- **A Stylos mesh participant by default** — Stylos extends Themion with mesh visibility, status queries, and peer messages; it does not replace Themion's execution engine
 
 ## Features
 
@@ -40,7 +40,7 @@ Themion keeps its core runtime local: workflows, tool execution, model calls, pr
 
 - **Agentic tool use** — Reads files, patches existing text files with strict unified diffs, creates new files, lists directories, runs shell commands, and loops until done
 - **Project Memory and Global Knowledge** — Durable knowledge-base nodes, hashtags, graph links, and project/global scopes for facts that should outlive one chat
-- **Unified semantic search** — Search memory, chat messages, tool calls, and tool results through one generalized `unified_search` surface, with source-kind scoped reindexing
+- **Unified semantic search by default** — Search memory, chat messages, tool calls, and tool results through one generalized `unified_search` surface, with source-kind scoped reindexing
 - **Source outline tools** — Extract Tree-sitter-backed file outlines, imports, symbols, and simple edges for compact code navigation
 - **Context visibility** — `/context` shows prompt-budget and history-replay breakdowns, including estimated tool-token overhead
 
@@ -62,7 +62,7 @@ Themion keeps its core runtime local: workflows, tool execution, model calls, pr
 
 ### Mesh visibility
 
-- **Optional Stylos integration** — When compiled with `--features stylos`, discover other Themion processes, inspect status, query by git repo, and send queued peer messages
+- **Stylos integration is enabled by default** — Discover other Themion processes, inspect status, query by git repo, and send queued peer messages
 - **Single binary** — Ships as one statically-linked executable with no runtime dependencies
 
 ## Why Stylos in Themion?
@@ -148,6 +148,18 @@ If you only want a local build from the repo, use a release build:
 ```bash
 cargo build --release -p themion-cli
 ./target/release/themion
+```
+
+Default builds include both `stylos` and `semantic-memory`:
+
+- `stylos` enables mesh presence, discovery, status queries, and queued peer messages.
+- `semantic-memory` enables semantic Project Memory and unified-search indexing.
+
+To build without those default features, use Cargo's normal `--no-default-features` flag and then opt back into only the features you need:
+
+```bash
+cargo build --release -p themion-cli --no-default-features
+cargo build --release -p themion-cli --no-default-features --features semantic-memory
 ```
 
 Release builds are recommended for the best runtime performance. Use debug builds only if you're actively developing themion itself.
