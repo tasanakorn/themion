@@ -137,6 +137,10 @@ Ownership rules:
 ## Files and edits
 
 - Prefer focused edits to existing files.
+- For file edits, use `fs_patch` as the primary tool for modifying existing source files and other text-based files.
+- Use `fs_write_file` only to create a new file. Do not use it as the normal way to modify an existing text file.
+- `fs_patch` currently supports only paths relative to the current project directory. Do not use absolute paths or `..` traversal outside the project directory.
+- Do not prefer shell commands for normal file modification when `fs_patch` can express the change. Use shell-based file mutation only when it is the only practical way to complete the change cleanly.
 - Create new modules only when they clearly isolate behavior.
 - Put temporary experiments, token-analysis helpers, replay probes, and similar exploratory utilities under `experiments/`.
 - Do not rewrite large files without need.

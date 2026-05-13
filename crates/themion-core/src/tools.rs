@@ -1366,7 +1366,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "fs_write_file",
-                "description": "Write content to a file. Replaces the entire target file contents.",
+                "description": "Create a new file. Replaces the entire target if it already exists; for normal edits to existing text files, use fs_patch instead.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1383,11 +1383,11 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "fs_patch",
-                "description": "Apply a targeted patch to existing text files.",
+                "description": "Apply a targeted standard unified-diff patch to existing text files. Use this for normal edits to existing text files. Patch headers must use project-relative a/path and b/path; absolute paths and .. traversal are unsupported. Do not use *** Begin Patch / *** Update File wrappers.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "patch": { "type": "string", "description": "Unified-diff patch text to apply." }
+                        "patch": { "type": "string", "description": "Standard unified diff, e.g. --- a/path, +++ b/path, and @@ hunks. Do not include *** Begin Patch wrappers." }
                         ,"reason": { "type": "string", "description": "Optional reason." }
                     },
                     "required": ["patch"]
@@ -2450,7 +2450,7 @@ mod tests {
 
         assert_eq!(
             fs_patch["function"]["description"],
-            "Apply a targeted patch to existing text files."
+            "Apply a targeted standard unified-diff patch to existing text files. Use this for normal edits to existing text files. Patch headers must use project-relative a/path and b/path; absolute paths and .. traversal are unsupported. Do not use *** Begin Patch / *** Update File wrappers."
         );
         assert_eq!(
             fs_patch["function"]["parameters"]["required"],
@@ -2458,7 +2458,7 @@ mod tests {
         );
         assert_eq!(
             fs_patch["function"]["parameters"]["properties"]["patch"]["description"],
-            "Unified-diff patch text to apply."
+            "Standard unified diff, e.g. --- a/path, +++ b/path, and @@ hunks. Do not include *** Begin Patch wrappers."
         );
 
         let fs_write = functions
@@ -2467,7 +2467,7 @@ mod tests {
             .expect("fs_write_file definition");
         assert_eq!(
             fs_write["function"]["description"],
-            "Write content to a file. Replaces the entire target file contents."
+            "Create a new file. Replaces the entire target if it already exists; for normal edits to existing text files, use fs_patch instead."
         );
     }
 

@@ -19,4 +19,7 @@ pub const PREDEFINED_GUARDRAILS: &str = r#"When working on code:
 - Summarize conclusions, constraints, blockers, validations, and other user-useful facts rather than replaying the full tool payload; routine mechanical acknowledgements usually do not need separate narration.
 - Tool results may later be trimmed, compacted, truncated, or omitted from future prompt windows, so preserve important findings in ordinary assistant prose when they matter.
 - For meaningful file and shell tool calls, prefer adding a short, concrete `reason` field explaining why the tool is being used when that improves readability. Keep it optional and omit it when it would be redundant.
+- Use `fs_write_file` to create new files. Do not use it as the normal way to edit existing text files.
+- Use `fs_patch` as the primary tool for modifying existing text files. Pass a standard unified diff with `--- a/path`, `+++ b/path`, and `@@` hunks, not `*** Begin Patch` / `*** Update File` wrappers.
+- Do not prefer shell commands for normal file modification when `fs_patch` can express the change. Use shell-based file mutation only as a last resort.
 - Do not create commits or branches unless explicitly asked. If asked to commit, write a brief specific message naming the actual change, not a vague placeholder."#;

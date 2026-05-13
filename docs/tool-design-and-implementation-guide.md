@@ -184,6 +184,13 @@ Avoid:
 
 For file editing, keep whole-file replacement and targeted patching as distinct tools when both are needed. Prefer a patch-style tool for localized edits to existing files, and reserve whole-file write tools for creation or intentional full replacement.
 
+For Themion's current file tools, treat these as canonical model-facing rules:
+
+- `fs_patch` is the primary tool for modifying existing source files and other text-based files
+- `fs_write_file` is for creating new files, not for normal modification of existing text files
+- `fs_patch` currently supports only project-relative paths and must not target absolute paths or `..` traversal outside the project directory
+- shell-based file mutation is a fallback only when repository file tools cannot complete the change cleanly
+
 ### Special tokens and bounds
 
 Keep exact special semantics only when they are required for safe or correct use.
