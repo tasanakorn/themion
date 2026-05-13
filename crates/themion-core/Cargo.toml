@@ -4,7 +4,7 @@ version = "0.78.0"
 edition = "2021"
 
 [features]
-default = ["semantic-memory"]
+default = ["semantic-memory", "stylos"]
 stylos = []
 semantic-memory = ["dep:fastembed"]
 

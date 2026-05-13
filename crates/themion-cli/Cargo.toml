@@ -8,7 +8,7 @@ name = "themion"
 path = "src/main.rs"
 
 [features]
-default = ["semantic-memory"]
+default = ["semantic-memory", "stylos"]
 stylos = [
     "dep:stylos",
     "dep:hostname",
