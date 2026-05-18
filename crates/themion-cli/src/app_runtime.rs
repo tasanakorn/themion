@@ -1743,6 +1743,9 @@ fn create_local_agent(
     if agent_id == "master" {
         anyhow::bail!("agent_id 'master' is reserved for the predefined leader");
     }
+    if agent_id == "[any]" {
+        anyhow::bail!("agent_id '[any]' is reserved for shared board-target routing");
+    }
     if ctx.agents.iter().any(|h| h.agent_id == agent_id) {
         anyhow::bail!("duplicate agent_id: {agent_id}");
     }
@@ -2005,31 +2008,43 @@ pub(crate) struct IncomingPromptOutcome {
 
 #[cfg(feature = "stylos")]
 pub(crate) fn plan_incoming_prompt(
+    db: &Arc<DbHandle>,
     agents: &[LocalAgentStatusEntry],
     board_claims: &Arc<LocalBoardClaimRegistry>,
     request: crate::local_prompts::IncomingPromptRequest,
 ) -> IncomingPromptOutcome {
+    let note_id = board_note_id_from_prompt(&request.prompt).map(str::to_string);
     match resolve_incoming_prompt_disposition(agents, board_claims, request) {
         IncomingPromptDisposition::MissingTarget {
             log_agent_id,
             log_text,
-        } => IncomingPromptOutcome {
-            log_agent_id,
-            log_text,
-            accepted_agent_index: None,
-            accepted_prompt: None,
-            accepted_request: None,
-        },
+        } => {
+            if let Some(note_id) = note_id.as_deref() {
+                let _ = db.release_shared_board_note_claim(note_id);
+            }
+            IncomingPromptOutcome {
+                log_agent_id,
+                log_text,
+                accepted_agent_index: None,
+                accepted_prompt: None,
+                accepted_request: None,
+            }
+        }
         IncomingPromptDisposition::BusyTarget {
             log_agent_id,
             log_text,
-        } => IncomingPromptOutcome {
-            log_agent_id,
-            log_text,
-            accepted_agent_index: None,
-            accepted_prompt: None,
-            accepted_request: None,
-        },
+        } => {
+            if let Some(note_id) = note_id.as_deref() {
+                let _ = db.release_shared_board_note_claim(note_id);
+            }
+            IncomingPromptOutcome {
+                log_agent_id,
+                log_text,
+                accepted_agent_index: None,
+                accepted_prompt: None,
+                accepted_request: None,
+            }
+        }
         IncomingPromptDisposition::Accepted {
             agent_index,
             log_agent_id,

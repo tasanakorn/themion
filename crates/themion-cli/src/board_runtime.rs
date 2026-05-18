@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use themion_core::db::BoardNote;
-use themion_core::db::{DbHandle, NoteColumn, NoteKind};
+use themion_core::db::{BoardNote, DbHandle, NoteColumn, NoteKind};
 
 use crate::app_state::{create_done_mention_locally, DoneMentionRequest};
 use crate::local_prompts::build_board_note_prompt;
@@ -73,6 +72,40 @@ fn candidate_local_instances(local_instance: &str) -> Vec<String> {
     out
 }
 
+fn candidate_shared_instances(local_instance: &str) -> Vec<String> {
+    let mut out = vec!["[any]".to_string()];
+    for instance in candidate_local_instances(local_instance) {
+        if !out.iter().any(|value| value == &instance) {
+            out.push(instance);
+        }
+    }
+    out
+}
+
+fn try_claim_shared_note(
+    db: &Arc<DbHandle>,
+    local_instance: &str,
+    target_agent_id: &str,
+    trigger: IncomingPromptSource,
+) -> Option<IncomingPromptRequest> {
+    for candidate_instance in candidate_shared_instances(local_instance) {
+        let Ok(Some(note)) = db.next_shared_board_note_candidate(&candidate_instance) else {
+            continue;
+        };
+        let Ok(claimed) =
+            db.claim_shared_board_note(&note.note_id, local_instance, target_agent_id)
+        else {
+            continue;
+        };
+        if claimed {
+            let mut claimed_note = note;
+            claimed_note.to_agent_id = target_agent_id.to_string();
+            return Some(build_injection_request(&claimed_note, trigger));
+        }
+    }
+    None
+}
+
 pub fn resolve_pending_board_note_injection(
     db: &Arc<DbHandle>,
     _local_claims: &Arc<LocalBoardClaimRegistry>,
@@ -87,10 +120,18 @@ pub fn resolve_pending_board_note_injection(
         };
         return Some(build_injection_request(&note, trigger));
     }
-    None
+
+    try_claim_shared_note(db, local_instance, target_agent_id, trigger)
 }
 
-pub fn release_board_note_claim(_local_claims: &Arc<LocalBoardClaimRegistry>, _note_id: &str) {}
+pub fn release_board_note_claim(local_claims: &Arc<LocalBoardClaimRegistry>, note_id: &str) {
+    let _ = &local_claims;
+    let _ = note_id;
+}
+
+pub fn release_board_note_claim_from_db(db: &Arc<DbHandle>, note_id: &str) {
+    let _ = db.release_shared_board_note_claim(note_id);
+}
 
 pub fn board_note_id_from_prompt(prompt: &str) -> Option<&str> {
     if !prompt.starts_with("type=stylos_note ") {

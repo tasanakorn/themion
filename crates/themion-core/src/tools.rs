@@ -54,6 +54,9 @@ fn board_note_to_json(note: &crate::db::BoardNote) -> Value {
         "column": note.column.as_str(),
         "result_text": note.result_text,
         "blocked_until_ms": note.blocked_until_ms,
+        "claimed_by_instance": note.claimed_by_instance,
+        "claimed_by_agent_id": note.claimed_by_agent_id,
+        "claimed_at_ms": note.claimed_at_ms,
         "injection_state": match note.injection_state { crate::db::NoteInjectionState::Pending => "pending", crate::db::NoteInjectionState::Injected => "injected" },
         "created_at_ms": note.created_at_ms,
         "updated_at_ms": note.updated_at_ms,
@@ -1213,7 +1216,43 @@ fn resolve_board_target(
         requested_to_agent_id.to_string()
     };
 
+    if to_instance == "[any]" && to_agent_id != "[any]" {
+        anyhow::bail!(
+            "invalid board target shape: to_instance='[any]' requires to_agent_id='[any]'"
+        );
+    }
+
     Ok((to_instance, to_agent_id))
+}
+
+fn validate_board_list_target_shape(
+    to_instance: Option<&str>,
+    to_agent_id: Option<&str>,
+) -> Result<()> {
+    if matches!(to_instance, Some("[any]")) && !matches!(to_agent_id, Some("[any]")) {
+        anyhow::bail!(
+            "invalid board query shape: to_instance='[any]' requires to_agent_id='[any]'"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "stylos")]
+fn board_target_should_use_stylos(
+    to_instance: &str,
+    _to_agent_id: &str,
+    local_instance_id: Option<&str>,
+) -> bool {
+    if to_instance == "[any]" {
+        return false;
+    }
+
+    let local_instance_matches = local_instance_id
+        .filter(|value| !value.is_empty())
+        .map(|value| value == to_instance)
+        .unwrap_or(false);
+
+    !local_instance_matches
 }
 
 fn resolve_note_source_instance(
@@ -1532,12 +1571,12 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "board_create_note",
-                "description": "Create a durable board note for tracked self-work or delegated work. Include expected result and return path when delegating.",
+                "description": "Create a durable board note for tracked self-work or delegated work. Use to_agent_id='[any]' for shared board work; use to_instance='[any]' only together with to_agent_id='[any]'. Include expected result and return path when delegating.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "to_instance": { "type": "string", "description": "Target instance id. Prefer local for ordinary self-notes; SELF is also accepted when supported." },
-                        "to_agent_id": { "type": "string", "description": "Target agent id. Prefer master for ordinary self-notes; SELF is also accepted when supported." },
+                        "to_instance": { "type": "string", "description": "Target instance id. Prefer local for ordinary self-notes; SELF is also accepted when supported. Use [any] only with to_agent_id=[any] for project-wide shared board notes." },
+                        "to_agent_id": { "type": "string", "description": "Target agent id. Prefer master for ordinary self-notes; SELF is also accepted when supported. Use [any] for shared board work." },
                         "body": { "type": "string" },
                         "note_kind": { "type": "string", "enum": ["work_request", "done_mention"], "description": "Kind. Default: work_request." },
                         "origin_note_id": { "type": "string", "description": "Original note id for done mentions." },
@@ -1555,7 +1594,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "board_list_notes",
-                "description": "List board notes filtered by target and optional columns.",
+                "description": "List board notes filtered by target and optional columns. Query to_agent_id='[any]' for shared board notes; use to_instance='[any]' only together with to_agent_id='[any]'.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1869,7 +1908,13 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
 
             #[cfg(feature = "stylos")]
             {
-                if ctx.stylos_enabled {
+                if ctx.stylos_enabled
+                    && board_target_should_use_stylos(
+                        &to_instance,
+                        &to_agent_id,
+                        ctx.local_instance_id.as_deref(),
+                    )
+                {
                     let invoker = ctx
                         .stylos_tool_invoker
                         .as_ref()
@@ -1947,6 +1992,10 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                     }
                 }
             }
+            validate_board_list_target_shape(
+                args["to_instance"].as_str(),
+                args["to_agent_id"].as_str(),
+            )?;
             let notes = ctx.db.list_board_notes(
                 args["to_instance"].as_str(),
                 args["to_agent_id"].as_str(),

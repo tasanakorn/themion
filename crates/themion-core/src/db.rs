@@ -184,6 +184,9 @@ CREATE TABLE IF NOT EXISTS board_notes (
     result_text TEXT,
     injection_state TEXT NOT NULL,
     blocked_until_ms INTEGER,
+    claimed_by_instance TEXT,
+    claimed_by_agent_id TEXT,
+    claimed_at_ms INTEGER,
     meta_json TEXT,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
@@ -460,6 +463,9 @@ fn init_schema(conn: &Connection, fts5: bool) -> Result<()> {
     ensure_column(conn, "board_notes", "origin_note_id", "TEXT")?;
     ensure_column(conn, "board_notes", "completion_notified_at_ms", "INTEGER")?;
     ensure_column(conn, "board_notes", "blocked_until_ms", "INTEGER")?;
+    ensure_column(conn, "board_notes", "claimed_by_instance", "TEXT")?;
+    ensure_column(conn, "board_notes", "claimed_by_agent_id", "TEXT")?;
+    ensure_column(conn, "board_notes", "claimed_at_ms", "INTEGER")?;
     ensure_column(conn, "board_notes", "meta_json", "TEXT")?;
     if fts5 {
         conn.execute_batch(SCHEMA_FTS5)?;
@@ -955,6 +961,9 @@ impl DbHandle {
             injection_state: NoteInjectionState::Pending,
             blocked_until_ms: (args.column == NoteColumn::Blocked)
                 .then(|| now_ms + BLOCKED_RETRY_COOLDOWN_MS),
+            claimed_by_instance: None,
+            claimed_by_agent_id: None,
+            claimed_at_ms: None,
             meta_json: args.meta_json,
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
@@ -967,9 +976,9 @@ impl DbHandle {
         conn.execute(
             "INSERT INTO board_notes (
                 note_id, note_slug, note_kind, origin_note_id, completion_notified_at_ms,
-                from_instance, from_agent_id, to_instance, to_agent_id, body,
-                column_name, result_text, injection_state, blocked_until_ms, meta_json, created_at_ms, updated_at_ms, injected_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                from_instance, from_agent_id, to_instance, to_agent_id, body, column_name, result_text,
+                injection_state, blocked_until_ms, claimed_by_instance, claimed_by_agent_id, claimed_at_ms, meta_json, created_at_ms, updated_at_ms, injected_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             rusqlite::params![
                 note.note_id,
                 note.note_slug,
@@ -985,6 +994,9 @@ impl DbHandle {
                 note.result_text,
                 note.injection_state.as_str(),
                 note.blocked_until_ms,
+                note.claimed_by_instance,
+                note.claimed_by_agent_id,
+                note.claimed_at_ms,
                 note.meta_json,
                 note.created_at_ms,
                 note.updated_at_ms,
@@ -1000,7 +1012,8 @@ impl DbHandle {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT note_id, note_slug, note_kind, origin_note_id, completion_notified_at_ms, from_instance, from_agent_id, to_instance, to_agent_id, body,
-                    column_name, result_text, injection_state, blocked_until_ms, meta_json, created_at_ms, updated_at_ms, injected_at_ms
+                    column_name, result_text, injection_state, blocked_until_ms, claimed_by_instance, claimed_by_agent_id, claimed_at_ms,
+                    meta_json, created_at_ms, updated_at_ms, injected_at_ms
              FROM board_notes WHERE note_id = ?1",
             rusqlite::params![note_id],
             map_note_row,
@@ -1018,7 +1031,8 @@ impl DbHandle {
         let conn = self.conn.lock().unwrap();
         let mut sql = String::from(
             "SELECT note_id, note_slug, note_kind, origin_note_id, completion_notified_at_ms, from_instance, from_agent_id, to_instance, to_agent_id, body,
-                    column_name, result_text, injection_state, blocked_until_ms, meta_json, created_at_ms, updated_at_ms, injected_at_ms
+                    column_name, result_text, injection_state, blocked_until_ms, claimed_by_instance, claimed_by_agent_id, claimed_at_ms,
+                    meta_json, created_at_ms, updated_at_ms, injected_at_ms
              FROM board_notes
              WHERE (?1 IS NULL OR to_instance = ?1)
                AND (?2 IS NULL OR to_agent_id = ?2)",
@@ -1075,6 +1089,9 @@ impl DbHandle {
                      SET column_name = ?2,
                          blocked_until_ms = CASE WHEN ?2 = 'blocked' THEN ?3 ELSE NULL END,
                          injection_state = CASE WHEN ?2 = 'done' THEN injection_state ELSE 'pending' END,
+                         claimed_by_instance = NULL,
+                         claimed_by_agent_id = NULL,
+                         claimed_at_ms = NULL,
                          result_text = ?4,
                          updated_at_ms = ?5
                      WHERE note_id = ?1",
@@ -1093,6 +1110,9 @@ impl DbHandle {
                      SET column_name = ?2,
                          blocked_until_ms = CASE WHEN ?2 = 'blocked' THEN ?3 ELSE NULL END,
                          injection_state = CASE WHEN ?2 = 'done' THEN injection_state ELSE 'pending' END,
+                         claimed_by_instance = NULL,
+                         claimed_by_agent_id = NULL,
+                         claimed_at_ms = NULL,
                          updated_at_ms = ?4
                      WHERE note_id = ?1",
                     rusqlite::params![
@@ -1125,7 +1145,8 @@ impl DbHandle {
         let in_progress = conn
             .query_row(
                 "SELECT note_id, note_slug, note_kind, origin_note_id, completion_notified_at_ms, from_instance, from_agent_id, to_instance, to_agent_id, body,
-                        column_name, result_text, injection_state, blocked_until_ms, meta_json, created_at_ms, updated_at_ms, injected_at_ms
+                        column_name, result_text, injection_state, blocked_until_ms, claimed_by_instance, claimed_by_agent_id, claimed_at_ms,
+                        meta_json, created_at_ms, updated_at_ms, injected_at_ms
                  FROM board_notes
                  WHERE to_instance = ?1 AND to_agent_id = ?2 AND injection_state = 'pending'
                    AND column_name = 'in_progress'
@@ -1140,7 +1161,8 @@ impl DbHandle {
         }
         conn.query_row(
             "SELECT note_id, note_slug, note_kind, origin_note_id, completion_notified_at_ms, from_instance, from_agent_id, to_instance, to_agent_id, body,
-                    column_name, result_text, injection_state, blocked_until_ms, meta_json, created_at_ms, updated_at_ms, injected_at_ms
+                    column_name, result_text, injection_state, blocked_until_ms, claimed_by_instance, claimed_by_agent_id, claimed_at_ms,
+                    meta_json, created_at_ms, updated_at_ms, injected_at_ms
              FROM board_notes
              WHERE to_instance = ?1 AND to_agent_id = ?2 AND injection_state = 'pending'
                AND column_name = 'todo'
@@ -1151,6 +1173,66 @@ impl DbHandle {
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    pub fn next_shared_board_note_candidate(&self, to_instance: &str) -> Result<Option<BoardNote>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT note_id, note_slug, note_kind, origin_note_id, completion_notified_at_ms, from_instance, from_agent_id, to_instance, to_agent_id, body,
+                    column_name, result_text, injection_state, blocked_until_ms, claimed_by_instance, claimed_by_agent_id, claimed_at_ms,
+                    meta_json, created_at_ms, updated_at_ms, injected_at_ms
+             FROM board_notes
+             WHERE to_instance = ?1 AND to_agent_id = '[any]'
+               AND column_name = 'todo'
+               AND injection_state = 'pending'
+               AND claimed_by_instance IS NULL
+               AND claimed_by_agent_id IS NULL
+               AND claimed_at_ms IS NULL
+             ORDER BY created_at_ms ASC
+             LIMIT 1",
+            rusqlite::params![to_instance],
+            map_note_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn claim_shared_board_note(
+        &self,
+        note_id: &str,
+        claimed_by_instance: &str,
+        claimed_by_agent_id: &str,
+    ) -> Result<bool> {
+        let now_ms = now_unix_ms();
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE board_notes
+             SET claimed_by_instance = ?2,
+                 claimed_by_agent_id = ?3,
+                 claimed_at_ms = ?4,
+                 updated_at_ms = ?4
+             WHERE note_id = ?1
+               AND to_agent_id = '[any]'
+               AND column_name = 'todo'
+               AND injection_state = 'pending'
+               AND claimed_by_instance IS NULL
+               AND claimed_by_agent_id IS NULL
+               AND claimed_at_ms IS NULL",
+            rusqlite::params![note_id, claimed_by_instance, claimed_by_agent_id, now_ms],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn release_shared_board_note_claim(&self, note_id: &str) -> Result<()> {
+        let now_ms = now_unix_ms();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE board_notes
+             SET claimed_by_instance = NULL, claimed_by_agent_id = NULL, claimed_at_ms = NULL, updated_at_ms = ?2
+             WHERE note_id = ?1",
+            rusqlite::params![note_id, now_ms],
+        )?;
+        Ok(())
     }
 
     pub fn mark_board_note_completion_notified(&self, note_id: &str) -> Result<Option<BoardNote>> {
@@ -1174,6 +1256,9 @@ impl DbHandle {
              SET injection_state = 'injected',
                  injected_at_ms = ?2,
                  blocked_until_ms = CASE WHEN column_name = 'blocked' THEN ?3 ELSE blocked_until_ms END,
+                 claimed_by_instance = NULL,
+                 claimed_by_agent_id = NULL,
+                 claimed_at_ms = NULL,
                  updated_at_ms = ?2
              WHERE note_id = ?1",
             rusqlite::params![note_id, now_ms, now_ms + BLOCKED_RETRY_COOLDOWN_MS],
@@ -1539,10 +1624,13 @@ fn map_note_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BoardNote> {
             )
         })?,
         blocked_until_ms: row.get(13)?,
-        meta_json: row.get(14)?,
-        created_at_ms: row.get(15)?,
-        updated_at_ms: row.get(16)?,
-        injected_at_ms: row.get(17)?,
+        claimed_by_instance: row.get(14)?,
+        claimed_by_agent_id: row.get(15)?,
+        claimed_at_ms: row.get(16)?,
+        meta_json: row.get(17)?,
+        created_at_ms: row.get(18)?,
+        updated_at_ms: row.get(19)?,
+        injected_at_ms: row.get(20)?,
     })
 }
 
@@ -1667,6 +1755,9 @@ fn warn_if_unexpected_board_note_instance(instance: &str, field_name: &str, note
         );
         return;
     }
+    if instance == "[any]" {
+        return;
+    }
     if !instance.contains(':') {
         eprintln!(
             "warning: board note {} created with unexpected {} format {:?}; expected <hostname>:<pid>",
@@ -1691,6 +1782,9 @@ pub struct BoardNote {
     pub result_text: Option<String>,
     pub injection_state: NoteInjectionState,
     pub blocked_until_ms: Option<i64>,
+    pub claimed_by_instance: Option<String>,
+    pub claimed_by_agent_id: Option<String>,
+    pub claimed_at_ms: Option<i64>,
     pub meta_json: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,

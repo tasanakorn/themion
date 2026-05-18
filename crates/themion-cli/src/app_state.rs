@@ -59,6 +59,17 @@ pub(crate) enum AgentActivity {
     Finishing,
 }
 
+#[cfg(feature = "stylos")]
+fn is_shared_board_create_note_detail(detail: &str) -> bool {
+    let Some(rest) = detail.strip_prefix("board_create_note ") else {
+        return false;
+    };
+    let Some(target) = rest.split_whitespace().next() else {
+        return false;
+    };
+    matches!(target.split_once(':'), Some(("[any]", "[any]")))
+}
+
 impl AgentActivity {
     pub(crate) fn label(&self, stream_chunks: u64, stream_chars: u64) -> String {
         match self {
@@ -1586,17 +1597,20 @@ pub(crate) fn process_agent_event(
             set_agent_activity_for_session(app, sid, AgentActivity::RunningTool(activity_detail));
             #[cfg(feature = "stylos")]
             {
-                app.runtime.last_sender_side_transport_event = app
-                    .runtime
-                    .local_instance_id
-                    .as_deref()
-                    .and_then(|local_instance| {
-                        crate::stylos::sender_side_transport_event_from_tool_detail(
-                            &detail,
-                            local_instance,
-                            app.runtime.stylos_tool_bridge.is_some(),
-                        )
-                    });
+                app.runtime.last_sender_side_transport_event = if is_shared_board_create_note_detail(&detail) {
+                    None
+                } else {
+                    app.runtime
+                        .local_instance_id
+                        .as_deref()
+                        .and_then(|local_instance| {
+                            crate::stylos::sender_side_transport_event_from_tool_detail(
+                                &detail,
+                                local_instance,
+                                app.runtime.stylos_tool_bridge.is_some(),
+                            )
+                        })
+                };
             }
             app.push(crate::tui::Entry::ToolCall {
                 agent_id: crate::tui::agent_id_for_session(&app.runtime.agents, sid),
@@ -1994,6 +2008,7 @@ fn process_incoming_prompt_request(
         .unwrap_or(false)
     {
         if let Some(note_id) = crate::board_runtime::board_note_id_from_prompt(&request.prompt) {
+            crate::board_runtime::release_board_note_claim_from_db(&app.runtime.db, note_id);
             crate::board_runtime::release_board_note_claim(&app.runtime.board_claims, note_id);
         }
         app.push(crate::tui::Entry::RemoteEvent {
@@ -2076,6 +2091,7 @@ fn process_incoming_prompt_request(
     }
 
     let outcome = crate::app_runtime::plan_incoming_prompt(
+        &app.runtime.db,
         &crate::app_runtime::build_local_agent_status_entries(&app.runtime.agents),
         &app.runtime.board_claims,
         request,
@@ -2276,6 +2292,7 @@ fn handle_watchdog_tick_local_event(
         else {
             if let Some(note_id) = crate::board_runtime::board_note_id_from_prompt(&request.prompt)
             {
+                crate::board_runtime::release_board_note_claim_from_db(&app.runtime.db, note_id);
                 crate::board_runtime::release_board_note_claim(&app.runtime.board_claims, note_id);
             }
             app.runtime
