@@ -1194,7 +1194,6 @@ impl Agent {
     pub fn clear_context(&mut self) {
         self.messages.clear();
         self.turn_boundaries.clear();
-        self.turn_seq_counter = 0;
     }
 
     pub async fn refresh_model_info(&mut self) {
@@ -2466,5 +2465,20 @@ mod tests {
         assert_eq!(replacement.turn_boundaries, vec![0]);
         assert_eq!(replacement.turn_seq_counter, 7);
         assert_eq!(replacement.workflow_state.phase_name, "EXECUTE");
+    }
+
+    #[test]
+    fn clear_context_preserves_turn_sequence_counter() {
+        let mut agent = Agent::new(
+            Box::new(crate::client::ChatClient::new(
+                "http://localhost".to_string(),
+                None,
+            )),
+            "model".to_string(),
+            "system".to_string(),
+        );
+        agent.turn_seq_counter = 3;
+        agent.clear_context();
+        assert_eq!(agent.turn_seq_counter, 3);
     }
 }
