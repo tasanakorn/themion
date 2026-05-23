@@ -2121,6 +2121,7 @@ impl Agent {
                     project_dir: self.project_dir.clone(),
                     workflow_state: Some(self.workflow_state.clone()),
                     turn_seq: Some(turn_seq),
+                    local_role_agent_id: self.local_role_agent_id.clone(),
                     #[cfg(feature = "stylos")]
                     local_agent_id: self.local_agent_id.clone(),
                     #[cfg(feature = "stylos")]

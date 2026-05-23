@@ -750,7 +750,6 @@ pub(crate) fn handle_local_agent_management_request(
 ) {
     let local_agent_tool_invoker =
         build_local_agent_tool_invoker(app.runtime.local_agent_mgmt_tx.clone());
-    let any_agent_busy = runtime_any_agent_busy(&app.runtime);
     let roster = build_local_agent_roster(&app.runtime.agents);
     let result = runtime_handle_local_agent_management_request(
         LocalAgentRuntimeContext {
@@ -759,7 +758,7 @@ pub(crate) fn handle_local_agent_management_request(
             db: &app.runtime.db,
             agents: &mut app.runtime.agents,
             roster: &roster,
-            agent_busy: any_agent_busy,
+            acting_agent_id: request.acting_agent_id.as_deref(),
             #[cfg(feature = "stylos")]
             stylos_tool_bridge: app.runtime.stylos_tool_bridge.clone(),
             #[cfg(feature = "stylos")]
@@ -1597,20 +1596,21 @@ pub(crate) fn process_agent_event(
             set_agent_activity_for_session(app, sid, AgentActivity::RunningTool(activity_detail));
             #[cfg(feature = "stylos")]
             {
-                app.runtime.last_sender_side_transport_event = if is_shared_board_create_note_detail(&detail) {
-                    None
-                } else {
-                    app.runtime
-                        .local_instance_id
-                        .as_deref()
-                        .and_then(|local_instance| {
-                            crate::stylos::sender_side_transport_event_from_tool_detail(
-                                &detail,
-                                local_instance,
-                                app.runtime.stylos_tool_bridge.is_some(),
-                            )
-                        })
-                };
+                app.runtime.last_sender_side_transport_event =
+                    if is_shared_board_create_note_detail(&detail) {
+                        None
+                    } else {
+                        app.runtime
+                            .local_instance_id
+                            .as_deref()
+                            .and_then(|local_instance| {
+                                crate::stylos::sender_side_transport_event_from_tool_detail(
+                                    &detail,
+                                    local_instance,
+                                    app.runtime.stylos_tool_bridge.is_some(),
+                                )
+                            })
+                    };
             }
             app.push(crate::tui::Entry::ToolCall {
                 agent_id: crate::tui::agent_id_for_session(&app.runtime.agents, sid),

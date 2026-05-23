@@ -241,8 +241,9 @@ Current behavior:
 - `master` remains reserved for the predefined leader and cannot be recreated through the tool
 - the current implementation rejects duplicate ids, another `master`, and another `interactive` role
 - `local_agent_delete` accepts a target `agent_id` for a non-leader local agent
+- `master` cannot be removed, the acting agent cannot remove itself, and deletion is allowed only when the target agent is currently idle
 - deleting `master` is rejected
-- deleting while the local runtime is busy is currently rejected explicitly rather than deferred
+- deletion now checks the target agent's current idle/busy state rather than rejecting based on unrelated busy work elsewhere in the local runtime
 - successful create/delete operations mutate the active in-memory roster immediately, so local targeting and runtime inspection stay aligned with the changed roster
 
 This is still a local-runtime management slice rather than a separate multi-process scheduler, but the current TUI/runtime path now supports overlapping active turns across multiple local agents in one process. Turn admission is checked per local agent handle, explicit target-specific busy outcomes are preserved, and any remaining process-level busy field is only an aggregate observability summary rather than the scheduler's source of truth.

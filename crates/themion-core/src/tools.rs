@@ -972,7 +972,8 @@ type StylosToolFuture = Pin<Box<dyn Future<Output = Result<String>> + Send>>;
 pub type StylosToolInvoker = Arc<dyn Fn(String, Value) -> StylosToolFuture + Send + Sync>;
 
 type LocalAgentToolFuture = Pin<Box<dyn Future<Output = Result<String>> + Send>>;
-pub type LocalAgentToolInvoker = Arc<dyn Fn(String, Value) -> LocalAgentToolFuture + Send + Sync>;
+pub type LocalAgentToolInvoker =
+    Arc<dyn Fn(String, Value, Option<String>) -> LocalAgentToolFuture + Send + Sync>;
 
 const MAX_SLEEP_MS: u64 = 30_000;
 const SELF_TARGET_KEYWORD: &str = "SELF";
@@ -1166,6 +1167,7 @@ pub struct ToolCtx {
     pub project_dir: PathBuf,
     pub workflow_state: Option<WorkflowState>,
     pub turn_seq: Option<u32>,
+    pub local_role_agent_id: Option<String>,
     #[cfg(feature = "stylos")]
     pub local_agent_id: Option<String>,
     #[cfg(feature = "stylos")]
@@ -1660,7 +1662,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "local_agent_delete",
-                "description": "Delete an existing non-leader local agent from the current Themion instance.",
+                "description": "Delete an existing non-leader local agent from the current Themion instance. The target must be idle, cannot be 'master', and an agent cannot remove itself.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -2239,7 +2241,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 .local_agent_tool_invoker
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("local agent management tools unavailable"))?;
-            invoker(name.to_string(), args).await
+            invoker(name.to_string(), args, ctx.local_role_agent_id.clone()).await
         }
         #[cfg(feature = "stylos")]
         "stylos_query_agents_alive"
@@ -2374,6 +2376,7 @@ mod tests {
             project_dir: project_dir_path,
             workflow_state: Some(state),
             turn_seq: Some(7),
+            local_role_agent_id: None,
             local_agent_tool_invoker: None,
             source_analysis_tool_invoker: None,
             system_inspection: None,

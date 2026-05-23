@@ -119,6 +119,7 @@ pub(crate) struct SourceAnalysisRequest {
 pub(crate) struct LocalAgentManagementRequest {
     pub(crate) action: String,
     pub(crate) args: serde_json::Value,
+    pub(crate) acting_agent_id: Option<String>,
     pub(crate) reply_tx: tokio::sync::oneshot::Sender<anyhow::Result<String>>,
 }
 
@@ -149,27 +150,30 @@ pub(crate) fn build_source_analysis_tool_invoker(
 pub(crate) fn build_local_agent_tool_invoker(
     app_tx: mpsc::UnboundedSender<AppEvent>,
 ) -> themion_core::tools::LocalAgentToolInvoker {
-    std::sync::Arc::new(move |name: String, args: serde_json::Value| {
-        let app_tx = app_tx.clone();
-        let fut: std::pin::Pin<
-            Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>,
-        > = Box::pin(async move {
-            let (reply_tx, reply_rx) = oneshot::channel();
-            app_tx
-                .send(AppEvent::LocalAgentManagement(
-                    LocalAgentManagementRequest {
-                        action: name,
-                        args,
-                        reply_tx,
-                    },
-                ))
-                .map_err(|_| anyhow::anyhow!("local agent management queue unavailable"))?;
-            reply_rx
-                .await
-                .map_err(|_| anyhow::anyhow!("local agent management reply unavailable"))?
-        });
-        fut
-    })
+    std::sync::Arc::new(
+        move |name: String, args: serde_json::Value, acting_agent_id: Option<String>| {
+            let app_tx = app_tx.clone();
+            let fut: std::pin::Pin<
+                Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>,
+            > = Box::pin(async move {
+                let (reply_tx, reply_rx) = oneshot::channel();
+                app_tx
+                    .send(AppEvent::LocalAgentManagement(
+                        LocalAgentManagementRequest {
+                            action: name,
+                            args,
+                            acting_agent_id,
+                            reply_tx,
+                        },
+                    ))
+                    .map_err(|_| anyhow::anyhow!("local agent management queue unavailable"))?;
+                reply_rx
+                    .await
+                    .map_err(|_| anyhow::anyhow!("local agent management reply unavailable"))?
+            });
+            fut
+        },
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -1637,7 +1641,7 @@ pub(crate) struct LocalAgentRuntimeContext<'a> {
     pub db: &'a Arc<DbHandle>,
     pub agents: &'a mut Vec<crate::tui::AgentHandle>,
     pub roster: &'a [LocalAgentRosterEntry],
-    pub agent_busy: bool,
+    pub acting_agent_id: Option<&'a str>,
     #[cfg(feature = "stylos")]
     pub stylos_tool_bridge: Option<crate::stylos::StylosToolBridge>,
     #[cfg(feature = "stylos")]
@@ -1844,8 +1848,18 @@ fn delete_local_agent(
     if agent_id == "master" {
         anyhow::bail!("cannot delete the predefined leader agent");
     }
-    if ctx.agent_busy {
-        anyhow::bail!("cannot delete local agents while the local runtime is busy");
+    if ctx.acting_agent_id == Some(agent_id) {
+        anyhow::bail!("an agent cannot remove itself");
+    }
+    let target = ctx
+        .agents
+        .iter()
+        .find(|handle| handle.agent_id == agent_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown agent_id: {agent_id}"))?;
+    if target.busy {
+        anyhow::bail!(
+            "cannot delete local agent '{agent_id}' because the target agent is not idle"
+        );
     }
     let removed = remove_local_agent_handle(ctx.agents, agent_id)?;
     Ok(serde_json::json!({
@@ -2465,6 +2479,99 @@ body";
             stylos_note_display_identifier(prompt),
             "note_id=123e4567-e89b-12d3-a456-426614174000"
         );
+    }
+}
+
+#[cfg(test)]
+mod local_agent_delete_tests {
+    use super::{delete_local_agent, LocalAgentRuntimeContext};
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+    use tempfile::tempdir;
+    use themion_core::agent::Agent;
+    use themion_core::client::ChatClient;
+    use themion_core::db::DbHandle;
+    use uuid::Uuid;
+
+    fn test_handle(agent_id: &str, busy: bool) -> crate::tui::AgentHandle {
+        crate::tui::AgentHandle {
+            agent: Some(Agent::new(
+                Box::new(ChatClient::new("http://localhost".to_string(), None)),
+                "test-model".to_string(),
+                "test-system".to_string(),
+            )),
+            session_id: Uuid::new_v4(),
+            agent_id: agent_id.to_string(),
+            label: agent_id.to_string(),
+            roles: vec!["executor".to_string()],
+            busy,
+            turn_cancellation: None,
+            queued_prompts: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
+    fn test_context<'a>(
+        agents: &'a mut Vec<crate::tui::AgentHandle>,
+        acting_agent_id: Option<&'a str>,
+    ) -> LocalAgentRuntimeContext<'a> {
+        let project_dir = tempdir().expect("tempdir").keep();
+        let session = crate::Session::new();
+        let db = Arc::new(DbHandle::open_in_memory().expect("db"));
+        let roster: &'a [crate::app_state::LocalAgentRosterEntry] = &[];
+        let agent_busy = agents.iter().any(|a| a.busy);
+        LocalAgentRuntimeContext {
+            session: Box::leak(Box::new(session)),
+            project_dir: Box::leak(Box::new(project_dir)),
+            db: Box::leak(Box::new(db)),
+            agents,
+            roster,
+            acting_agent_id,
+            local_agent_tool_invoker: None,
+            source_analysis_tool_invoker: None,
+            api_log_enabled: false,
+        }
+    }
+
+    #[test]
+    fn delete_local_agent_rejects_master() {
+        let mut agents = vec![test_handle("master", false)];
+        let ctx = test_context(&mut agents, Some("other"));
+        let err = delete_local_agent(ctx, serde_json::json!({"agent_id": "master"})).unwrap_err();
+        assert!(err.to_string().contains("predefined leader"));
+    }
+
+    #[test]
+    fn delete_local_agent_rejects_self_delete() {
+        let mut agents = vec![test_handle("master", false), test_handle("smith-1", false)];
+        let ctx = test_context(&mut agents, Some("smith-1"));
+        let err = delete_local_agent(ctx, serde_json::json!({"agent_id": "smith-1"})).unwrap_err();
+        assert!(err.to_string().contains("cannot remove itself"));
+    }
+
+    #[test]
+    fn delete_local_agent_rejects_busy_target_even_if_other_agent_is_idle() {
+        let mut agents = vec![
+            test_handle("master", false),
+            test_handle("smith-1", true),
+            test_handle("smith-2", false),
+        ];
+        let ctx = test_context(&mut agents, Some("master"));
+        let err = delete_local_agent(ctx, serde_json::json!({"agent_id": "smith-1"})).unwrap_err();
+        assert!(err.to_string().contains("target agent is not idle"));
+    }
+
+    #[test]
+    fn delete_local_agent_allows_idle_target_even_if_other_agent_is_busy() {
+        let mut agents = vec![
+            test_handle("master", true),
+            test_handle("smith-1", false),
+            test_handle("smith-2", true),
+        ];
+        let ctx = test_context(&mut agents, Some("master"));
+        let result = delete_local_agent(ctx, serde_json::json!({"agent_id": "smith-1"}))
+            .expect("delete succeeds");
+        assert!(result.contains("\"operation\":\"delete\""));
+        assert_eq!(agents.iter().filter(|a| a.agent_id == "smith-1").count(), 0);
     }
 }
 
