@@ -5,7 +5,8 @@ use crate::app_runtime::{
     AgentReplacement, LocalAgentManagementRequest, LocalAgentRuntimeContext,
 };
 use crate::app_runtime::{
-    start_watchdog_task, AppRuntimeObserverPublisher, AppSnapshotPublisher, WatchdogRuntimeState,
+    start_schedule_task, start_watchdog_task, AppRuntimeObserverPublisher, AppSnapshotPublisher,
+    WatchdogRuntimeState,
 };
 use crate::config::{save_profiles, Config, DEFAULT_CODEX_EFFORT};
 use crate::runtime_domains::RuntimeDomains;
@@ -32,6 +33,7 @@ pub(crate) enum AppRuntimeEvent {
     #[cfg(feature = "stylos")]
     StylosCmd(crate::stylos::StylosCmdRequest),
     WatchdogTick,
+    ScheduleTick,
     #[cfg(feature = "stylos")]
     StylosEvent(String),
     ShellComplete {
@@ -245,6 +247,8 @@ pub(crate) struct AppRuntimeState {
     pub stylos_tool_bridge: Option<crate::stylos::StylosToolBridge>,
     pub watchdog_state: Arc<WatchdogRuntimeState>,
     pub board_claims: Arc<crate::board_runtime::LocalBoardClaimRegistry>,
+    pub schedule_config: crate::config::ScheduleConfig,
+    pub schedule_last_no_due_at: Option<std::time::Instant>,
     #[cfg(feature = "stylos")]
     pub shared_status_hub: crate::app_runtime::SharedStylosStatusHub,
     #[cfg(feature = "stylos")]
@@ -337,6 +341,8 @@ impl AppRuntimeState {
             stylos_tool_bridge: source.stylos_tool_bridge.clone(),
             watchdog_state: source.watchdog_state.clone(),
             board_claims: source.board_claims.clone(),
+            schedule_config: source.schedule_config.clone(),
+            schedule_last_no_due_at: None,
             #[cfg(feature = "stylos")]
             shared_status_hub: source.shared_status_hub.clone(),
             #[cfg(feature = "stylos")]
@@ -385,6 +391,7 @@ impl AppState {
     ) -> anyhow::Result<Self> {
         #[cfg(feature = "stylos")]
         let stylos_config = cfg.stylos.clone();
+        let schedule_config = cfg.schedule.clone();
 
         let runtime_domains = Arc::new(if interactive {
             RuntimeDomains::for_tui_mode()?
@@ -474,6 +481,8 @@ impl AppState {
                 stylos_tool_bridge: None,
                 watchdog_state: Arc::new(WatchdogRuntimeState::default()),
                 board_claims: Arc::new(crate::board_runtime::LocalBoardClaimRegistry::default()),
+                schedule_config,
+                schedule_last_no_due_at: None,
                 #[cfg(feature = "stylos")]
                 shared_status_hub: crate::app_runtime::SharedStylosStatusHub::default(),
                 #[cfg(feature = "stylos")]
@@ -608,11 +617,16 @@ pub(crate) async fn bootstrap_runtime_owner(
         runtime_tx.clone(),
         runtime_observer_publisher,
     );
+    let poll_interval_ms = app_state
+        .runtime
+        .schedule_config
+        .dispatch_poll_interval_ms();
     start_watchdog_task(
         &watchdog_domain,
-        runtime_tx,
+        runtime_tx.clone(),
         app_state.runtime.watchdog_state.clone(),
     );
+    start_schedule_task(&watchdog_domain, runtime_tx, poll_interval_ms);
     Ok(())
 }
 
@@ -2317,6 +2331,236 @@ fn handle_watchdog_tick_local_event(
     }
 }
 
+fn create_scheduler_agent_if_needed(app: &mut App) -> anyhow::Result<usize> {
+    if let Some(index) = app
+        .runtime
+        .agents
+        .iter()
+        .position(|h| h.agent_id == "scheduler")
+    {
+        return Ok(index);
+    }
+    let args = serde_json::json!({
+        "agent_id": "scheduler",
+        "label": "scheduler",
+        "roles": ["executor"],
+        "_schedule_runtime": true,
+    });
+    let roster = build_local_agent_roster(&app.runtime.agents);
+    let ctx = LocalAgentRuntimeContext {
+        agents: &mut app.runtime.agents,
+        roster: &roster,
+        db: &app.runtime.db,
+        session: &app.runtime.session,
+        project_dir: &app.runtime.project_dir,
+        local_agent_tool_invoker: None,
+        source_analysis_tool_invoker: None,
+        #[cfg(feature = "stylos")]
+        stylos_tool_bridge: app.runtime.stylos_tool_bridge.clone(),
+        #[cfg(feature = "stylos")]
+        local_instance_id: app.runtime.local_instance_id.as_deref(),
+        api_log_enabled: app.runtime.api_log_enabled,
+        acting_agent_id: None,
+    };
+    crate::app_runtime::handle_local_agent_management_request(ctx, "local_agent_create", args)?;
+    app.runtime
+        .agents
+        .iter()
+        .position(|h| h.agent_id == "scheduler")
+        .ok_or_else(|| anyhow::anyhow!("failed to create scheduler agent"))
+}
+
+fn schedule_prompt(task: &themion_core::db::ScheduledTask, due_at_ms: i64) -> String {
+    format!(
+        "type=schedule schedule_id={} title={} due_at_ms={}\n\n{}",
+        task.schedule_id, task.title, due_at_ms, task.body
+    )
+}
+
+fn handle_schedule_tick_local_event(app: &mut App) {
+    let now_ms = crate::tui::unix_epoch_now_ms() as i64;
+    let Some(task) = app
+        .runtime
+        .db
+        .next_due_scheduled_task(now_ms)
+        .ok()
+        .flatten()
+    else {
+        app.runtime.schedule_last_no_due_at = Some(std::time::Instant::now());
+        return;
+    };
+    let Some(due_at_ms) = task.next_due_at_ms else {
+        return;
+    };
+    let local_instance = current_local_instance_id(app);
+    let claim_agent = task.target_agent_id.as_deref().unwrap_or("scheduler");
+    match app.runtime.db.claim_scheduled_task(
+        &task.schedule_id,
+        due_at_ms,
+        &local_instance,
+        claim_agent,
+    ) {
+        Ok(true) => {}
+        _ => return,
+    }
+
+    let mut agent_index = if let Some(target) = task.target_agent_id.as_deref() {
+        app.runtime.agents.iter().position(|h| h.agent_id == target)
+    } else {
+        match create_scheduler_agent_if_needed(app) {
+            Ok(index) => Some(index),
+            Err(err) => {
+                let _ = app.runtime.db.finish_scheduled_task_occurrence(
+                    themion_core::db::FinishScheduledTaskOccurrenceArgs {
+                        schedule_id: task.schedule_id.clone(),
+                        due_at_ms,
+                        enabled: task.enabled,
+                        next_due_at_ms: task.next_due_at_ms,
+                        retry_after_ms: Some(
+                            now_ms + app.runtime.schedule_config.delay_retry_ms() as i64,
+                        ),
+                        status: themion_core::db::ScheduledTaskStatus::Failed,
+                        status_detail: Some(err.to_string()),
+                        handling_agent_id: None,
+                    },
+                );
+                return;
+            }
+        }
+    };
+    if let Some(index) = agent_index {
+        if app.runtime.agents[index].busy {
+            match task.busy_policy {
+                themion_core::db::ScheduleBusyPolicy::Delay => {
+                    let _ = app.runtime.db.finish_scheduled_task_occurrence(
+                        themion_core::db::FinishScheduledTaskOccurrenceArgs {
+                            schedule_id: task.schedule_id,
+                            due_at_ms,
+                            enabled: task.enabled,
+                            next_due_at_ms: task.next_due_at_ms,
+                            retry_after_ms: Some(
+                                now_ms + app.runtime.schedule_config.delay_retry_ms() as i64,
+                            ),
+                            status: themion_core::db::ScheduledTaskStatus::Delayed,
+                            status_detail: Some("target agent busy".to_string()),
+                            handling_agent_id: None,
+                        },
+                    );
+                    return;
+                }
+                themion_core::db::ScheduleBusyPolicy::DelegateToFreeAgent => {
+                    agent_index = app.runtime.agents.iter().position(|h| {
+                        !h.busy && Some(h.agent_id.as_str()) != task.target_agent_id.as_deref()
+                    });
+                    if agent_index.is_none() {
+                        let _ = app.runtime.db.finish_scheduled_task_occurrence(
+                            themion_core::db::FinishScheduledTaskOccurrenceArgs {
+                                schedule_id: task.schedule_id,
+                                due_at_ms,
+                                enabled: task.enabled,
+                                next_due_at_ms: task.next_due_at_ms,
+                                retry_after_ms: Some(
+                                    now_ms + app.runtime.schedule_config.delay_retry_ms() as i64,
+                                ),
+                                status: themion_core::db::ScheduledTaskStatus::Delayed,
+                                status_detail: Some("no free delegate agent".to_string()),
+                                handling_agent_id: None,
+                            },
+                        );
+                        return;
+                    }
+                }
+                themion_core::db::ScheduleBusyPolicy::CreateNewAgent => {
+                    let args =
+                        serde_json::json!({"roles": ["executor"], "_schedule_runtime": true});
+                    let roster = build_local_agent_roster(&app.runtime.agents);
+                    let ctx = LocalAgentRuntimeContext {
+                        agents: &mut app.runtime.agents,
+                        roster: &roster,
+                        db: &app.runtime.db,
+                        session: &app.runtime.session,
+                        project_dir: &app.runtime.project_dir,
+                        local_agent_tool_invoker: None,
+                        source_analysis_tool_invoker: None,
+                        #[cfg(feature = "stylos")]
+                        stylos_tool_bridge: app.runtime.stylos_tool_bridge.clone(),
+                        #[cfg(feature = "stylos")]
+                        local_instance_id: app.runtime.local_instance_id.as_deref(),
+                        api_log_enabled: app.runtime.api_log_enabled,
+                        acting_agent_id: None,
+                    };
+                    let _ = crate::app_runtime::handle_local_agent_management_request(
+                        ctx,
+                        "local_agent_create",
+                        args,
+                    );
+                    agent_index = app.runtime.agents.iter().position(|h| {
+                        !h.busy && Some(h.agent_id.as_str()) != task.target_agent_id.as_deref()
+                    });
+                }
+                themion_core::db::ScheduleBusyPolicy::Miss => {
+                    let _ = app.runtime.db.finish_scheduled_task_occurrence(
+                        themion_core::db::FinishScheduledTaskOccurrenceArgs {
+                            schedule_id: task.schedule_id,
+                            due_at_ms,
+                            enabled: false,
+                            next_due_at_ms: None,
+                            retry_after_ms: None,
+                            status: themion_core::db::ScheduledTaskStatus::Missed,
+                            status_detail: Some("target agent busy".to_string()),
+                            handling_agent_id: None,
+                        },
+                    );
+                    return;
+                }
+            }
+        }
+    }
+    let Some(index) = agent_index else {
+        return;
+    };
+    let handling_agent_id = app.runtime.agents[index].agent_id.clone();
+    let mut enabled = task.enabled;
+    let next_due_at_ms = match task.schedule_kind {
+        themion_core::db::ScheduledKind::OneShot => {
+            enabled = false;
+            None
+        }
+        themion_core::db::ScheduledKind::Cron => task
+            .cron_expr
+            .as_deref()
+            .and_then(|expr| themion_core::tools::next_cron_due_ms(expr, now_ms).ok()),
+    };
+    let status = if task.target_agent_id.as_deref().is_some()
+        && task.target_agent_id.as_deref() != Some(handling_agent_id.as_str())
+    {
+        themion_core::db::ScheduledTaskStatus::Delegated
+    } else {
+        themion_core::db::ScheduledTaskStatus::Dispatched
+    };
+    let _ = app.runtime.db.finish_scheduled_task_occurrence(
+        themion_core::db::FinishScheduledTaskOccurrenceArgs {
+            schedule_id: task.schedule_id.clone(),
+            due_at_ms,
+            enabled,
+            next_due_at_ms,
+            retry_after_ms: None,
+            status,
+            status_detail: None,
+            handling_agent_id: Some(handling_agent_id.clone()),
+        },
+    );
+    app.push(crate::tui::Entry::Status {
+        agent_id: Some(handling_agent_id.clone()),
+        source: Some(crate::tui::NonAgentSource::Runtime),
+        text: format!(
+            "schedule dispatched {} to {}",
+            task.schedule_id, handling_agent_id
+        ),
+    });
+    submit_text_to_agent(app, index, schedule_prompt(&task, due_at_ms));
+}
+
 pub(crate) async fn handle_runtime_event(
     app: &mut App,
     event: AppRuntimeEvent,
@@ -2339,6 +2583,7 @@ pub(crate) async fn handle_runtime_event(
             text,
         }),
         AppRuntimeEvent::WatchdogTick => handle_watchdog_tick_local_event(app, _app_tx),
+        AppRuntimeEvent::ScheduleTick => handle_schedule_tick_local_event(app),
         AppRuntimeEvent::Agent(sid, ev) => {
             app.runtime.activity_counters.agent_event_count += 1;
             process_agent_event(

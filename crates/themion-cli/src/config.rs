@@ -37,12 +37,44 @@ impl StylosConfig {
     }
 }
 
+#[derive(Deserialize, Serialize, Clone)]
+pub struct ScheduleConfig {
+    pub default_busy_policy: Option<String>,
+    pub dispatch_poll_interval_ms: Option<u64>,
+    pub delay_retry_ms: Option<u64>,
+}
+
+impl Default for ScheduleConfig {
+    fn default() -> Self {
+        Self {
+            default_busy_policy: None,
+            dispatch_poll_interval_ms: None,
+            delay_retry_ms: None,
+        }
+    }
+}
+
+impl ScheduleConfig {
+    pub fn default_busy_policy(&self) -> &str {
+        self.default_busy_policy.as_deref().unwrap_or("delay")
+    }
+
+    pub fn dispatch_poll_interval_ms(&self) -> u64 {
+        self.dispatch_poll_interval_ms.unwrap_or(5_000).max(250)
+    }
+
+    pub fn delay_retry_ms(&self) -> u64 {
+        self.delay_retry_ms.unwrap_or(60_000).max(1_000)
+    }
+}
+
 #[derive(Deserialize, Serialize, Default)]
 struct FileConfig {
     primary_llm_profile: Option<String>,
     system_prompt: Option<String>,
     profile: Option<HashMap<String, ProfileConfig>>,
     stylos: Option<StylosConfig>,
+    schedule: Option<ScheduleConfig>,
 }
 
 pub struct Config {
@@ -55,6 +87,7 @@ pub struct Config {
     pub effort: String,
     pub system_prompt: String,
     pub stylos: StylosConfig,
+    pub schedule: ScheduleConfig,
 }
 
 const DEFAULT_SYSTEM_PROMPT: &str = r#"You are an expert coding assistant operating inside Themion, a terminal-based coding agent. You help users by reading files, executing commands, editing code, and writing new files.
@@ -140,6 +173,12 @@ provider = "openrouter"
 # realm = "dev"
 # instance = "laptop-a"
 # connect = ["tcp/127.0.0.1:31747"]
+
+# Optional schedule dispatcher defaults.
+# [schedule]
+# default_busy_policy = "delay"
+# dispatch_poll_interval_ms = 5000
+# delay_retry_ms = 60000
 "#;
 
 fn config_path() -> Option<PathBuf> {
@@ -298,6 +337,7 @@ impl Config {
             effort,
             system_prompt,
             stylos: file_config.stylos.unwrap_or_default(),
+            schedule: file_config.schedule.unwrap_or_default(),
         })
     }
 }

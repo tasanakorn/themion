@@ -11,6 +11,15 @@ fn test_ctx(db: std::sync::Arc<DbHandle>) -> ToolCtx {
         project_dir: PathBuf::from("."),
         workflow_state: Some(WorkflowState::default()),
         turn_seq: None,
+        local_role_agent_id: None,
+        #[cfg(feature = "stylos")]
+        local_agent_id: None,
+        #[cfg(feature = "stylos")]
+        local_instance_id: None,
+        #[cfg(feature = "stylos")]
+        stylos_tool_invoker: None,
+        #[cfg(feature = "stylos")]
+        stylos_enabled: false,
         local_agent_tool_invoker: None,
         source_analysis_tool_invoker: None,
         system_inspection: None,

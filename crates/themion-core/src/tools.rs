@@ -1,5 +1,7 @@
 use crate::db::{
-    CreateNoteArgs, DbHandle, NoteColumn, NoteKind, RecallArgs, RecallDirection, SessionScope,
+    CreateNoteArgs, CreateScheduledTaskArgs, DbHandle, ListScheduledTasksArgs, NoteColumn,
+    NoteKind, RecallArgs, RecallDirection, ScheduleBusyPolicy, ScheduledKind, ScheduledTask,
+    SessionScope, UpdateScheduledTaskArgs,
 };
 use crate::memory::{
     metadata_to_string, parse_hashtags_value, parse_nullable_string, CreateNodeArgs, HashtagMatch,
@@ -61,6 +63,34 @@ fn board_note_to_json(note: &crate::db::BoardNote) -> Value {
         "created_at_ms": note.created_at_ms,
         "updated_at_ms": note.updated_at_ms,
         "injected_at_ms": note.injected_at_ms,
+    })
+}
+
+fn scheduled_task_to_json(task: &ScheduledTask) -> Value {
+    json!({
+        "schedule_id": task.schedule_id,
+        "title": task.title,
+        "body": task.body,
+        "enabled": task.enabled,
+        "schedule_kind": task.schedule_kind.as_str(),
+        "due_at_ms": task.due_at_ms,
+        "cron_expr": task.cron_expr,
+        "timezone": task.timezone,
+        "next_due_at_ms": task.next_due_at_ms,
+        "target_agent_id": task.target_agent_id,
+        "busy_policy": task.busy_policy.as_str(),
+        "retry_after_ms": task.retry_after_ms,
+        "last_due_at_ms": task.last_due_at_ms,
+        "last_run_at_ms": task.last_run_at_ms,
+        "last_status": task.last_status.as_str(),
+        "last_status_detail": task.last_status_detail,
+        "last_handling_agent_id": task.last_handling_agent_id,
+        "claimed_by_instance": task.claimed_by_instance,
+        "claimed_by_agent_id": task.claimed_by_agent_id,
+        "claimed_due_at_ms": task.claimed_due_at_ms,
+        "claimed_at_ms": task.claimed_at_ms,
+        "created_at_ms": task.created_at_ms,
+        "updated_at_ms": task.updated_at_ms,
     })
 }
 
@@ -1362,6 +1392,88 @@ fn parse_shell_timeout_ms(args: &Value) -> Result<u64> {
     }
 }
 
+fn parse_schedule_kind(raw: &str) -> Result<ScheduledKind> {
+    ScheduledKind::from_str(raw).ok_or_else(|| anyhow::anyhow!("invalid schedule kind: {raw}"))
+}
+
+fn parse_schedule_busy_policy(raw: Option<&str>) -> Result<ScheduleBusyPolicy> {
+    match raw {
+        Some(value) => ScheduleBusyPolicy::from_str(value)
+            .ok_or_else(|| anyhow::anyhow!("invalid busy_policy: {value}")),
+        None => Ok(ScheduleBusyPolicy::Delay),
+    }
+}
+
+fn parse_schedule_rule(value: &Value) -> Result<(ScheduledKind, Option<i64>, Option<String>, i64)> {
+    let kind = parse_schedule_kind(
+        value
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("schedule requires kind"))?,
+    )?;
+    match kind {
+        ScheduledKind::OneShot => {
+            let due_at_ms = value
+                .get("due_at_ms")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| anyhow::anyhow!("one_shot schedule requires due_at_ms"))?;
+            Ok((kind, Some(due_at_ms), None, due_at_ms))
+        }
+        ScheduledKind::Cron => {
+            if value
+                .get("timezone")
+                .and_then(Value::as_str)
+                .unwrap_or("UTC")
+                != "UTC"
+            {
+                anyhow::bail!("only timezone='UTC' is supported");
+            }
+            let cron_expr = value
+                .get("cron_expr")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("cron schedule requires cron_expr"))?;
+            let next_due_at_ms = next_cron_due_ms(cron_expr, Utc::now().timestamp_millis())?;
+            Ok((kind, None, Some(cron_expr.to_string()), next_due_at_ms))
+        }
+    }
+}
+
+pub fn next_cron_due_ms(expr: &str, after_ms: i64) -> Result<i64> {
+    let fields = expr.split_whitespace().collect::<Vec<_>>();
+    if fields.len() != 5 {
+        anyhow::bail!("cron_expr must have five fields");
+    }
+    for field in &fields {
+        if *field != "*" && field.parse::<u32>().is_err() {
+            anyhow::bail!("cron_expr only supports '*' or numeric fields in this implementation");
+        }
+    }
+    let start_minute = after_ms.div_euclid(60_000) + 1;
+    for offset in 0..(366 * 24 * 60) {
+        let candidate_ms = (start_minute + offset) * 60_000;
+        let dt = chrono::DateTime::<Utc>::from_timestamp_millis(candidate_ms)
+            .ok_or_else(|| anyhow::anyhow!("invalid cron candidate timestamp"))?;
+        use chrono::{Datelike, Timelike};
+        let values = [
+            dt.minute(),
+            dt.hour(),
+            dt.day(),
+            dt.month(),
+            dt.weekday().num_days_from_sunday(),
+        ];
+        if fields
+            .iter()
+            .zip(values)
+            .all(|(field, value)| *field == "*" || field.parse::<u32>().ok() == Some(value))
+        {
+            return Ok(candidate_ms);
+        }
+    }
+    anyhow::bail!("cron_expr has no due time in the next year")
+}
+
 fn truncate_output_with_notice(text: &str, limit: usize) -> String {
     if text.len() <= limit {
         return text.to_string();
@@ -1417,6 +1529,105 @@ pub fn tool_definitions() -> Value {
                         ,"reason": { "type": "string", "description": "Optional reason." }
                     },
                     "required": ["path", "content"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "schedule_create",
+                "description": "Create a durable scheduled agent task. Times are UTC epoch milliseconds; cron timezone must be UTC.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string" },
+                        "body": { "type": "string", "description": "Prompt to inject when due." },
+                        "schedule": {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "type": "string", "enum": ["one_shot", "cron"] },
+                                "due_at_ms": { "type": "integer", "description": "Required for one_shot." },
+                                "cron_expr": { "type": "string", "description": "Five-field cron; * or numeric fields only in v0.80.0." },
+                                "timezone": { "type": "string", "description": "Must be UTC for cron." }
+                            },
+                            "required": ["kind"]
+                        },
+                        "enabled": { "type": "boolean", "description": "Default: true." },
+                        "target_agent_id": { "type": "string", "description": "Optional concrete local agent id. Omit for dedicated scheduler agent." },
+                        "busy_policy": { "type": "string", "enum": ["delay", "delegate_to_free_agent", "create_new_agent", "miss"], "description": "Default: delay." },
+                        "schedule_id": { "type": "string", "description": "Optional UUID." }
+                    },
+                    "required": ["title", "body", "schedule"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "schedule_read",
+                "description": "Read one scheduled task by schedule_id.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "schedule_id": { "type": "string" } },
+                    "required": ["schedule_id"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "schedule_list",
+                "description": "List scheduled tasks, optionally filtering by enabled state, target, or currently due tasks.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "enabled": { "type": "boolean" },
+                        "target_agent_id": { "type": "string" },
+                        "due_only": { "type": "boolean", "description": "Only tasks due now. Default: false." },
+                        "limit": { "type": "integer", "description": "Default: 50, max: 200." }
+                    },
+                    "required": []
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "schedule_update",
+                "description": "Patch one scheduled task. Times are UTC epoch milliseconds; cron timezone must be UTC.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "schedule_id": { "type": "string" },
+                        "title": { "type": "string" },
+                        "body": { "type": "string" },
+                        "schedule": {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "type": "string", "enum": ["one_shot", "cron"] },
+                                "due_at_ms": { "type": "integer" },
+                                "cron_expr": { "type": "string" },
+                                "timezone": { "type": "string" }
+                            },
+                            "required": ["kind"]
+                        },
+                        "enabled": { "type": "boolean" },
+                        "target_agent_id": { "type": ["string", "null"], "description": "Set null to use dedicated scheduler agent." },
+                        "busy_policy": { "type": "string", "enum": ["delay", "delegate_to_free_agent", "create_new_agent", "miss"] }
+                    },
+                    "required": ["schedule_id"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "schedule_delete",
+                "description": "Delete one scheduled task by schedule_id.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "schedule_id": { "type": "string" } },
+                    "required": ["schedule_id"]
                 }
             }
         }),
@@ -2070,6 +2281,91 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 None => board_note_not_found(note_id, "update").to_string(),
             })
         }
+        "schedule_create" => {
+            let title = args["title"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing title"))?
+                .to_string();
+            let body = args["body"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing body"))?
+                .to_string();
+            let (schedule_kind, due_at_ms, cron_expr, next_due_at_ms) = parse_schedule_rule(
+                args.get("schedule")
+                    .ok_or_else(|| anyhow::anyhow!("missing schedule"))?,
+            )?;
+            let task = ctx.db.create_scheduled_task(CreateScheduledTaskArgs {
+                schedule_id: args["schedule_id"].as_str().map(str::to_string),
+                title,
+                body,
+                enabled: args["enabled"].as_bool().unwrap_or(true),
+                schedule_kind,
+                due_at_ms,
+                cron_expr,
+                next_due_at_ms: Some(next_due_at_ms),
+                target_agent_id: args["target_agent_id"].as_str().map(str::to_string),
+                busy_policy: parse_schedule_busy_policy(args["busy_policy"].as_str())?,
+            })?;
+            Ok(json!({"ok": true, "entity": "scheduled_task", "operation": "create", "task": scheduled_task_to_json(&task)}).to_string())
+        }
+        "schedule_read" => {
+            let schedule_id = args["schedule_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing schedule_id"))?;
+            Ok(match ctx.db.get_scheduled_task(schedule_id)? {
+                Some(task) => {
+                    json!({"found": true, "task": scheduled_task_to_json(&task)}).to_string()
+                }
+                None => json!({"found": false, "schedule_id": schedule_id}).to_string(),
+            })
+        }
+        "schedule_list" => {
+            let tasks = ctx.db.list_scheduled_tasks(ListScheduledTasksArgs {
+                enabled: args.get("enabled").and_then(Value::as_bool),
+                target_agent_id: args["target_agent_id"].as_str().map(str::to_string),
+                due_only: args["due_only"].as_bool().unwrap_or(false),
+                limit: args["limit"].as_u64().map(|v| v as u32),
+            })?;
+            Ok(Value::Array(tasks.iter().map(scheduled_task_to_json).collect()).to_string())
+        }
+        "schedule_update" => {
+            let schedule_id = args["schedule_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing schedule_id"))?;
+            let mut patch = UpdateScheduledTaskArgs {
+                title: args["title"].as_str().map(str::to_string),
+                body: args["body"].as_str().map(str::to_string),
+                enabled: args.get("enabled").and_then(Value::as_bool),
+                busy_policy: args
+                    .get("busy_policy")
+                    .and_then(Value::as_str)
+                    .map(|raw| parse_schedule_busy_policy(Some(raw)))
+                    .transpose()?,
+                ..Default::default()
+            };
+            if let Some(target) = args.get("target_agent_id") {
+                patch.target_agent_id_set = true;
+                patch.target_agent_id = target.as_str().map(str::to_string);
+            }
+            if let Some(schedule) = args.get("schedule") {
+                let (kind, due_at_ms, cron_expr, next_due_at_ms) = parse_schedule_rule(schedule)?;
+                patch.schedule_kind = Some(kind);
+                patch.due_at_ms = due_at_ms;
+                patch.cron_expr = cron_expr;
+                patch.next_due_at_ms = Some(next_due_at_ms);
+            }
+            Ok(match ctx.db.update_scheduled_task(schedule_id, patch)? {
+                Some(task) => json!({"ok": true, "entity": "scheduled_task", "operation": "update", "task": scheduled_task_to_json(&task)}).to_string(),
+                None => json!({"ok": false, "found": false, "schedule_id": schedule_id}).to_string(),
+            })
+        }
+        "schedule_delete" => {
+            let schedule_id = args["schedule_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing schedule_id"))?;
+            let deleted = ctx.db.delete_scheduled_task(schedule_id)?;
+            Ok(json!({"ok": true, "entity": "scheduled_task", "operation": "delete", "schedule_id": schedule_id, "deleted": deleted}).to_string())
+        }
         "memory_create_node" => {
             let title = args["title"]
                 .as_str()
@@ -2377,6 +2673,14 @@ mod tests {
             workflow_state: Some(state),
             turn_seq: Some(7),
             local_role_agent_id: None,
+            #[cfg(feature = "stylos")]
+            local_agent_id: None,
+            #[cfg(feature = "stylos")]
+            local_instance_id: None,
+            #[cfg(feature = "stylos")]
+            stylos_tool_invoker: None,
+            #[cfg(feature = "stylos")]
+            stylos_enabled: false,
             local_agent_tool_invoker: None,
             source_analysis_tool_invoker: None,
             system_inspection: None,
@@ -2489,6 +2793,66 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("phase_result=passed"));
+    }
+
+    #[tokio::test]
+    async fn schedule_tools_create_list_update_and_delete_task() {
+        let ctx = workflow_test_ctx(WorkflowState::default());
+        let created = execute_tool(
+            "schedule_create",
+            r#"{"title":"demo","body":"run demo","schedule":{"kind":"one_shot","due_at_ms":12345},"target_agent_id":"master"}"#,
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let created: Value = serde_json::from_str(&created).unwrap();
+        let schedule_id = created["task"]["schedule_id"].as_str().unwrap();
+        assert_eq!(created["task"]["schedule_kind"], json!("one_shot"));
+        assert_eq!(created["task"]["next_due_at_ms"], json!(12345));
+
+        let listed = execute_tool("schedule_list", r#"{"target_agent_id":"master"}"#, &ctx)
+            .await
+            .unwrap();
+        let listed: Value = serde_json::from_str(&listed).unwrap();
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+
+        let updated = execute_tool(
+            "schedule_update",
+            &json!({
+                "schedule_id": schedule_id,
+                "enabled": false,
+                "busy_policy": "miss"
+            })
+            .to_string(),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let updated: Value = serde_json::from_str(&updated).unwrap();
+        assert_eq!(updated["task"]["enabled"], json!(false));
+        assert_eq!(updated["task"]["busy_policy"], json!("miss"));
+
+        let deleted = execute_tool(
+            "schedule_delete",
+            &json!({"schedule_id": schedule_id}).to_string(),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let deleted: Value = serde_json::from_str(&deleted).unwrap();
+        assert_eq!(deleted["deleted"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn schedule_create_rejects_non_utc_cron() {
+        let ctx = workflow_test_ctx(WorkflowState::default());
+        let result = execute_tool(
+            "schedule_create",
+            r#"{"title":"demo","body":"run demo","schedule":{"kind":"cron","cron_expr":"* * * * *","timezone":"local"}}"#,
+            &ctx,
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("timezone='UTC'"));
     }
 
     #[test]

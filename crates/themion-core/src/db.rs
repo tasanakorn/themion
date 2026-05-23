@@ -198,6 +198,36 @@ CREATE INDEX IF NOT EXISTS idx_board_notes_target_injection
     ON board_notes(to_instance, to_agent_id, injection_state, created_at_ms);
 CREATE INDEX IF NOT EXISTS idx_board_notes_target_blocked_until
     ON board_notes(to_instance, to_agent_id, column_name, blocked_until_ms, created_at_ms);
+
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+    schedule_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    enabled INTEGER NOT NULL,
+    schedule_kind TEXT NOT NULL,
+    due_at_ms INTEGER,
+    cron_expr TEXT,
+    timezone TEXT NOT NULL DEFAULT 'UTC',
+    next_due_at_ms INTEGER,
+    target_agent_id TEXT,
+    busy_policy TEXT NOT NULL,
+    retry_after_ms INTEGER,
+    last_due_at_ms INTEGER,
+    last_run_at_ms INTEGER,
+    last_status TEXT NOT NULL,
+    last_status_detail TEXT,
+    last_handling_agent_id TEXT,
+    claimed_by_instance TEXT,
+    claimed_by_agent_id TEXT,
+    claimed_due_at_ms INTEGER,
+    claimed_at_ms INTEGER,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_due
+    ON scheduled_tasks(enabled, next_due_at_ms, retry_after_ms, schedule_id);
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_target
+    ON scheduled_tasks(target_agent_id, enabled, next_due_at_ms);
 ";
 
 const SCHEMA_FTS5: &str = "
@@ -467,6 +497,27 @@ fn init_schema(conn: &Connection, fts5: bool) -> Result<()> {
     ensure_column(conn, "board_notes", "claimed_by_agent_id", "TEXT")?;
     ensure_column(conn, "board_notes", "claimed_at_ms", "INTEGER")?;
     ensure_column(conn, "board_notes", "meta_json", "TEXT")?;
+    ensure_column(
+        conn,
+        "scheduled_tasks",
+        "timezone",
+        "TEXT NOT NULL DEFAULT 'UTC'",
+    )?;
+    ensure_column(conn, "scheduled_tasks", "retry_after_ms", "INTEGER")?;
+    ensure_column(conn, "scheduled_tasks", "last_due_at_ms", "INTEGER")?;
+    ensure_column(conn, "scheduled_tasks", "last_run_at_ms", "INTEGER")?;
+    ensure_column(
+        conn,
+        "scheduled_tasks",
+        "last_status",
+        "TEXT NOT NULL DEFAULT 'never_run'",
+    )?;
+    ensure_column(conn, "scheduled_tasks", "last_status_detail", "TEXT")?;
+    ensure_column(conn, "scheduled_tasks", "last_handling_agent_id", "TEXT")?;
+    ensure_column(conn, "scheduled_tasks", "claimed_by_instance", "TEXT")?;
+    ensure_column(conn, "scheduled_tasks", "claimed_by_agent_id", "TEXT")?;
+    ensure_column(conn, "scheduled_tasks", "claimed_due_at_ms", "INTEGER")?;
+    ensure_column(conn, "scheduled_tasks", "claimed_at_ms", "INTEGER")?;
     if fts5 {
         conn.execute_batch(SCHEMA_FTS5)?;
     }
@@ -1267,6 +1318,261 @@ impl DbHandle {
         self.get_board_note(note_id)
     }
 
+    pub fn create_scheduled_task(&self, args: CreateScheduledTaskArgs) -> Result<ScheduledTask> {
+        args.validate()?;
+        let now_ms = now_unix_ms();
+        let schedule_id = args
+            .schedule_id
+            .as_deref()
+            .and_then(|raw| Uuid::parse_str(raw).ok())
+            .map(|uuid| uuid.to_string())
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let task = ScheduledTask {
+            schedule_id: schedule_id.clone(),
+            title: args.title,
+            body: args.body,
+            enabled: args.enabled,
+            schedule_kind: args.schedule_kind,
+            due_at_ms: args.due_at_ms,
+            cron_expr: args.cron_expr,
+            timezone: "UTC".to_string(),
+            next_due_at_ms: args.next_due_at_ms,
+            target_agent_id: args.target_agent_id,
+            busy_policy: args.busy_policy,
+            retry_after_ms: None,
+            last_due_at_ms: None,
+            last_run_at_ms: None,
+            last_status: ScheduledTaskStatus::NeverRun,
+            last_status_detail: None,
+            last_handling_agent_id: None,
+            claimed_by_instance: None,
+            claimed_by_agent_id: None,
+            claimed_due_at_ms: None,
+            claimed_at_ms: None,
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+        };
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO scheduled_tasks (
+                schedule_id, title, body, enabled, schedule_kind, due_at_ms, cron_expr, timezone,
+                next_due_at_ms, target_agent_id, busy_policy, retry_after_ms, last_due_at_ms,
+                last_run_at_ms, last_status, last_status_detail, last_handling_agent_id,
+                claimed_by_instance, claimed_by_agent_id, claimed_due_at_ms, claimed_at_ms,
+                created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+            rusqlite::params![
+                task.schedule_id,
+                task.title,
+                task.body,
+                task.enabled as i64,
+                task.schedule_kind.as_str(),
+                task.due_at_ms,
+                task.cron_expr,
+                task.timezone,
+                task.next_due_at_ms,
+                task.target_agent_id,
+                task.busy_policy.as_str(),
+                task.retry_after_ms,
+                task.last_due_at_ms,
+                task.last_run_at_ms,
+                task.last_status.as_str(),
+                task.last_status_detail,
+                task.last_handling_agent_id,
+                task.claimed_by_instance,
+                task.claimed_by_agent_id,
+                task.claimed_due_at_ms,
+                task.claimed_at_ms,
+                task.created_at_ms,
+                task.updated_at_ms,
+            ],
+        )?;
+        drop(conn);
+        self.get_scheduled_task(&schedule_id)?
+            .ok_or_else(|| anyhow::anyhow!("scheduled task insert failed"))
+    }
+
+    pub fn get_scheduled_task(&self, schedule_id: &str) -> Result<Option<ScheduledTask>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = SCHEDULED_TASK_SELECT_SQL.to_string() + " WHERE schedule_id = ?1";
+        conn.query_row(&sql, rusqlite::params![schedule_id], map_scheduled_task_row)
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn list_scheduled_tasks(&self, args: ListScheduledTasksArgs) -> Result<Vec<ScheduledTask>> {
+        let conn = self.conn.lock().unwrap();
+        let mut sql = SCHEDULED_TASK_SELECT_SQL.to_string();
+        sql.push_str(" WHERE (?1 IS NULL OR enabled = ?1)");
+        sql.push_str(" AND (?2 IS NULL OR target_agent_id = ?2)");
+        if args.due_only {
+            sql.push_str(" AND next_due_at_ms IS NOT NULL AND next_due_at_ms <= ?3");
+        } else {
+            sql.push_str(" AND (?3 IS NULL OR 1 = 1)");
+        }
+        sql.push_str(
+            " ORDER BY next_due_at_ms IS NULL, next_due_at_ms ASC, created_at_ms ASC LIMIT ?4",
+        );
+        let enabled = args.enabled.map(|v| v as i64);
+        let now = now_unix_ms();
+        let limit = args.limit.unwrap_or(50).clamp(1, 200) as i64;
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params![enabled, args.target_agent_id, now, limit],
+            map_scheduled_task_row,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn update_scheduled_task(
+        &self,
+        schedule_id: &str,
+        patch: UpdateScheduledTaskArgs,
+    ) -> Result<Option<ScheduledTask>> {
+        let Some(mut task) = self.get_scheduled_task(schedule_id)? else {
+            return Ok(None);
+        };
+        if let Some(title) = patch.title {
+            task.title = title;
+        }
+        if let Some(body) = patch.body {
+            task.body = body;
+        }
+        if let Some(enabled) = patch.enabled {
+            task.enabled = enabled;
+        }
+        if let Some(schedule_kind) = patch.schedule_kind {
+            task.schedule_kind = schedule_kind;
+            task.due_at_ms = patch.due_at_ms;
+            task.cron_expr = patch.cron_expr;
+            task.next_due_at_ms = patch.next_due_at_ms;
+        } else {
+            if patch.due_at_ms.is_some() {
+                task.due_at_ms = patch.due_at_ms;
+                task.next_due_at_ms = patch.next_due_at_ms.or(patch.due_at_ms);
+            }
+            if patch.cron_expr.is_some() {
+                task.cron_expr = patch.cron_expr;
+                task.next_due_at_ms = patch.next_due_at_ms;
+            }
+        }
+        if patch.target_agent_id_set {
+            task.target_agent_id = patch.target_agent_id;
+        }
+        if let Some(busy_policy) = patch.busy_policy {
+            task.busy_policy = busy_policy;
+        }
+        task.validate()?;
+        task.updated_at_ms = now_unix_ms();
+        task.retry_after_ms = None;
+        task.claimed_by_instance = None;
+        task.claimed_by_agent_id = None;
+        task.claimed_due_at_ms = None;
+        task.claimed_at_ms = None;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE scheduled_tasks
+             SET title = ?2, body = ?3, enabled = ?4, schedule_kind = ?5, due_at_ms = ?6,
+                 cron_expr = ?7, timezone = ?8, next_due_at_ms = ?9, target_agent_id = ?10,
+                 busy_policy = ?11, retry_after_ms = NULL, claimed_by_instance = NULL,
+                 claimed_by_agent_id = NULL, claimed_due_at_ms = NULL, claimed_at_ms = NULL,
+                 updated_at_ms = ?12
+             WHERE schedule_id = ?1",
+            rusqlite::params![
+                task.schedule_id,
+                task.title,
+                task.body,
+                task.enabled as i64,
+                task.schedule_kind.as_str(),
+                task.due_at_ms,
+                task.cron_expr,
+                task.timezone,
+                task.next_due_at_ms,
+                task.target_agent_id,
+                task.busy_policy.as_str(),
+                task.updated_at_ms,
+            ],
+        )?;
+        drop(conn);
+        self.get_scheduled_task(schedule_id)
+    }
+
+    pub fn delete_scheduled_task(&self, schedule_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "DELETE FROM scheduled_tasks WHERE schedule_id = ?1",
+            rusqlite::params![schedule_id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn next_due_scheduled_task(&self, now_ms: i64) -> Result<Option<ScheduledTask>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = SCHEDULED_TASK_SELECT_SQL.to_string()
+            + " WHERE enabled = 1
+                AND next_due_at_ms IS NOT NULL
+                AND next_due_at_ms <= ?1
+                AND (retry_after_ms IS NULL OR retry_after_ms <= ?1)
+                AND claimed_at_ms IS NULL
+              ORDER BY next_due_at_ms ASC, created_at_ms ASC
+              LIMIT 1";
+        conn.query_row(&sql, rusqlite::params![now_ms], map_scheduled_task_row)
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn claim_scheduled_task(
+        &self,
+        schedule_id: &str,
+        due_at_ms: i64,
+        claimed_by_instance: &str,
+        claimed_by_agent_id: &str,
+    ) -> Result<bool> {
+        let now_ms = now_unix_ms();
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE scheduled_tasks
+             SET last_status = 'claimed', claimed_by_instance = ?3, claimed_by_agent_id = ?4,
+                 claimed_due_at_ms = ?2, claimed_at_ms = ?5, updated_at_ms = ?5
+             WHERE schedule_id = ?1 AND enabled = 1 AND next_due_at_ms = ?2 AND claimed_at_ms IS NULL",
+            rusqlite::params![schedule_id, due_at_ms, claimed_by_instance, claimed_by_agent_id, now_ms],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn finish_scheduled_task_occurrence(
+        &self,
+        args: FinishScheduledTaskOccurrenceArgs,
+    ) -> Result<Option<ScheduledTask>> {
+        let now_ms = now_unix_ms();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE scheduled_tasks
+             SET enabled = ?2, next_due_at_ms = ?3, retry_after_ms = ?4, last_due_at_ms = ?5,
+                 last_run_at_ms = ?6, last_status = ?7, last_status_detail = ?8,
+                 last_handling_agent_id = ?9, claimed_by_instance = NULL, claimed_by_agent_id = NULL,
+                 claimed_due_at_ms = NULL, claimed_at_ms = NULL, updated_at_ms = ?6
+             WHERE schedule_id = ?1",
+            rusqlite::params![
+                args.schedule_id,
+                args.enabled as i64,
+                args.next_due_at_ms,
+                args.retry_after_ms,
+                args.due_at_ms,
+                now_ms,
+                args.status.as_str(),
+                args.status_detail,
+                args.handling_agent_id,
+            ],
+        )?;
+        drop(conn);
+        self.get_scheduled_task(&args.schedule_id)
+    }
+
     pub fn memory_store(&self) -> crate::memory::MemoryStore<'_> {
         crate::memory::MemoryStore::new(&self.conn, self.fts5)
     }
@@ -1591,6 +1897,46 @@ impl DbHandle {
     }
 }
 
+const SCHEDULED_TASK_SELECT_SQL: &str = "SELECT schedule_id, title, body, enabled, schedule_kind,
+       due_at_ms, cron_expr, timezone, next_due_at_ms, target_agent_id, busy_policy,
+       retry_after_ms, last_due_at_ms, last_run_at_ms, last_status, last_status_detail,
+       last_handling_agent_id, claimed_by_instance, claimed_by_agent_id, claimed_due_at_ms,
+       claimed_at_ms, created_at_ms, updated_at_ms FROM scheduled_tasks";
+
+fn map_scheduled_task_row(row: &Row<'_>) -> rusqlite::Result<ScheduledTask> {
+    let schedule_kind_raw: String = row.get(4)?;
+    let busy_policy_raw: String = row.get(10)?;
+    let last_status_raw: String = row.get(14)?;
+    Ok(ScheduledTask {
+        schedule_id: row.get(0)?,
+        title: row.get(1)?,
+        body: row.get(2)?,
+        enabled: row.get::<_, i64>(3)? != 0,
+        schedule_kind: ScheduledKind::from_str(&schedule_kind_raw)
+            .unwrap_or(ScheduledKind::OneShot),
+        due_at_ms: row.get(5)?,
+        cron_expr: row.get(6)?,
+        timezone: row.get(7)?,
+        next_due_at_ms: row.get(8)?,
+        target_agent_id: row.get(9)?,
+        busy_policy: ScheduleBusyPolicy::from_str(&busy_policy_raw)
+            .unwrap_or(ScheduleBusyPolicy::Delay),
+        retry_after_ms: row.get(11)?,
+        last_due_at_ms: row.get(12)?,
+        last_run_at_ms: row.get(13)?,
+        last_status: ScheduledTaskStatus::from_str(&last_status_raw)
+            .unwrap_or(ScheduledTaskStatus::Failed),
+        last_status_detail: row.get(15)?,
+        last_handling_agent_id: row.get(16)?,
+        claimed_by_instance: row.get(17)?,
+        claimed_by_agent_id: row.get(18)?,
+        claimed_due_at_ms: row.get(19)?,
+        claimed_at_ms: row.get(20)?,
+        created_at_ms: row.get(21)?,
+        updated_at_ms: row.get(22)?,
+    })
+}
+
 fn map_note_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BoardNote> {
     let note_kind_raw: String = row.get(2)?;
     let column_raw: String = row.get(10)?;
@@ -1805,6 +2151,238 @@ pub struct CreateNoteArgs {
     pub meta_json: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum ScheduledKind {
+    OneShot,
+    Cron,
+}
+
+impl ScheduledKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OneShot => "one_shot",
+            Self::Cron => "cron",
+        }
+    }
+
+    pub fn from_str(raw: &str) -> Option<Self> {
+        match raw {
+            "one_shot" => Some(Self::OneShot),
+            "cron" => Some(Self::Cron),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum ScheduleBusyPolicy {
+    Delay,
+    DelegateToFreeAgent,
+    CreateNewAgent,
+    Miss,
+}
+
+impl ScheduleBusyPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Delay => "delay",
+            Self::DelegateToFreeAgent => "delegate_to_free_agent",
+            Self::CreateNewAgent => "create_new_agent",
+            Self::Miss => "miss",
+        }
+    }
+
+    pub fn from_str(raw: &str) -> Option<Self> {
+        match raw {
+            "delay" => Some(Self::Delay),
+            "delegate_to_free_agent" => Some(Self::DelegateToFreeAgent),
+            "create_new_agent" => Some(Self::CreateNewAgent),
+            "miss" => Some(Self::Miss),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum ScheduledTaskStatus {
+    NeverRun,
+    Claimed,
+    Dispatched,
+    Delayed,
+    Delegated,
+    Missed,
+    Failed,
+}
+
+impl ScheduledTaskStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NeverRun => "never_run",
+            Self::Claimed => "claimed",
+            Self::Dispatched => "dispatched",
+            Self::Delayed => "delayed",
+            Self::Delegated => "delegated",
+            Self::Missed => "missed",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn from_str(raw: &str) -> Option<Self> {
+        match raw {
+            "never_run" => Some(Self::NeverRun),
+            "claimed" => Some(Self::Claimed),
+            "dispatched" => Some(Self::Dispatched),
+            "delayed" => Some(Self::Delayed),
+            "delegated" => Some(Self::Delegated),
+            "missed" => Some(Self::Missed),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ScheduledTask {
+    pub schedule_id: String,
+    pub title: String,
+    pub body: String,
+    pub enabled: bool,
+    pub schedule_kind: ScheduledKind,
+    pub due_at_ms: Option<i64>,
+    pub cron_expr: Option<String>,
+    pub timezone: String,
+    pub next_due_at_ms: Option<i64>,
+    pub target_agent_id: Option<String>,
+    pub busy_policy: ScheduleBusyPolicy,
+    pub retry_after_ms: Option<i64>,
+    pub last_due_at_ms: Option<i64>,
+    pub last_run_at_ms: Option<i64>,
+    pub last_status: ScheduledTaskStatus,
+    pub last_status_detail: Option<String>,
+    pub last_handling_agent_id: Option<String>,
+    pub claimed_by_instance: Option<String>,
+    pub claimed_by_agent_id: Option<String>,
+    pub claimed_due_at_ms: Option<i64>,
+    pub claimed_at_ms: Option<i64>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+impl ScheduledTask {
+    fn validate(&self) -> Result<()> {
+        if self.title.trim().is_empty() {
+            anyhow::bail!("title cannot be empty");
+        }
+        if self.body.trim().is_empty() {
+            anyhow::bail!("body cannot be empty");
+        }
+        if self.timezone != "UTC" {
+            anyhow::bail!("only timezone='UTC' is supported");
+        }
+        match self.schedule_kind {
+            ScheduledKind::OneShot => {
+                if self.due_at_ms.is_none() || self.next_due_at_ms.is_none() {
+                    anyhow::bail!("one_shot schedules require due_at_ms");
+                }
+            }
+            ScheduledKind::Cron => {
+                if self
+                    .cron_expr
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty()
+                {
+                    anyhow::bail!("cron schedules require cron_expr");
+                }
+                if self.next_due_at_ms.is_none() {
+                    anyhow::bail!("cron schedules require next_due_at_ms");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateScheduledTaskArgs {
+    pub schedule_id: Option<String>,
+    pub title: String,
+    pub body: String,
+    pub enabled: bool,
+    pub schedule_kind: ScheduledKind,
+    pub due_at_ms: Option<i64>,
+    pub cron_expr: Option<String>,
+    pub next_due_at_ms: Option<i64>,
+    pub target_agent_id: Option<String>,
+    pub busy_policy: ScheduleBusyPolicy,
+}
+
+impl CreateScheduledTaskArgs {
+    fn validate(&self) -> Result<()> {
+        ScheduledTask {
+            schedule_id: self.schedule_id.clone().unwrap_or_default(),
+            title: self.title.clone(),
+            body: self.body.clone(),
+            enabled: self.enabled,
+            schedule_kind: self.schedule_kind,
+            due_at_ms: self.due_at_ms,
+            cron_expr: self.cron_expr.clone(),
+            timezone: "UTC".to_string(),
+            next_due_at_ms: self.next_due_at_ms,
+            target_agent_id: self.target_agent_id.clone(),
+            busy_policy: self.busy_policy,
+            retry_after_ms: None,
+            last_due_at_ms: None,
+            last_run_at_ms: None,
+            last_status: ScheduledTaskStatus::NeverRun,
+            last_status_detail: None,
+            last_handling_agent_id: None,
+            claimed_by_instance: None,
+            claimed_by_agent_id: None,
+            claimed_due_at_ms: None,
+            claimed_at_ms: None,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        }
+        .validate()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UpdateScheduledTaskArgs {
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub enabled: Option<bool>,
+    pub schedule_kind: Option<ScheduledKind>,
+    pub due_at_ms: Option<i64>,
+    pub cron_expr: Option<String>,
+    pub next_due_at_ms: Option<i64>,
+    pub target_agent_id_set: bool,
+    pub target_agent_id: Option<String>,
+    pub busy_policy: Option<ScheduleBusyPolicy>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ListScheduledTasksArgs {
+    pub enabled: Option<bool>,
+    pub target_agent_id: Option<String>,
+    pub due_only: bool,
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FinishScheduledTaskOccurrenceArgs {
+    pub schedule_id: String,
+    pub due_at_ms: i64,
+    pub enabled: bool,
+    pub next_due_at_ms: Option<i64>,
+    pub retry_after_ms: Option<i64>,
+    pub status: ScheduledTaskStatus,
+    pub status_detail: Option<String>,
+    pub handling_agent_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoteKind {
     WorkRequest,
@@ -1868,5 +2446,58 @@ mod tests {
             .expect("legacy row");
         assert_eq!(legacy_row.meta, None);
         assert_eq!(legacy_row.meta_json, None);
+    }
+
+    #[test]
+    fn scheduled_task_claim_is_atomic_and_finish_clears_claim() {
+        let db = DbHandle::open_in_memory().expect("db");
+        let task = db
+            .create_scheduled_task(CreateScheduledTaskArgs {
+                schedule_id: Some("00000000-0000-0000-0000-000000000001".to_string()),
+                title: "demo".to_string(),
+                body: "run demo".to_string(),
+                enabled: true,
+                schedule_kind: ScheduledKind::OneShot,
+                due_at_ms: Some(1_000),
+                cron_expr: None,
+                next_due_at_ms: Some(1_000),
+                target_agent_id: Some("master".to_string()),
+                busy_policy: ScheduleBusyPolicy::Delay,
+            })
+            .expect("create schedule");
+
+        assert!(db
+            .claim_scheduled_task(&task.schedule_id, 1_000, "local", "master")
+            .expect("first claim"));
+        assert!(!db
+            .claim_scheduled_task(&task.schedule_id, 1_000, "local", "other")
+            .expect("second claim loses"));
+
+        let claimed = db
+            .get_scheduled_task(&task.schedule_id)
+            .expect("read claimed")
+            .expect("claimed task");
+        assert_eq!(claimed.last_status, ScheduledTaskStatus::Claimed);
+        assert_eq!(claimed.claimed_by_agent_id.as_deref(), Some("master"));
+
+        let finished = db
+            .finish_scheduled_task_occurrence(FinishScheduledTaskOccurrenceArgs {
+                schedule_id: task.schedule_id.clone(),
+                due_at_ms: 1_000,
+                enabled: false,
+                next_due_at_ms: None,
+                retry_after_ms: None,
+                status: ScheduledTaskStatus::Dispatched,
+                status_detail: None,
+                handling_agent_id: Some("master".to_string()),
+            })
+            .expect("finish")
+            .expect("finished task");
+
+        assert!(!finished.enabled);
+        assert_eq!(finished.last_status, ScheduledTaskStatus::Dispatched);
+        assert_eq!(finished.last_handling_agent_id.as_deref(), Some("master"));
+        assert_eq!(finished.claimed_at_ms, None);
+        assert_eq!(finished.claimed_by_agent_id, None);
     }
 }

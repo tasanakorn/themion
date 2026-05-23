@@ -1750,6 +1750,11 @@ fn create_local_agent(
     if agent_id == "[any]" {
         anyhow::bail!("agent_id '[any]' is reserved for shared board-target routing");
     }
+    if agent_id == "scheduler"
+        && args.get("_schedule_runtime").and_then(|v| v.as_bool()) != Some(true)
+    {
+        anyhow::bail!("agent_id 'scheduler' is reserved for scheduled task routing");
+    }
     if ctx.agents.iter().any(|h| h.agent_id == agent_id) {
         anyhow::bail!("duplicate agent_id: {agent_id}");
     }
@@ -1887,6 +1892,22 @@ pub(crate) fn start_watchdog_task(
         loop {
             interval.tick().await;
             if runtime_tx.send(AppRuntimeEvent::WatchdogTick).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+pub(crate) fn start_schedule_task(
+    background_domain: &DomainHandle,
+    runtime_tx: mpsc::UnboundedSender<AppRuntimeEvent>,
+    poll_interval_ms: u64,
+) {
+    background_domain.spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(poll_interval_ms.max(250)));
+        loop {
+            interval.tick().await;
+            if runtime_tx.send(AppRuntimeEvent::ScheduleTick).is_err() {
                 break;
             }
         }
