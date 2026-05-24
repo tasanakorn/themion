@@ -78,6 +78,8 @@ fn scheduled_task_to_json(task: &ScheduledTask) -> Value {
         "timezone": task.timezone,
         "next_due_at_ms": task.next_due_at_ms,
         "target_agent_id": task.target_agent_id,
+        "dispatch_agent_id": task.target_agent_id.as_deref().unwrap_or("scheduler"),
+        "uses_default_scheduler_agent": task.target_agent_id.is_none(),
         "busy_policy": task.busy_policy.as_str(),
         "retry_after_ms": task.retry_after_ms,
         "last_due_at_ms": task.last_due_at_ms,
@@ -1440,15 +1442,37 @@ fn parse_schedule_rule(value: &Value) -> Result<(ScheduledKind, Option<i64>, Opt
     }
 }
 
+fn cron_field_matches(field: &str, value: u32) -> Result<bool> {
+    if field == "*" {
+        return Ok(true);
+    }
+    if let Some(step) = field.strip_prefix("*/") {
+        let step = step
+            .parse::<u32>()
+            .map_err(|_| anyhow::anyhow!("cron_expr interval fields must use numeric steps"))?;
+        if step == 0 {
+            anyhow::bail!("cron_expr interval step must be greater than zero");
+        }
+        return Ok(value % step == 0);
+    }
+    let exact = field
+        .parse::<u32>()
+        .map_err(|_| anyhow::anyhow!("cron_expr supports '*', '*/N', or numeric fields"))?;
+    Ok(exact == value)
+}
+
+fn validate_cron_field(field: &str) -> Result<()> {
+    let _ = cron_field_matches(field, 0)?;
+    Ok(())
+}
+
 pub fn next_cron_due_ms(expr: &str, after_ms: i64) -> Result<i64> {
     let fields = expr.split_whitespace().collect::<Vec<_>>();
     if fields.len() != 5 {
         anyhow::bail!("cron_expr must have five fields");
     }
     for field in &fields {
-        if *field != "*" && field.parse::<u32>().is_err() {
-            anyhow::bail!("cron_expr only supports '*' or numeric fields in this implementation");
-        }
+        validate_cron_field(field)?;
     }
     let start_minute = after_ms.div_euclid(60_000) + 1;
     for offset in 0..(366 * 24 * 60) {
@@ -1456,18 +1480,12 @@ pub fn next_cron_due_ms(expr: &str, after_ms: i64) -> Result<i64> {
         let dt = chrono::DateTime::<Utc>::from_timestamp_millis(candidate_ms)
             .ok_or_else(|| anyhow::anyhow!("invalid cron candidate timestamp"))?;
         use chrono::{Datelike, Timelike};
-        let values = [
-            dt.minute(),
-            dt.hour(),
-            dt.day(),
-            dt.month(),
-            dt.weekday().num_days_from_sunday(),
-        ];
-        if fields
-            .iter()
-            .zip(values)
-            .all(|(field, value)| *field == "*" || field.parse::<u32>().ok() == Some(value))
-        {
+        let matches = cron_field_matches(fields[0], dt.minute())?
+            && cron_field_matches(fields[1], dt.hour())?
+            && cron_field_matches(fields[2], dt.day())?
+            && cron_field_matches(fields[3], dt.month())?
+            && cron_field_matches(fields[4], dt.weekday().num_days_from_sunday())?;
+        if matches {
             return Ok(candidate_ms);
         }
     }
@@ -1547,7 +1565,7 @@ pub fn tool_definitions() -> Value {
                             "properties": {
                                 "kind": { "type": "string", "enum": ["one_shot", "cron"] },
                                 "due_at_ms": { "type": "integer", "description": "Required for one_shot." },
-                                "cron_expr": { "type": "string", "description": "Five-field cron; * or numeric fields only in v0.80.0." },
+                                "cron_expr": { "type": "string", "description": "Five-field UTC cron. Supports *, */N intervals, or numeric fields, e.g. */5 * * * * for every five minutes." },
                                 "timezone": { "type": "string", "description": "Must be UTC for cron." }
                             },
                             "required": ["kind"]
@@ -1582,7 +1600,8 @@ pub fn tool_definitions() -> Value {
                     "type": "object",
                     "properties": {
                         "enabled": { "type": "boolean" },
-                        "target_agent_id": { "type": "string" },
+                        "target_agent_id": { "type": "string", "description": "Optional concrete target agent id. Omit to list all schedules, including default scheduler-agent schedules." },
+                        "scheduler_target": { "type": "boolean", "description": "When true, list schedules with no concrete target_agent_id that dispatch to the default scheduler agent." },
                         "due_only": { "type": "boolean", "description": "Only tasks due now. Default: false." },
                         "limit": { "type": "integer", "description": "Default: 50, max: 200." }
                     },
@@ -1606,7 +1625,7 @@ pub fn tool_definitions() -> Value {
                             "properties": {
                                 "kind": { "type": "string", "enum": ["one_shot", "cron"] },
                                 "due_at_ms": { "type": "integer" },
-                                "cron_expr": { "type": "string" },
+                                "cron_expr": { "type": "string", "description": "Five-field UTC cron. Supports *, */N intervals, or numeric fields." },
                                 "timezone": { "type": "string" }
                             },
                             "required": ["kind"]
@@ -2320,9 +2339,20 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
             })
         }
         "schedule_list" => {
+            let scheduler_target = args["scheduler_target"].as_bool().unwrap_or(false);
+            if scheduler_target && args.get("target_agent_id").is_some() {
+                anyhow::bail!("schedule_list cannot combine scheduler_target with target_agent_id");
+            }
             let tasks = ctx.db.list_scheduled_tasks(ListScheduledTasksArgs {
                 enabled: args.get("enabled").and_then(Value::as_bool),
-                target_agent_id: args["target_agent_id"].as_str().map(str::to_string),
+                target_agent_id: if scheduler_target {
+                    Some(None)
+                } else {
+                    args["target_agent_id"]
+                        .as_str()
+                        .map(str::to_string)
+                        .map(Some)
+                },
                 due_only: args["due_only"].as_bool().unwrap_or(false),
                 limit: args["limit"].as_u64().map(|v| v as u32),
             })?;
@@ -2815,6 +2845,7 @@ mod tests {
             .unwrap();
         let listed: Value = serde_json::from_str(&listed).unwrap();
         assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(listed[0]["dispatch_agent_id"], json!("master"));
 
         let updated = execute_tool(
             "schedule_update",
@@ -2853,6 +2884,44 @@ mod tests {
         )
         .await;
         assert!(result.unwrap_err().to_string().contains("timezone='UTC'"));
+    }
+
+    #[test]
+    fn cron_supports_minute_intervals() {
+        let base = chrono::DateTime::parse_from_rfc3339("2026-05-24T10:01:00Z")
+            .unwrap()
+            .timestamp_millis();
+
+        let next = next_cron_due_ms("*/5 * * * *", base).unwrap();
+        let next = chrono::DateTime::<Utc>::from_timestamp_millis(next).unwrap();
+
+        assert_eq!(next.to_rfc3339(), "2026-05-24T10:05:00+00:00");
+        assert!(next_cron_due_ms("*/0 * * * *", base).is_err());
+    }
+
+    #[tokio::test]
+    async fn schedule_list_includes_default_scheduler_tasks_without_target_filter() {
+        let ctx = workflow_test_ctx(WorkflowState::default());
+        execute_tool(
+            "schedule_create",
+            r#"{"title":"demo","body":"run demo","schedule":{"kind":"cron","cron_expr":"*/5 * * * *"}}"#,
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        let all = execute_tool("schedule_list", r#"{}"#, &ctx).await.unwrap();
+        let all: Value = serde_json::from_str(&all).unwrap();
+        assert_eq!(all.as_array().unwrap().len(), 1);
+        assert_eq!(all[0]["target_agent_id"], Value::Null);
+        assert_eq!(all[0]["dispatch_agent_id"], json!("scheduler"));
+        assert_eq!(all[0]["uses_default_scheduler_agent"], json!(true));
+
+        let by_scheduler = execute_tool("schedule_list", r#"{"scheduler_target":true}"#, &ctx)
+            .await
+            .unwrap();
+        let by_scheduler: Value = serde_json::from_str(&by_scheduler).unwrap();
+        assert_eq!(by_scheduler.as_array().unwrap().len(), 1);
     }
 
     #[test]

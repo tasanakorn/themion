@@ -312,7 +312,7 @@ Implemented behavior:
 
 - `scheduled_tasks` durable storage and migration columns in `themion-core`.
 - `schedule_create`, `schedule_read`, `schedule_list`, `schedule_update`, and `schedule_delete` tool definitions and handlers.
-- UTC one-shot schedules and a minimal UTC five-field cron evaluator that accepts `*` or numeric fields.
+- UTC one-shot schedules and a minimal UTC five-field cron evaluator that accepts `*`, `*/N` intervals, or numeric fields.
 - runtime-owned schedule ticks in `themion-cli`, due-row claims, and dispatch to local agent turns.
 - default `scheduler` agent routing with runtime-only creation and normal user creation blocked for `agent_id="scheduler"`.
 - specific-target busy handling for `delay`, `delegate_to_free_agent`, `create_new_agent`, and `miss`.

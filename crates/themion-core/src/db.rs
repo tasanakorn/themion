@@ -1404,7 +1404,11 @@ impl DbHandle {
         let conn = self.conn.lock().unwrap();
         let mut sql = SCHEDULED_TASK_SELECT_SQL.to_string();
         sql.push_str(" WHERE (?1 IS NULL OR enabled = ?1)");
-        sql.push_str(" AND (?2 IS NULL OR target_agent_id = ?2)");
+        match &args.target_agent_id {
+            Some(Some(_)) => sql.push_str(" AND target_agent_id = ?2"),
+            Some(None) => sql.push_str(" AND target_agent_id IS NULL"),
+            None => sql.push_str(" AND (?2 IS NULL OR 1 = 1)"),
+        }
         if args.due_only {
             sql.push_str(" AND next_due_at_ms IS NOT NULL AND next_due_at_ms <= ?3");
         } else {
@@ -1417,8 +1421,9 @@ impl DbHandle {
         let now = now_unix_ms();
         let limit = args.limit.unwrap_or(50).clamp(1, 200) as i64;
         let mut stmt = conn.prepare(&sql)?;
+        let target_agent_id = args.target_agent_id.flatten();
         let rows = stmt.query_map(
-            rusqlite::params![enabled, args.target_agent_id, now, limit],
+            rusqlite::params![enabled, target_agent_id, now, limit],
             map_scheduled_task_row,
         )?;
         let mut out = Vec::new();
@@ -2366,7 +2371,7 @@ pub struct UpdateScheduledTaskArgs {
 #[derive(Debug, Clone, Default)]
 pub struct ListScheduledTasksArgs {
     pub enabled: Option<bool>,
-    pub target_agent_id: Option<String>,
+    pub target_agent_id: Option<Option<String>>,
     pub due_only: bool,
     pub limit: Option<u32>,
 }
