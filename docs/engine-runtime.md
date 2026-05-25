@@ -7,8 +7,9 @@ Themion supports durable scheduled agent tasks as described by PRD-131.
 - Cron schedules use a five-field cron expression plus `timezone="UTC"`. The first implementation accepts `*`, `*/N` intervals, or numeric fields and evaluates in UTC. For example, `*/5 * * * *` runs every five minutes.
 - Scheduled tasks are stored in the default Themion database in `scheduled_tasks`.
 - A runtime-owned dispatcher wakes on `schedule.dispatch_poll_interval_ms` (default `5000`) and claims due rows before injection.
-- If no `target_agent_id` is set, scheduled work runs on the reserved dedicated `scheduler` local agent. The runtime creates this agent through schedule policy when needed.
-- `schedule_list` omits target filters by default and returns all schedules. Default scheduler-agent schedules have `target_agent_id=null`, `dispatch_agent_id="scheduler"`, and `uses_default_scheduler_agent=true`; use `scheduler_target=true` to filter only those schedules.
+- Each new schedule is bound to the creating local instance in `owner_instance` (`host:pid` when Stylos is enabled, otherwise `local:pid`). Only that instance's dispatcher can pick up or claim the schedule. Legacy unowned rows are bound to the first instance that successfully claims them.
+- If no `target_agent_id` is set, scheduled work runs on the reserved dedicated `scheduler` local agent within the owning instance. The runtime creates this agent through schedule policy when needed.
+- `schedule_list` omits target filters by default and returns all schedules. Default scheduler-agent schedules have `target_agent_id=null`, `dispatch_agent_id="scheduler"`, `owner_instance=<local instance>`, and `uses_default_scheduler_agent=true`; use `scheduler_target=true` to filter only those schedules.
 - Normal user-created local agents cannot use `agent_id="scheduler"`.
 - If a schedule targets a busy agent, the task follows its `busy_policy`: `delay`, `delegate_to_free_agent`, `create_new_agent`, or `miss`.
 - `schedule.default_busy_policy` defaults to `delay`; `schedule.delay_retry_ms` defaults to `60000`.

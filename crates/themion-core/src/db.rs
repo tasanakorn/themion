@@ -210,6 +210,7 @@ CREATE TABLE IF NOT EXISTS scheduled_tasks (
     timezone TEXT NOT NULL DEFAULT 'UTC',
     next_due_at_ms INTEGER,
     target_agent_id TEXT,
+    owner_instance TEXT,
     busy_policy TEXT NOT NULL,
     retry_after_ms INTEGER,
     last_due_at_ms INTEGER,
@@ -514,6 +515,7 @@ fn init_schema(conn: &Connection, fts5: bool) -> Result<()> {
     )?;
     ensure_column(conn, "scheduled_tasks", "last_status_detail", "TEXT")?;
     ensure_column(conn, "scheduled_tasks", "last_handling_agent_id", "TEXT")?;
+    ensure_column(conn, "scheduled_tasks", "owner_instance", "TEXT")?;
     ensure_column(conn, "scheduled_tasks", "claimed_by_instance", "TEXT")?;
     ensure_column(conn, "scheduled_tasks", "claimed_by_agent_id", "TEXT")?;
     ensure_column(conn, "scheduled_tasks", "claimed_due_at_ms", "INTEGER")?;
@@ -1338,6 +1340,7 @@ impl DbHandle {
             timezone: "UTC".to_string(),
             next_due_at_ms: args.next_due_at_ms,
             target_agent_id: args.target_agent_id,
+            owner_instance: args.owner_instance,
             busy_policy: args.busy_policy,
             retry_after_ms: None,
             last_due_at_ms: None,
@@ -1356,11 +1359,11 @@ impl DbHandle {
         conn.execute(
             "INSERT INTO scheduled_tasks (
                 schedule_id, title, body, enabled, schedule_kind, due_at_ms, cron_expr, timezone,
-                next_due_at_ms, target_agent_id, busy_policy, retry_after_ms, last_due_at_ms,
-                last_run_at_ms, last_status, last_status_detail, last_handling_agent_id,
-                claimed_by_instance, claimed_by_agent_id, claimed_due_at_ms, claimed_at_ms,
-                created_at_ms, updated_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                next_due_at_ms, target_agent_id, owner_instance, busy_policy, retry_after_ms,
+                last_due_at_ms, last_run_at_ms, last_status, last_status_detail,
+                last_handling_agent_id, claimed_by_instance, claimed_by_agent_id,
+                claimed_due_at_ms, claimed_at_ms, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
             rusqlite::params![
                 task.schedule_id,
                 task.title,
@@ -1372,6 +1375,7 @@ impl DbHandle {
                 task.timezone,
                 task.next_due_at_ms,
                 task.target_agent_id,
+                task.owner_instance,
                 task.busy_policy.as_str(),
                 task.retry_after_ms,
                 task.last_due_at_ms,
@@ -1515,25 +1519,35 @@ impl DbHandle {
         Ok(changed > 0)
     }
 
-    pub fn next_due_scheduled_task(&self, now_ms: i64) -> Result<Option<ScheduledTask>> {
+    pub fn next_due_scheduled_task(
+        &self,
+        now_ms: i64,
+        owner_instance: &str,
+    ) -> Result<Option<ScheduledTask>> {
         let conn = self.conn.lock().unwrap();
         let sql = SCHEDULED_TASK_SELECT_SQL.to_string()
             + " WHERE enabled = 1
                 AND next_due_at_ms IS NOT NULL
                 AND next_due_at_ms <= ?1
                 AND (retry_after_ms IS NULL OR retry_after_ms <= ?1)
+                AND (owner_instance = ?2 OR owner_instance IS NULL)
                 AND claimed_at_ms IS NULL
               ORDER BY next_due_at_ms ASC, created_at_ms ASC
               LIMIT 1";
-        conn.query_row(&sql, rusqlite::params![now_ms], map_scheduled_task_row)
-            .optional()
-            .map_err(Into::into)
+        conn.query_row(
+            &sql,
+            rusqlite::params![now_ms, owner_instance],
+            map_scheduled_task_row,
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub fn claim_scheduled_task(
         &self,
         schedule_id: &str,
         due_at_ms: i64,
+        owner_instance: &str,
         claimed_by_instance: &str,
         claimed_by_agent_id: &str,
     ) -> Result<bool> {
@@ -1541,10 +1555,21 @@ impl DbHandle {
         let conn = self.conn.lock().unwrap();
         let changed = conn.execute(
             "UPDATE scheduled_tasks
-             SET last_status = 'claimed', claimed_by_instance = ?3, claimed_by_agent_id = ?4,
+             SET last_status = 'claimed', owner_instance = ?6, claimed_by_instance = ?3, claimed_by_agent_id = ?4,
                  claimed_due_at_ms = ?2, claimed_at_ms = ?5, updated_at_ms = ?5
-             WHERE schedule_id = ?1 AND enabled = 1 AND next_due_at_ms = ?2 AND claimed_at_ms IS NULL",
-            rusqlite::params![schedule_id, due_at_ms, claimed_by_instance, claimed_by_agent_id, now_ms],
+             WHERE schedule_id = ?1
+               AND enabled = 1
+               AND next_due_at_ms = ?2
+               AND (owner_instance = ?6 OR owner_instance IS NULL)
+               AND claimed_at_ms IS NULL",
+            rusqlite::params![
+                schedule_id,
+                due_at_ms,
+                claimed_by_instance,
+                claimed_by_agent_id,
+                now_ms,
+                owner_instance
+            ],
         )?;
         Ok(changed == 1)
     }
@@ -1905,8 +1930,8 @@ impl DbHandle {
 const SCHEDULED_TASK_SELECT_SQL: &str = "SELECT schedule_id, title, body, enabled, schedule_kind,
        due_at_ms, cron_expr, timezone, next_due_at_ms, target_agent_id, busy_policy,
        retry_after_ms, last_due_at_ms, last_run_at_ms, last_status, last_status_detail,
-       last_handling_agent_id, claimed_by_instance, claimed_by_agent_id, claimed_due_at_ms,
-       claimed_at_ms, created_at_ms, updated_at_ms FROM scheduled_tasks";
+       last_handling_agent_id, COALESCE(owner_instance, ''), claimed_by_instance, claimed_by_agent_id,
+       claimed_due_at_ms, claimed_at_ms, created_at_ms, updated_at_ms FROM scheduled_tasks";
 
 fn map_scheduled_task_row(row: &Row<'_>) -> rusqlite::Result<ScheduledTask> {
     let schedule_kind_raw: String = row.get(4)?;
@@ -1933,12 +1958,13 @@ fn map_scheduled_task_row(row: &Row<'_>) -> rusqlite::Result<ScheduledTask> {
             .unwrap_or(ScheduledTaskStatus::Failed),
         last_status_detail: row.get(15)?,
         last_handling_agent_id: row.get(16)?,
-        claimed_by_instance: row.get(17)?,
-        claimed_by_agent_id: row.get(18)?,
-        claimed_due_at_ms: row.get(19)?,
-        claimed_at_ms: row.get(20)?,
-        created_at_ms: row.get(21)?,
-        updated_at_ms: row.get(22)?,
+        owner_instance: row.get(17)?,
+        claimed_by_instance: row.get(18)?,
+        claimed_by_agent_id: row.get(19)?,
+        claimed_due_at_ms: row.get(20)?,
+        claimed_at_ms: row.get(21)?,
+        created_at_ms: row.get(22)?,
+        updated_at_ms: row.get(23)?,
     })
 }
 
@@ -2258,6 +2284,7 @@ pub struct ScheduledTask {
     pub timezone: String,
     pub next_due_at_ms: Option<i64>,
     pub target_agent_id: Option<String>,
+    pub owner_instance: String,
     pub busy_policy: ScheduleBusyPolicy,
     pub retry_after_ms: Option<i64>,
     pub last_due_at_ms: Option<i64>,
@@ -2320,6 +2347,7 @@ pub struct CreateScheduledTaskArgs {
     pub cron_expr: Option<String>,
     pub next_due_at_ms: Option<i64>,
     pub target_agent_id: Option<String>,
+    pub owner_instance: String,
     pub busy_policy: ScheduleBusyPolicy,
 }
 
@@ -2336,6 +2364,7 @@ impl CreateScheduledTaskArgs {
             timezone: "UTC".to_string(),
             next_due_at_ms: self.next_due_at_ms,
             target_agent_id: self.target_agent_id.clone(),
+            owner_instance: self.owner_instance.clone(),
             busy_policy: self.busy_policy,
             retry_after_ms: None,
             last_due_at_ms: None,
@@ -2467,15 +2496,49 @@ mod tests {
                 cron_expr: None,
                 next_due_at_ms: Some(1_000),
                 target_agent_id: Some("master".to_string()),
+                owner_instance: "host-a:100".to_string(),
                 busy_policy: ScheduleBusyPolicy::Delay,
             })
             .expect("create schedule");
 
         assert!(db
-            .claim_scheduled_task(&task.schedule_id, 1_000, "local", "master")
-            .expect("first claim"));
+            .next_due_scheduled_task(1_000, "host-b:200")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            db.next_due_scheduled_task(1_000, "host-a:100")
+                .unwrap()
+                .unwrap()
+                .schedule_id,
+            task.schedule_id
+        );
         assert!(!db
-            .claim_scheduled_task(&task.schedule_id, 1_000, "local", "other")
+            .claim_scheduled_task(&task.schedule_id, 1_000, "host-b:200", "local", "master")
+            .expect("wrong owner claim loses"));
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE scheduled_tasks SET owner_instance = NULL WHERE schedule_id = ?1",
+                rusqlite::params![task.schedule_id],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            db.next_due_scheduled_task(1_000, "host-b:200")
+                .unwrap()
+                .unwrap()
+                .owner_instance,
+            ""
+        );
+        assert!(db
+            .claim_scheduled_task(&task.schedule_id, 1_000, "host-a:100", "local", "master")
+            .expect("legacy unowned schedule can be claimed"));
+        assert!(!db
+            .claim_scheduled_task(&task.schedule_id, 1_000, "host-b:200", "local", "other")
+            .expect("legacy schedule claim is bound after first claim"));
+        assert!(!db
+            .claim_scheduled_task(&task.schedule_id, 1_000, "host-a:100", "local", "other")
             .expect("second claim loses"));
 
         let claimed = db

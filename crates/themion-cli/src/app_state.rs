@@ -2379,10 +2379,11 @@ fn schedule_prompt(task: &themion_core::db::ScheduledTask, due_at_ms: i64) -> St
 
 fn handle_schedule_tick_local_event(app: &mut App) {
     let now_ms = crate::tui::unix_epoch_now_ms() as i64;
+    let local_instance = current_local_instance_id(app);
     let Some(task) = app
         .runtime
         .db
-        .next_due_scheduled_task(now_ms)
+        .next_due_scheduled_task(now_ms, &local_instance)
         .ok()
         .flatten()
     else {
@@ -2392,11 +2393,11 @@ fn handle_schedule_tick_local_event(app: &mut App) {
     let Some(due_at_ms) = task.next_due_at_ms else {
         return;
     };
-    let local_instance = current_local_instance_id(app);
     let claim_agent = task.target_agent_id.as_deref().unwrap_or("scheduler");
     match app.runtime.db.claim_scheduled_task(
         &task.schedule_id,
         due_at_ms,
+        &local_instance,
         &local_instance,
         claim_agent,
     ) {

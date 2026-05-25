@@ -72,6 +72,7 @@ Required fields:
 - `timezone`: must be `UTC` in the first implementation
 - `next_due_at_ms`: next occurrence time, stored as UTC epoch milliseconds
 - `target_agent_id`: optional concrete local agent id; `NULL` means use the dedicated scheduler agent
+- `owner_instance`: concrete local instance id that created and owns dispatch for the schedule
 - `busy_policy`: `delay`, `delegate_to_free_agent`, `create_new_agent`, or `miss`
 - `retry_after_ms`: optional UTC epoch milliseconds used by delayed occurrences
 - `last_due_at_ms`: due time of the last handled occurrence, stored as UTC epoch milliseconds
@@ -314,7 +315,8 @@ Implemented behavior:
 - `schedule_create`, `schedule_read`, `schedule_list`, `schedule_update`, and `schedule_delete` tool definitions and handlers.
 - UTC one-shot schedules and a minimal UTC five-field cron evaluator that accepts `*`, `*/N` intervals, or numeric fields.
 - runtime-owned schedule ticks in `themion-cli`, due-row claims, and dispatch to local agent turns.
-- default `scheduler` agent routing with runtime-only creation and normal user creation blocked for `agent_id="scheduler"`.
+- schedule `owner_instance` binding so only the creating local instance (`host:pid` or `local:pid`) can pick up or claim a due schedule; legacy unowned rows bind on first successful claim.
+- default `scheduler` agent routing within the owning instance, with runtime-only creation and normal user creation blocked for `agent_id="scheduler"`.
 - specific-target busy handling for `delay`, `delegate_to_free_agent`, `create_new_agent`, and `miss`.
 - config defaults for `schedule.default_busy_policy`, `schedule.dispatch_poll_interval_ms`, and `schedule.delay_retry_ms`.
 - runtime docs for schedule behavior in `docs/engine-runtime.md`.

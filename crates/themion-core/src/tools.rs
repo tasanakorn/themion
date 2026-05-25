@@ -79,6 +79,7 @@ fn scheduled_task_to_json(task: &ScheduledTask) -> Value {
         "next_due_at_ms": task.next_due_at_ms,
         "target_agent_id": task.target_agent_id,
         "dispatch_agent_id": task.target_agent_id.as_deref().unwrap_or("scheduler"),
+        "owner_instance": task.owner_instance,
         "uses_default_scheduler_agent": task.target_agent_id.is_none(),
         "busy_policy": task.busy_policy.as_str(),
         "retry_after_ms": task.retry_after_ms,
@@ -1313,6 +1314,20 @@ fn resolve_note_source_instance(
     })
 }
 
+#[cfg_attr(not(feature = "stylos"), allow(unused_variables))]
+fn local_instance_id_for_tools(ctx: &ToolCtx) -> String {
+    #[cfg(feature = "stylos")]
+    {
+        ctx.local_instance_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("local:{}", std::process::id()))
+    }
+    #[cfg(not(feature = "stylos"))]
+    format!("local:{}", std::process::id())
+}
+
 fn resolve_memory_project_dir(args: &Value, ctx: &ToolCtx) -> String {
     match args["project_dir"]
         .as_str()
@@ -2323,6 +2338,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 cron_expr,
                 next_due_at_ms: Some(next_due_at_ms),
                 target_agent_id: args["target_agent_id"].as_str().map(str::to_string),
+                owner_instance: local_instance_id_for_tools(ctx),
                 busy_policy: parse_schedule_busy_policy(args["busy_policy"].as_str())?,
             })?;
             Ok(json!({"ok": true, "entity": "scheduled_task", "operation": "create", "task": scheduled_task_to_json(&task)}).to_string())
@@ -2839,6 +2855,10 @@ mod tests {
         let schedule_id = created["task"]["schedule_id"].as_str().unwrap();
         assert_eq!(created["task"]["schedule_kind"], json!("one_shot"));
         assert_eq!(created["task"]["next_due_at_ms"], json!(12345));
+        assert!(created["task"]["owner_instance"]
+            .as_str()
+            .unwrap()
+            .starts_with("local:"));
 
         let listed = execute_tool("schedule_list", r#"{"target_agent_id":"master"}"#, &ctx)
             .await
