@@ -1615,6 +1615,7 @@ pub fn tool_definitions() -> Value {
                     "type": "object",
                     "properties": {
                         "enabled": { "type": "boolean" },
+                        "owner_instance": { "type": "string", "description": "Optional owner instance filter. Omit to scope to the calling instance; set to an empty string to list across all instances." },
                         "target_agent_id": { "type": "string", "description": "Optional concrete target agent id. Omit to list all schedules, including default scheduler-agent schedules." },
                         "scheduler_target": { "type": "boolean", "description": "When true, list schedules with no concrete target_agent_id that dispatch to the default scheduler agent." },
                         "due_only": { "type": "boolean", "description": "Only tasks due now. Default: false." },
@@ -1845,7 +1846,7 @@ pub fn tool_definitions() -> Value {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "to_instance": { "type": "string" },
+                        "to_instance": { "type": "string", "description": "Optional instance filter. Omit to default to the calling instance; pass empty string to list across all instances." },
                         "to_agent_id": { "type": "string" },
                         "columns": {
                             "type": "array",
@@ -2227,6 +2228,15 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
         }
         "board_list_notes" => {
             let mut columns = Vec::new();
+            let to_instance_str = match args["to_instance"].as_str() {
+                Some(s) => s.to_string(),
+                None => local_instance_id_for_tools(ctx),
+            };
+            let to_instance: Option<&str> = if to_instance_str.is_empty() {
+                None
+            } else {
+                Some(&to_instance_str)
+            };
             if let Some(values) = args["columns"].as_array() {
                 for value in values {
                     let raw = value
@@ -2239,15 +2249,10 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                     }
                 }
             }
-            validate_board_list_target_shape(
-                args["to_instance"].as_str(),
-                args["to_agent_id"].as_str(),
-            )?;
-            let notes = ctx.db.list_board_notes(
-                args["to_instance"].as_str(),
-                args["to_agent_id"].as_str(),
-                &columns,
-            )?;
+            validate_board_list_target_shape(to_instance, args["to_agent_id"].as_str())?;
+            let notes =
+                ctx.db
+                    .list_board_notes(to_instance, args["to_agent_id"].as_str(), &columns)?;
             Ok(Value::Array(notes.iter().map(board_note_to_json).collect()).to_string())
         }
         "board_read_note" => {
@@ -2371,6 +2376,14 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 },
                 due_only: args["due_only"].as_bool().unwrap_or(false),
                 limit: args["limit"].as_u64().map(|v| v as u32),
+                owner_instance: {
+                    let v = args["owner_instance"].as_str();
+                    match v {
+                        Some(s) if s.is_empty() => None,
+                        Some(s) => Some(s.to_string()),
+                        None => Some(local_instance_id_for_tools(ctx)),
+                    }
+                },
             })?;
             Ok(Value::Array(tasks.iter().map(scheduled_task_to_json).collect()).to_string())
         }

@@ -1407,7 +1407,7 @@ impl DbHandle {
     pub fn list_scheduled_tasks(&self, args: ListScheduledTasksArgs) -> Result<Vec<ScheduledTask>> {
         let conn = self.conn.lock().unwrap();
         let mut sql = SCHEDULED_TASK_SELECT_SQL.to_string();
-        sql.push_str(" WHERE (?1 IS NULL OR enabled = ?1)");
+        sql.push_str(" WHERE (?1 IS NULL OR enabled = ?1) AND (?5 IS NULL OR owner_instance = ?5 OR owner_instance IS NULL)");
         match &args.target_agent_id {
             Some(Some(_)) => sql.push_str(" AND target_agent_id = ?2"),
             Some(None) => sql.push_str(" AND target_agent_id IS NULL"),
@@ -1427,7 +1427,7 @@ impl DbHandle {
         let mut stmt = conn.prepare(&sql)?;
         let target_agent_id = args.target_agent_id.flatten();
         let rows = stmt.query_map(
-            rusqlite::params![enabled, target_agent_id, now, limit],
+            rusqlite::params![enabled, target_agent_id, now, limit, args.owner_instance],
             map_scheduled_task_row,
         )?;
         let mut out = Vec::new();
@@ -2403,6 +2403,7 @@ pub struct ListScheduledTasksArgs {
     pub target_agent_id: Option<Option<String>>,
     pub due_only: bool,
     pub limit: Option<u32>,
+    pub owner_instance: Option<String>,
 }
 
 #[derive(Debug, Clone)]
