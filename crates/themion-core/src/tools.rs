@@ -2228,6 +2228,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
         }
         "board_list_notes" => {
             let mut columns = Vec::new();
+            let defaulted: bool = args["to_instance"].as_str().is_none();
             let to_instance_str = match args["to_instance"].as_str() {
                 Some(s) => s.to_string(),
                 None => local_instance_id_for_tools(ctx),
@@ -2250,10 +2251,24 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                 }
             }
             validate_board_list_target_shape(to_instance, args["to_agent_id"].as_str())?;
-            let notes =
+            let mut notes =
                 ctx.db
                     .list_board_notes(to_instance, args["to_agent_id"].as_str(), &columns)?;
-            Ok(Value::Array(notes.iter().map(board_note_to_json).collect()).to_string())
+            // When to_instance was defaulted to a local:* instance, also include legacy
+            // notes with to_instance="local" (no PID suffix) for backward compatibility.
+            if defaulted && to_instance_str.starts_with("local:") {
+                let legacy = ctx.db.list_board_notes(
+                    Some("local"),
+                    args["to_agent_id"].as_str(),
+                    &columns,
+                )?;
+                for note in legacy {
+                    if !notes.iter().any(|n| n.note_id == note.note_id) {
+                        notes.push(note);
+                    }
+                }
+            }
+            Ok(Value::Array(notes.iter().map(board_note_to_json).collect::<Vec<_>>()).to_string())
         }
         "board_read_note" => {
             let note_id = args["note_id"]
