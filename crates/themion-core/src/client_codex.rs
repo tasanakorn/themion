@@ -1023,6 +1023,7 @@ fn translate_tools(tools: &Value) -> Value {
                     "name": f["name"],
                     "description": f["description"],
                     "parameters": f["parameters"],
+                    "strict": Value::Null,
                 })
             } else {
                 t.clone()

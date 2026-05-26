@@ -2647,6 +2647,7 @@ mod local_agent_delete_tests {
             effort: "medium".to_string(),
             system_prompt: "test-system".to_string(),
             model_info: None,
+            tool_set: None,
             temporary_profile_override: None,
             temporary_model_override: None,
             temporary_effort_override: None,

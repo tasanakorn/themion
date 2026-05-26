@@ -195,11 +195,7 @@ impl ChatClient {
         messages: &[Message],
         tools: &Value,
     ) -> Result<(ResponseMessage, Option<Usage>)> {
-        let body = serde_json::json!({
-            "model": model,
-            "messages": messages,
-            "tools": tools,
-        });
+        let body = build_chat_completions_body(model, messages, tools, false);
 
         let response = self.build_request(&body).send().await?;
 
@@ -233,13 +229,7 @@ impl ChatClient {
         Option<ApiCallRateLimitReport>,
         ChatRoundTrace,
     )> {
-        let body = serde_json::json!({
-            "model": model,
-            "messages": messages,
-            "tools": tools,
-            "stream": true,
-            "stream_options": { "include_usage": true },
-        });
+        let body = build_chat_completions_body(model, messages, tools, true);
 
         let mut response = self.build_request(&body).send().await?;
         let response_status = response.status();
@@ -376,6 +366,92 @@ impl ChatClient {
     }
 }
 
+fn build_chat_completions_body(
+    model: &str,
+    messages: &[Message],
+    tools: &Value,
+    stream: bool,
+) -> Value {
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": chat_completions_messages(messages),
+        "tools": tools,
+    });
+
+    if stream {
+        body["stream"] = Value::Bool(true);
+        body["stream_options"] = serde_json::json!({ "include_usage": true });
+    }
+
+    body
+}
+
+fn chat_completions_messages(messages: &[Message]) -> Value {
+    let mut value = serde_json::to_value(messages).unwrap_or_else(|_| Value::Array(Vec::new()));
+    if let Some(messages) = value.as_array_mut() {
+        for message in messages {
+            let Some(tool_calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut)
+            else {
+                continue;
+            };
+
+            for tool_call in tool_calls {
+                if let Some(tool_call) = tool_call.as_object_mut() {
+                    tool_call
+                        .entry("type".to_string())
+                        .or_insert_with(|| Value::String("function".to_string()));
+                }
+            }
+        }
+    }
+    value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_completions_messages_include_tool_call_type() {
+        let messages = vec![Message {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call-1".to_string(),
+                function: FunctionCall {
+                    name: "fs_read".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }]),
+            tool_call_id: None,
+        }];
+
+        let value = chat_completions_messages(&messages);
+        assert_eq!(value[0]["tool_calls"][0]["type"], "function");
+        assert_eq!(value[0]["tool_calls"][0]["function"]["name"], "fs_read");
+    }
+
+    #[test]
+    fn chat_completions_stream_body_uses_translated_messages() {
+        let messages = vec![Message {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call-1".to_string(),
+                function: FunctionCall {
+                    name: "fs_read".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }]),
+            tool_call_id: None,
+        }];
+
+        let body = build_chat_completions_body("gpt-test", &messages, &serde_json::json!([]), true);
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["messages"][0]["tool_calls"][0]["type"], "function");
+    }
+}
+
 #[async_trait::async_trait]
 impl ChatBackend for ChatClient {
     fn backend_name(&self) -> &'static str {
@@ -388,13 +464,7 @@ impl ChatBackend for ChatClient {
         messages: &[Message],
         tools: &Value,
     ) -> Value {
-        serde_json::json!({
-            "model": model,
-            "messages": messages,
-            "tools": tools,
-            "stream": true,
-            "stream_options": { "include_usage": true },
-        })
+        build_chat_completions_body(model, messages, tools, true)
     }
 
     async fn chat_completion_stream(

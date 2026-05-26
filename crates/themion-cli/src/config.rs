@@ -165,6 +165,12 @@ provider = "openrouter"
 # base_url = "http://localhost:8080/v1"
 # model    = "local"
 
+# [profile.compat]
+# provider = "openai-compat"
+# base_url = "https://api.example.com/v1"
+# api_key  = "..."
+# model    = "gpt-5.4"
+
 # Optional Stylos overrides. When compiled with the `stylos` feature,
 # Stylos starts automatically with built-in defaults.
 #
@@ -236,20 +242,41 @@ pub fn resolve_profile(
                 .unwrap_or_else(|| CODEX_DEFAULT_MODEL.to_string());
             (base_url, None, model)
         }
-        _ => {
-            let base_url = std::env::var("OPENROUTER_BASE_URL")
-                .ok()
+        "openrouter" => {
+            let base_url = profile
+                .base_url
+                .clone()
                 .filter(|s| !s.is_empty())
-                .or_else(|| profile.base_url.clone().filter(|s| !s.is_empty()))
                 .unwrap_or_else(|| OPENROUTER_DEFAULT_BASE_URL.to_string());
-            let api_key = std::env::var("OPENROUTER_API_KEY")
-                .ok()
+            let api_key = profile.api_key.clone().filter(|s| !s.is_empty());
+            let model = profile
+                .model
+                .clone()
                 .filter(|s| !s.is_empty())
-                .or_else(|| profile.api_key.clone().filter(|s| !s.is_empty()));
-            let model = std::env::var("OPENROUTER_MODEL")
-                .ok()
+                .unwrap_or_else(|| OPENROUTER_DEFAULT_MODEL.to_string());
+            (base_url, api_key, model)
+        }
+        "openai-compat" => {
+            let base_url = profile.base_url.clone().filter(|s| !s.is_empty());
+            let api_key = profile.api_key.clone().filter(|s| !s.is_empty());
+            let model = profile
+                .model
+                .clone()
                 .filter(|s| !s.is_empty())
-                .or_else(|| profile.model.clone().filter(|s| !s.is_empty()))
+                .unwrap_or_else(|| CODEX_DEFAULT_MODEL.to_string());
+            (base_url.unwrap_or_default(), api_key, model)
+        }
+        _ => {
+            let base_url = profile
+                .base_url
+                .clone()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| OPENROUTER_DEFAULT_BASE_URL.to_string());
+            let api_key = profile.api_key.clone().filter(|s| !s.is_empty());
+            let model = profile
+                .model
+                .clone()
+                .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| OPENROUTER_DEFAULT_MODEL.to_string());
             (base_url, api_key, model)
         }
@@ -316,13 +343,25 @@ impl Config {
             .or_else(|| file_config.system_prompt.filter(|s| !s.is_empty()))
             .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
 
-        if provider == "openrouter" && api_key.is_none() {
+        if matches!(provider.as_str(), "openrouter" | "openai-compat") && api_key.is_none() {
             let path_hint = config_path()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "~/.config/themion/config.toml".to_string());
             eprintln!(
-                "error: api_key is required for provider=openrouter. \
-                Set OPENROUTER_API_KEY or add `api_key = \"...\"` under [profile.{}] in {}",
+                "error: api_key is required for provider={}. \
+                Add `api_key = \"...\"` under [profile.{}] in {}",
+                provider, active_profile, path_hint
+            );
+            std::process::exit(1);
+        }
+
+        if provider == "openai-compat" && base_url.trim().is_empty() {
+            let path_hint = config_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "~/.config/themion/config.toml".to_string());
+            eprintln!(
+                "error: base_url is required for provider=openai-compat. \
+                Add `base_url = \"https://.../v1\"` under [profile.{}] in {}",
                 active_profile, path_hint
             );
             std::process::exit(1);
@@ -364,4 +403,75 @@ pub fn save_profiles(
     let out = toml::to_string_pretty(&file_config).context("serializing config")?;
     fs::write(&path, out).with_context(|| format!("writing config file {}", path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    fn clear_provider_env() {
+        for key in [
+            "THEMION_PROVIDER",
+            "OPENROUTER_BASE_URL",
+            "OPENROUTER_API_KEY",
+            "OPENROUTER_MODEL",
+            "LLAMACPP_BASE_URL",
+            "LLAMACPP_MODEL",
+            "CODEX_MODEL",
+        ] {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn openai_compat_prefers_profile_settings_over_openrouter_env() {
+        let _guard = env_lock();
+        clear_provider_env();
+        std::env::set_var("OPENROUTER_API_KEY", "openrouter-key");
+        std::env::set_var("OPENROUTER_BASE_URL", "https://openrouter.example/v1");
+        std::env::set_var("OPENROUTER_MODEL", "openrouter/model");
+
+        let profile = ProfileConfig {
+            provider: Some("openai-compat".to_string()),
+            base_url: Some("https://ark.example/v1".to_string()),
+            model: Some("ark-model".to_string()),
+            api_key: Some("ark-key".to_string()),
+            effort: None,
+        };
+
+        let (provider, base_url, api_key, model, _effort) = resolve_profile(&profile);
+
+        assert_eq!(provider, "openai-compat");
+        assert_eq!(base_url, "https://ark.example/v1");
+        assert_eq!(api_key.as_deref(), Some("ark-key"));
+        assert_eq!(model, "ark-model");
+        clear_provider_env();
+    }
+
+    #[test]
+    fn openrouter_provider_uses_profile_api_key_not_openrouter_env() {
+        let _guard = env_lock();
+        clear_provider_env();
+        std::env::set_var("OPENROUTER_API_KEY", "openrouter-key");
+
+        let profile = ProfileConfig {
+            provider: Some("openrouter".to_string()),
+            base_url: None,
+            model: None,
+            api_key: Some("profile-key".to_string()),
+            effort: None,
+        };
+
+        let (provider, _base_url, api_key, _model, _effort) = resolve_profile(&profile);
+
+        assert_eq!(provider, "openrouter");
+        assert_eq!(api_key.as_deref(), Some("profile-key"));
+        clear_provider_env();
+    }
 }
