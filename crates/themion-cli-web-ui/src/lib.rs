@@ -88,6 +88,8 @@ struct WebRuntimeSummary {
     idle_state_changed_at_ms: Option<u64>,
     activity_changed_at_ms: Option<u64>,
     pending_text: Option<String>,
+    #[serde(default)]
+    rate_limits: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

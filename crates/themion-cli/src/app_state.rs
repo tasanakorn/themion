@@ -158,6 +158,7 @@ pub struct AppSnapshot {
     pub busy: bool,
     pub activity_status: Option<String>,
     pub local_agents: Vec<AppSnapshotAgent>,
+    pub rate_limits: Option<serde_json::Value>,
     #[cfg(feature = "stylos")]
     pub stylos_status: Option<String>,
     #[cfg(feature = "stylos")]
@@ -446,6 +447,7 @@ impl AppState {
                 activity_label: None,
                 activity_changed_at_ms: None,
             }],
+            rate_limits: None,
             #[cfg(feature = "stylos")]
             stylos_status: Some("off".to_string()),
             #[cfg(feature = "stylos")]
@@ -1405,6 +1407,7 @@ pub(crate) fn publish_runtime_snapshot(app: &mut App) {
             agent_activity_changed_at_by_session: &app.runtime.agent_activity_changed_at_by_session,
             agent_busy: app.runtime.agent_busy,
             activity_status: activity_status.clone(),
+            rate_limits: app.runtime.status_rate_limits.as_ref(),
             #[cfg(feature = "stylos")]
             stylos_status: Some(stylos_status.clone()),
         },
@@ -1451,6 +1454,7 @@ pub(crate) fn publish_runtime_snapshot(app: &mut App) {
                         agent_activity_changed_at_by_session: &app
                             .runtime
                             .agent_activity_changed_at_by_session,
+                        rate_limits: app.runtime.status_rate_limits.as_ref(),
                         stylos_status: Some(stylos_status),
                     }
                 }
@@ -1461,6 +1465,7 @@ pub(crate) fn publish_runtime_snapshot(app: &mut App) {
                         activity_status.clone(),
                         &app.runtime.agent_activity_by_session,
                         &app.runtime.agent_activity_changed_at_by_session,
+                        app.runtime.status_rate_limits.as_ref(),
                     )
                 }
             },

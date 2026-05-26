@@ -158,6 +158,7 @@ struct WebRuntimeSummary {
     idle_state_changed_at_ms: Option<u64>,
     activity_changed_at_ms: Option<u64>,
     pending_text: Option<String>,
+    rate_limits: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -933,7 +934,7 @@ fn build_status_response(state: &WebAppState, snapshot: &AppSnapshot) -> WebStat
                 activity_changed_at_ms: agent.activity_changed_at_ms,
             })
             .collect(),
-        runtime: build_runtime_summary(&state.app_state.runtime),
+        runtime: build_runtime_summary(&state.app_state.runtime, snapshot),
         recent_events: build_recent_events(&state.app_state.runtime, snapshot, RECENT_EVENTS_LIMIT),
     }
 }
@@ -1184,7 +1185,7 @@ fn build_agents_response(state: &WebAppState, snapshot: &AppSnapshot) -> WebAgen
     }
 }
 
-fn build_runtime_summary(runtime: &AppRuntimeState) -> WebRuntimeSummary {
+fn build_runtime_summary(runtime: &AppRuntimeState, snapshot: &AppSnapshot) -> WebRuntimeSummary {
     WebRuntimeSummary {
         configured_profile: runtime.session.configured_profile.clone(),
         active_profile: runtime.session.active_profile.clone(),
@@ -1204,6 +1205,7 @@ fn build_runtime_summary(runtime: &AppRuntimeState) -> WebRuntimeSummary {
         idle_state_changed_at_ms: runtime.idle_status_changed_at,
         activity_changed_at_ms: runtime.agent_activity_changed_at,
         pending_text: runtime.pending.clone(),
+        rate_limits: snapshot.rate_limits.clone(),
     }
 }
 

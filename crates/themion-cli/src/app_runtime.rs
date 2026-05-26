@@ -390,6 +390,7 @@ pub(crate) struct AppSnapshotBuildState<'a> {
     pub agent_activity_changed_at_by_session: &'a std::collections::HashMap<Uuid, u64>,
     pub agent_busy: bool,
     pub activity_status: String,
+    pub rate_limits: Option<&'a ApiCallRateLimitReport>,
     #[cfg(feature = "stylos")]
     pub stylos_status: Option<String>,
 }
@@ -433,6 +434,9 @@ pub(crate) fn build_app_snapshot(
                     .copied(),
             })
             .collect(),
+        rate_limits: state
+            .rate_limits
+            .and_then(|report| serde_json::to_value(report).ok()),
         #[cfg(feature = "stylos")]
         stylos_status: state.stylos_status,
         #[cfg(feature = "stylos")]
@@ -488,6 +492,7 @@ impl AppRuntimeObserverPublisher {
             agent_activity_changed_at_by_session: snapshot.agent_activity_changed_at_by_session,
             agent_busy: snapshot.agent_busy,
             activity_status: snapshot.activity_status,
+            rate_limits: snapshot.rate_limits,
             #[cfg(feature = "stylos")]
             stylos_status: snapshot.stylos_status,
         });
@@ -534,6 +539,7 @@ pub(crate) struct AppRuntimeSnapshotPublishState<'a> {
     pub agent_activity_by_session:
         &'a std::collections::HashMap<Uuid, crate::app_state::AgentActivity>,
     pub agent_activity_changed_at_by_session: &'a std::collections::HashMap<Uuid, u64>,
+    pub rate_limits: Option<&'a ApiCallRateLimitReport>,
     #[cfg(feature = "stylos")]
     pub stylos_status: Option<String>,
     #[cfg(not(feature = "stylos"))]
@@ -550,12 +556,14 @@ impl<'a> AppRuntimeSnapshotPublishState<'a> {
             crate::app_state::AgentActivity,
         >,
         agent_activity_changed_at_by_session: &'a std::collections::HashMap<Uuid, u64>,
+        rate_limits: Option<&'a ApiCallRateLimitReport>,
     ) -> Self {
         Self {
             agent_busy,
             activity_status,
             agent_activity_by_session,
             agent_activity_changed_at_by_session,
+            rate_limits,
             _marker: std::marker::PhantomData,
         }
     }
