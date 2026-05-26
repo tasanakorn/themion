@@ -95,6 +95,8 @@ struct CodexStreamState {
     received_response_event: bool,
     streamed_notice_count: usize,
     streamed_rate_limits: Vec<RateLimitSnapshot>,
+    reasoning_summary: String,
+    streamed_reasoning_len: usize,
 }
 
 impl CodexStreamState {
@@ -112,6 +114,8 @@ impl CodexStreamState {
             received_response_event: false,
             streamed_notice_count: 0,
             streamed_rate_limits: Vec::new(),
+            reasoning_summary: String::new(),
+            streamed_reasoning_len: 0,
         }
     }
 
@@ -128,6 +132,16 @@ impl CodexStreamState {
                 on_status,
             );
         }
+    }
+
+    fn stream_pending_reasoning_summary(&mut self, on_status: &mut dyn FnMut(String)) {
+        let pending = self.reasoning_summary[self.streamed_reasoning_len..].trim();
+        if pending.is_empty() {
+            self.streamed_reasoning_len = self.reasoning_summary.len();
+            return;
+        }
+        self.streamed_reasoning_len = self.reasoning_summary.len();
+        self.record_notice(format!("thinking: {pending}"), on_status);
     }
 }
 
@@ -173,7 +187,7 @@ fn build_responses_api_body_from_parts(
         "stream": true,
     });
     if codex_model_supports_reasoning(model) && !reasoning_effort.trim().is_empty() {
-        body["reasoning"] = serde_json::json!({ "effort": reasoning_effort });
+        body["reasoning"] = serde_json::json!({ "effort": reasoning_effort, "summary": "auto" });
     }
     if translated_tools
         .as_array()
@@ -1065,6 +1079,9 @@ fn classify_codex_event(event_type: &str) -> CodexStreamEventCategory {
         "response.output_text.delta"
         | "response.function_call_arguments.delta"
         | "response.output_item.added"
+        | "response.reasoning_summary_text.delta"
+        | "response.reasoning_summary_part.done"
+        | "response.reasoning_text.delta"
         | "codex.rate_limits"
         | "response.completed"
         | "response.failed"
@@ -1077,6 +1094,7 @@ fn classify_codex_event(event_type: &str) -> CodexStreamEventCategory {
         | "response.output_item.done"
         | "response.content_part.done"
         | "response.output_text.done"
+        | "response.reasoning_summary_part.added"
         | "response.function_call_arguments.done"
         | "response.content_part.added" => CodexStreamEventCategory::KnownIgnored,
         _ => CodexStreamEventCategory::Unhandled,
@@ -1111,6 +1129,18 @@ fn process_codex_json_event(
                     }
                 }
             }
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                if let Some(delta) = data["delta"].as_str() {
+                    if !delta.is_empty() {
+                        state.reasoning_summary.push_str(delta);
+                    }
+                }
+            }
+            "response.reasoning_summary_part.done" => {
+                state.stream_pending_reasoning_summary(on_status);
+                state.reasoning_summary.push_str("\n\n");
+                state.streamed_reasoning_len = state.reasoning_summary.len();
+            }
             "response.output_item.added" => {
                 let item = &data["item"];
                 if item["type"] == "function_call" {
@@ -1135,6 +1165,7 @@ fn process_codex_json_event(
                     .push(parse_rate_limit_snapshot(data));
             }
             "response.completed" => {
+                state.stream_pending_reasoning_summary(on_status);
                 let completion_meta = parse_completion_meta(data);
                 state.record_notice("codex stream: response.completed".to_string(), on_status);
                 state.usage = combine_usage(state.usage.take(), completion_meta.usage.clone());
@@ -1392,6 +1423,7 @@ mod tests {
 
             assert_eq!(body["model"], model);
             assert_eq!(body["reasoning"]["effort"], "xhigh");
+            assert_eq!(body["reasoning"]["summary"], "auto");
         }
     }
 
@@ -1406,6 +1438,82 @@ mod tests {
         );
 
         assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn process_codex_json_event_streams_reasoning_summary_status() {
+        let mut state = CodexStreamState::new();
+        let mut statuses = Vec::new();
+        let mut chunks = Vec::new();
+        let done = {
+            let mut on_status = |text: String| statuses.push(text);
+            let mut on_chunk = |text: String| chunks.push(text);
+            process_codex_json_event(
+                "response.reasoning_summary_text.delta",
+                &serde_json::json!({
+                    "type": "response.reasoning_summary_text.delta",
+                    "delta": "checking context"
+                }),
+                &mut state,
+                &mut on_chunk,
+                &mut on_status,
+                None,
+            )
+            .expect("reasoning summary event should parse")
+        };
+
+        assert!(!done);
+        assert!(chunks.is_empty());
+        assert_eq!(state.reasoning_summary, "checking context");
+        assert!(statuses.is_empty());
+
+        {
+            let mut on_status = |text: String| statuses.push(text);
+            let mut on_chunk = |text: String| chunks.push(text);
+            process_codex_json_event(
+                "response.reasoning_summary_part.done",
+                &serde_json::json!({
+                    "type": "response.reasoning_summary_part.done"
+                }),
+                &mut state,
+                &mut on_chunk,
+                &mut on_status,
+                None,
+            )
+            .expect("reasoning summary done event should parse");
+        }
+
+        assert_eq!(statuses, vec!["thinking: checking context"]);
+    }
+
+    #[test]
+    fn process_codex_json_event_flushes_reasoning_summary_on_completion() {
+        let mut state = CodexStreamState::new();
+        let mut statuses = Vec::new();
+        let mut chunks = Vec::new();
+        let mut on_status = |text: String| statuses.push(text);
+        let mut on_chunk = |text: String| chunks.push(text);
+
+        process_codex_json_event(
+            "response.reasoning_text.delta",
+            &serde_json::json!({ "type": "response.reasoning_text.delta", "delta": "checking context" }),
+            &mut state,
+            &mut on_chunk,
+            &mut on_status,
+            None,
+        )
+        .expect("reasoning text event should parse");
+        process_codex_json_event(
+            "response.completed",
+            &serde_json::json!({ "type": "response.completed", "response": { "id": "resp_1" } }),
+            &mut state,
+            &mut on_chunk,
+            &mut on_status,
+            None,
+        )
+        .expect("completion event should parse");
+
+        assert_eq!(statuses[0], "thinking: checking context");
     }
 
     #[test]
