@@ -117,6 +117,25 @@ impl CodexStreamState {
         }
     }
 
+    fn has_partial_response_content(&self) -> bool {
+        !self.content.is_empty()
+            || !self.tool_slots.is_empty()
+            || !self.reasoning_summary.is_empty()
+    }
+
+    fn reset_for_reconnect(&mut self) {
+        self.response_message_id = None;
+        self.response_id = None;
+        self.content.clear();
+        self.tool_slots.clear();
+        self.usage = None;
+        self.completion_meta = None;
+        self.pending_completion = None;
+        self.received_response_event = false;
+        self.streamed_rate_limits.clear();
+        self.reasoning_summary.clear();
+    }
+
     fn record_notice(&mut self, text: String, on_status: &mut dyn FnMut(String)) {
         self.notices.push(text.clone());
         self.streamed_notice_count += 1;
@@ -397,17 +416,18 @@ impl CodexClient {
             match result {
                 Ok(()) => return Ok((response_status, rate_limit_snapshots, used_reconnect_body)),
                 Err(err) => {
+                    let has_partial_response_content = state.has_partial_response_content();
                     *guard = None;
-                    let can_retry_before_response = !received_response_event_before_request
-                        && !state.received_response_event
+                    let can_retry_without_duplicate_output = !has_partial_response_content
                         && retries_before_response < 2
                         && should_cancel.is_none_or(|cancel| !cancel());
-                    if can_retry_before_response {
+                    if can_retry_without_duplicate_output {
                         retries_before_response += 1;
                         if let Some(reconnect_body) = reconnect_body {
                             request_body = reconnect_body.clone();
                             used_reconnect_body = true;
                         }
+                        state.reset_for_reconnect();
                         on_status(format!(
                             "codex stream: websocket resuming after disconnect reused={} attempt={} error={}",
                             reused,
@@ -419,13 +439,20 @@ impl CodexClient {
                         }
                         continue;
                     }
-                    if state.received_response_event {
-                        on_status(
-                            "codex stream: websocket disconnected before response.completed"
-                                .to_string(),
-                        );
-                    }
-                    return Err(err.source);
+                    let close_context = if received_response_event_before_request
+                        || state.received_response_event
+                    {
+                        "after response events"
+                    } else {
+                        "before response events"
+                    };
+                    on_status(format!(
+                        "codex stream: websocket reconnect not safe {close_context} partial_content={has_partial_response_content}"
+                    ));
+                    return Err(anyhow!(
+                        "stream closed before response.completed: {}",
+                        err.source
+                    ));
                 }
             }
         }
@@ -541,7 +568,6 @@ async fn stream_responses_websocket_request(
 
         match message {
             Err(err) => {
-                on_status(format!("codex stream: websocket disconnected error={err}"));
                 return Err(anyhow!(err).into());
             }
             Ok(WsMessage::Text(text)) => {
