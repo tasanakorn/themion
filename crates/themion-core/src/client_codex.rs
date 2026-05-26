@@ -128,6 +128,7 @@ impl std::error::Error for ProviderApiError {}
 pub struct CodexClient {
     http: reqwest::Client,
     base_url: String,
+    prompt_cache_key: Option<String>,
     reasoning_effort: String,
     auth: Arc<RwLock<CodexAuth>>,
     auth_writer: Box<dyn Fn(&CodexAuth) -> Result<()> + Send + Sync>,
@@ -230,6 +231,7 @@ impl CodexStreamState {
 fn build_reasoning_payload(reasoning_effort: &str) -> Value {
     serde_json::json!({
         "effort": reasoning_effort,
+        "summary": "auto",
     })
 }
 
@@ -238,6 +240,7 @@ fn build_responses_api_body(
     messages: &[Message],
     tools: &Value,
     reasoning_effort: &str,
+    prompt_cache_key: Option<&str>,
 ) -> Value {
     let (instructions, input_items) = translate_messages(messages);
     let translated_tools = translate_tools(tools);
@@ -246,12 +249,21 @@ fn build_responses_api_body(
         "model": model,
         "reasoning": build_reasoning_payload(reasoning_effort),
         "store": false,
+        "parallel_tool_calls": true,
+        "tool_choice": "auto",
+        "text": {
+            "verbosity": "low",
+        },
+        "include": ["reasoning.encrypted_content"],
         "input": input_items,
         "tools": translated_tools,
         "stream": true,
     });
     if let Some(ref instr) = instructions {
         body["instructions"] = Value::String(instr.clone());
+    }
+    if let Some(cache_key) = prompt_cache_key {
+        body["prompt_cache_key"] = Value::String(cache_key.to_string());
     }
     body
 }
@@ -262,16 +274,26 @@ fn build_codex_continuation_body(
     previous_response_id: &str,
     response_message_id: Option<&str>,
     reasoning_effort: &str,
+    prompt_cache_key: Option<&str>,
 ) -> Value {
     let translated_tools = translate_tools(tools);
     let mut body = serde_json::json!({
         "model": model,
         "reasoning": build_reasoning_payload(reasoning_effort),
         "store": false,
+        "parallel_tool_calls": true,
+        "tool_choice": "auto",
+        "text": {
+            "verbosity": "low",
+        },
+        "include": ["reasoning.encrypted_content"],
         "tools": translated_tools,
         "stream": true,
         "previous_response_id": previous_response_id,
     });
+    if let Some(cache_key) = prompt_cache_key {
+        body["prompt_cache_key"] = Value::String(cache_key.to_string());
+    }
     if let Some(message_id) = response_message_id {
         body["input"] = serde_json::json!([
             {
@@ -289,6 +311,7 @@ fn build_codex_continuation_body(
 impl CodexClient {
     pub fn new(
         base_url: String,
+        prompt_cache_key: Option<String>,
         reasoning_effort: String,
         auth: CodexAuth,
         auth_writer: Box<dyn Fn(&CodexAuth) -> Result<()> + Send + Sync>,
@@ -296,6 +319,7 @@ impl CodexClient {
         Self {
             http: reqwest::Client::new(),
             base_url,
+            prompt_cache_key,
             reasoning_effort,
             auth: Arc::new(RwLock::new(auth)),
             auth_writer,
@@ -1225,7 +1249,13 @@ impl ChatBackend for CodexClient {
         messages: &[Message],
         tools: &Value,
     ) -> Value {
-        build_responses_api_body(model, messages, tools, &self.reasoning_effort)
+        build_responses_api_body(
+            model,
+            messages,
+            tools,
+            &self.reasoning_effort,
+            self.prompt_cache_key.as_deref(),
+        )
     }
 
     async fn chat_completion_stream(
@@ -1244,7 +1274,13 @@ impl ChatBackend for CodexClient {
     )> {
         let (access_token, account_id) = self.auth_headers().await?;
 
-        let initial_body = build_responses_api_body(model, messages, tools, &self.reasoning_effort);
+        let initial_body = build_responses_api_body(
+            model,
+            messages,
+            tools,
+            &self.reasoning_effort,
+            self.prompt_cache_key.as_deref(),
+        );
         let mut trace_request = initial_body.clone();
         let response = self
             .send_responses_request(&access_token, &account_id, &initial_body)
@@ -1288,6 +1324,7 @@ impl ChatBackend for CodexClient {
                         &previous_response_id,
                         state.response_message_id.as_deref(),
                         &self.reasoning_effort,
+                        self.prompt_cache_key.as_deref(),
                     );
                     trace_request = serde_json::json!({
                         "initial": initial_body,

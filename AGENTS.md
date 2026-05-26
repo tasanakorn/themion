@@ -242,6 +242,9 @@ Before finishing PRD implementation, check all of these:
 - Keep debug/protocol text formats consistent across producers, consumers, and tests.
 - For low-level/debug headers, prefer explicit `key=value` fields with a stable type tag.
 - Stylos logic belongs in runtime/orchestrator layers, not TUI.
+- When presenting tables in responses, pad each column with spaces so every
+  row has equal column widths. This keeps table borders and edges aligned,
+  making them readable by humans.
 - When delegating by board note, say exactly how the result should be returned.
 - If one web UI view updates and another stays stale, compare data sources before changing rendering.
 - After rebuilding `themion-cli --web` assets, hard refresh the browser and restart the web process before concluding the fix failed.

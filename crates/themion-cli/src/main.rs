@@ -74,6 +74,7 @@ pub struct Session {
     pub effort: String,
     pub system_prompt: String,
     pub model_info: Option<ModelInfo>,
+    pub tool_set: Option<themion_core::tools::ToolSet>,
     pub temporary_profile_override: Option<String>,
     pub temporary_model_override: Option<String>,
     pub temporary_effort_override: Option<String>,
@@ -93,6 +94,7 @@ impl Session {
             effort: cfg.effort,
             system_prompt: cfg.system_prompt,
             model_info: None,
+            tool_set: cfg.tool_set,
             temporary_profile_override: None,
             temporary_model_override: None,
             temporary_effort_override: None,
@@ -173,6 +175,7 @@ Options:
   --command     Run an explicit non-prompt CLI command
   --full        Rebuild generalized unified-search indexes for the selected project
   --source-kind Limit unified-search indexing to one source kind: memory, chat_message, tool_call, or tool_result
+  --tools       Reduce tool set: all (default), none, or minimal
   --help        Show this help",
         program_name
     );
@@ -200,6 +203,7 @@ fn main() -> anyhow::Result<()> {
         headless_mode,
         web_mode,
         web_bind_addr,
+        tools,
         command_mode,
         remaining_args,
     ) = {
@@ -207,6 +211,7 @@ fn main() -> anyhow::Result<()> {
         let mut headless = false;
         let mut web = false;
         let mut web_bind_addr: Option<String> = None;
+        let mut tools: Option<String> = None;
         let mut command_mode = false;
         let mut rest = Vec::new();
         let mut i = 0;
@@ -225,6 +230,11 @@ fn main() -> anyhow::Result<()> {
                 if i < args.len() {
                     web_bind_addr = Some(args[i].clone());
                 }
+            } else if args[i] == "--tools" {
+                i += 1;
+                if i < args.len() {
+                    tools = Some(args[i].clone());
+                }
             } else if args[i] == "--command" {
                 command_mode = true;
             } else {
@@ -232,8 +242,14 @@ fn main() -> anyhow::Result<()> {
             }
             i += 1;
         }
-        (dir, headless, web, web_bind_addr, command_mode, rest)
+        (dir, headless, web, web_bind_addr, tools, command_mode, rest)
     };
+
+    let mut cfg = cfg;
+    if let Some(raw) = tools {
+        cfg.tool_set =
+            Some(themion_core::tools::ToolSet::parse(&raw).map_err(|e| anyhow::anyhow!("{e}"))?);
+    }
 
     if command_mode {
         println!("{startup_banner}");

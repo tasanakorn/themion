@@ -738,6 +738,9 @@ fn build_agent(
             })?;
             Box::new(CodexClient::new(
                 bootstrap.base_url.clone(),
+                Some(format!("session_{}", session_id)),
+                // reasoning_effort defaults to empty for web context
+                String::new(),
                 auth,
                 Box::new(move |auth: &CodexAuth| save_codex_auth_for_profile(&profile_name, auth)),
             ))

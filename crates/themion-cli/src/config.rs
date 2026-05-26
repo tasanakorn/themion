@@ -88,6 +88,7 @@ pub struct Config {
     pub system_prompt: String,
     pub stylos: StylosConfig,
     pub schedule: ScheduleConfig,
+    pub tool_set: Option<themion_core::tools::ToolSet>,
 }
 
 const DEFAULT_SYSTEM_PROMPT: &str = r#"You are an expert coding assistant operating inside Themion, a terminal-based coding agent. You help users by reading files, executing commands, editing code, and writing new files.
@@ -338,6 +339,7 @@ impl Config {
             system_prompt,
             stylos: file_config.stylos.unwrap_or_default(),
             schedule: file_config.schedule.unwrap_or_default(),
+            tool_set: None,
         })
     }
 }

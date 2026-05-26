@@ -1211,6 +1211,7 @@ pub struct ToolCtx {
     pub stylos_enabled: bool,
     pub local_agent_tool_invoker: Option<LocalAgentToolInvoker>,
     pub source_analysis_tool_invoker: Option<SourceAnalysisToolInvoker>,
+    pub tool_set: Option<ToolSet>,
     pub system_inspection: Option<SystemInspectionResult>,
 }
 
@@ -1528,7 +1529,54 @@ fn truncate_output_with_notice(text: &str, limit: usize) -> String {
     )
 }
 
-pub fn tool_definitions() -> Value {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolSet {
+    All,
+    None,
+    Minimal,
+}
+
+impl ToolSet {
+    fn allows(self, name: &str) -> bool {
+        match self {
+            ToolSet::All => true,
+            ToolSet::None => false,
+            ToolSet::Minimal => {
+                MINIMAL_TOOL_NAMES.contains(&name)
+                    || matches!(name, "read_file" | "write_file" | "list_directory" | "bash")
+            }
+        }
+    }
+
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "all" | "" => Ok(ToolSet::All),
+            "none" => Ok(ToolSet::None),
+            "minimal" => Ok(ToolSet::Minimal),
+            other => Err(format!(
+                "unknown --tools value: {other} (expected all, none, or minimal)"
+            )),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            ToolSet::All => "all",
+            ToolSet::None => "none",
+            ToolSet::Minimal => "minimal",
+        }
+    }
+}
+
+const MINIMAL_TOOL_NAMES: &[&str] = &[
+    "fs_read_file",
+    "fs_write_file",
+    "fs_patch",
+    "fs_list_directory",
+    "shell_run_command",
+];
+
+pub fn tool_definitions(tool_set: Option<&ToolSet>) -> Value {
     let mut base_defs = vec![
         json!({
             "type": "function",
@@ -1922,6 +1970,17 @@ pub fn tool_definitions() -> Value {
     ];
     base_defs.extend(memory_tool_definitions());
 
+    if let Some(ToolSet::None) = tool_set {
+        return Value::Array(vec![]);
+    }
+    if let Some(ToolSet::Minimal) = tool_set {
+        base_defs.retain(|def| {
+            def["function"]["name"]
+                .as_str()
+                .map_or(false, |n| MINIMAL_TOOL_NAMES.contains(&n))
+        });
+    }
+
     #[cfg(feature = "stylos")]
     let defs = {
         let mut defs = base_defs;
@@ -1993,6 +2052,12 @@ pub async fn call_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> String {
 }
 
 async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<String> {
+    if let Some(tool_set) = ctx.tool_set {
+        if !tool_set.allows(name) {
+            anyhow::bail!("tool '{name}' is disabled by --tools {}", tool_set.label());
+        }
+    }
+
     let args: Value = serde_json::from_str(args_json)?;
 
     match name {
@@ -2662,7 +2727,7 @@ async fn execute_tool(name: &str, args_json: &str, ctx: &ToolCtx) -> Result<Stri
                     warnings: Vec::new(),
                     issues: Vec::new(),
                 };
-                let tool_names = tool_definitions()
+                let tool_names = tool_definitions(None)
                     .as_array()
                     .into_iter()
                     .flat_map(|defs| defs.iter())
@@ -2757,6 +2822,7 @@ mod tests {
             stylos_enabled: false,
             local_agent_tool_invoker: None,
             source_analysis_tool_invoker: None,
+            tool_set: None,
             system_inspection: None,
         }
     }
@@ -2771,7 +2837,7 @@ mod tests {
 
     #[tokio::test]
     async fn workflow_tool_definitions_expose_only_get_and_set() {
-        let defs = tool_definitions();
+        let defs = tool_definitions(None);
         let functions = defs.as_array().expect("tool definitions array");
         assert!(functions
             .iter()
@@ -2974,7 +3040,7 @@ mod tests {
 
     #[test]
     fn tool_definitions_include_fs_patch_schema() {
-        let defs = tool_definitions();
+        let defs = tool_definitions(None);
         let functions = defs.as_array().expect("tool definitions array");
         let fs_patch = functions
             .iter()

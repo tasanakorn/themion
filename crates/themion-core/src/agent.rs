@@ -461,6 +461,7 @@ pub struct Agent {
     local_agent_tool_invoker: Option<crate::tools::LocalAgentToolInvoker>,
     source_analysis_tool_invoker: Option<crate::tools::SourceAnalysisToolInvoker>,
     system_inspection: Option<crate::tools::SystemInspectionResult>,
+    tool_set: Option<crate::tools::ToolSet>,
     api_log_enabled: bool,
     build_identity: Option<BuildIdentity>,
 }
@@ -514,6 +515,7 @@ impl Agent {
             local_agent_tool_invoker: None,
             source_analysis_tool_invoker: None,
             system_inspection: None,
+            tool_set: None,
             api_log_enabled: false,
             build_identity: None,
         }
@@ -582,6 +584,7 @@ impl Agent {
             local_agent_tool_invoker: None,
             source_analysis_tool_invoker: None,
             system_inspection: None,
+            tool_set: None,
             api_log_enabled: false,
             build_identity: None,
         }
@@ -652,6 +655,10 @@ impl Agent {
         invoker: Option<crate::tools::SourceAnalysisToolInvoker>,
     ) {
         self.source_analysis_tool_invoker = invoker;
+    }
+
+    pub fn set_tool_set(&mut self, tool_set: Option<crate::tools::ToolSet>) {
+        self.tool_set = tool_set;
     }
 
     pub fn set_api_log_enabled(&mut self, enabled: bool) {
@@ -939,7 +946,7 @@ impl Agent {
             tool_estimate: None,
         });
 
-        let tool_defs = tools::tool_definitions();
+        let tool_defs = tools::tool_definitions(self.tool_set.as_ref());
         let tool_defs_text = serde_json::to_string(&tool_defs).unwrap_or_default();
         let tool_estimate = codex_responses_effective_tool_estimate(
             self.provider.as_deref(),
@@ -1756,7 +1763,7 @@ impl Agent {
             .await?;
 
         let turn_start = Instant::now();
-        let tool_defs = tools::tool_definitions();
+        let tool_defs = tools::tool_definitions(self.tool_set.as_ref());
         let mut final_response = String::new();
 
         let mut llm_rounds = 0u32;
@@ -2132,6 +2139,7 @@ impl Agent {
                     stylos_enabled: self.stylos_tool_invoker.is_some(),
                     local_agent_tool_invoker: self.local_agent_tool_invoker.clone(),
                     source_analysis_tool_invoker: self.source_analysis_tool_invoker.clone(),
+                    tool_set: self.tool_set,
                     system_inspection: self.system_inspection.clone(),
                 };
                 let result =

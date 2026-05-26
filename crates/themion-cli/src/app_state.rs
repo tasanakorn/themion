@@ -2812,6 +2812,7 @@ pub fn build_agent(
             })?;
             Box::new(CodexClient::new(
                 session.base_url.clone(),
+                Some(format!("session_{}", session_id)),
                 session.effort.clone(),
                 auth,
                 Box::new(move |a: &themion_core::CodexAuth| {
@@ -2858,6 +2859,7 @@ pub fn build_agent(
     agent.set_system_inspection(system_inspection);
     agent.set_local_agent_tool_invoker(local_agent_tool_invoker);
     agent.set_source_analysis_tool_invoker(source_analysis_tool_invoker);
+    agent.set_tool_set(session.tool_set);
     agent.set_local_agent_role_context(local_role_agent_id, local_role_label, local_role_roles);
 
     #[cfg(feature = "stylos")]

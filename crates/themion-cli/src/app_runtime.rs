@@ -952,9 +952,37 @@ pub(crate) fn execute_runtime_command(
             lines.push(format!(
                 "{}={} saved",
                 key,
-                if key == "api_key" { "(set)" } else { saved_value.as_str() }
+                if key == "api_key" {
+                    "(set)"
+                } else {
+                    saved_value.as_str()
+                }
             ));
-            RuntimeCommandOutcome::Lines(lines)
+            match build_replacement_main_agent(AgentReplacementParams {
+                session: context.session,
+                project_dir: context.project_dir,
+                db: context.db,
+                #[cfg(feature = "stylos")]
+                stylos_tool_bridge: context.stylos_tool_bridge,
+                #[cfg(feature = "stylos")]
+                local_instance_id: context.local_instance_id,
+                api_log_enabled: context.api_log_enabled,
+                local_agent_mgmt_tx: context.local_agent_mgmt_tx,
+                insert_session: true,
+            }) {
+                Ok(new_agent) => RuntimeCommandOutcome::ReplaceMasterAgent {
+                    replacement: AgentReplacement {
+                        new_agent,
+                        preserve_session_id: true,
+                        deferred_if_busy: true,
+                    },
+                    output_lines: lines,
+                },
+                Err(e) => {
+                    lines.push(format!("error building agent: {}", e));
+                    RuntimeCommandOutcome::Lines(lines)
+                }
+            }
         }
         RuntimeCommand::SetApiLogEnabled { enabled } => {
             RuntimeCommandOutcome::SetInteractiveApiLogEnabled {
@@ -1444,7 +1472,7 @@ pub(crate) fn build_system_inspection_snapshot(
             .push("provider base_url is empty".to_string());
     }
 
-    let tool_names = themion_core::tools::tool_definitions()
+    let tool_names = themion_core::tools::tool_definitions(session.tool_set.as_ref())
         .as_array()
         .into_iter()
         .flat_map(|defs| defs.iter())
