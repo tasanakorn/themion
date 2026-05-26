@@ -27,18 +27,29 @@ pub struct CodexClient {
     http: reqwest::Client,
     base_url: String,
     prompt_cache_key: Option<String>,
+    reasoning_effort: String,
     user_agent: String,
     session_id: String,
     thread_id: String,
     auth: Arc<RwLock<CodexAuth>>,
     auth_writer: Box<dyn Fn(&CodexAuth) -> Result<()> + Send + Sync>,
     websocket: Arc<Mutex<Option<CodexWebsocketConnection>>>,
+    prompt_context: Arc<Mutex<Option<CodexPromptContext>>>,
 }
 
 struct CodexWebsocketConnection {
     stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
     status: u16,
     upgrade_rate_limits: Vec<RateLimitSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+struct CodexPromptContext {
+    model: String,
+    instructions: String,
+    tools: Value,
+    input_items: Vec<Value>,
+    response_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,23 +136,45 @@ fn build_responses_api_body(
     messages: &[Message],
     tools: &Value,
     prompt_cache_key: Option<&str>,
+    reasoning_effort: &str,
 ) -> Value {
     let (instructions, input_items) = translate_messages(messages);
+    let instructions = instructions.unwrap_or_else(|| "You are a helpful assistant.".to_string());
     let translated_tools = translate_tools(tools);
+    build_responses_api_body_from_parts(
+        model,
+        instructions,
+        input_items,
+        translated_tools,
+        prompt_cache_key,
+        None,
+        reasoning_effort,
+    )
+}
 
+fn build_responses_api_body_from_parts(
+    model: &str,
+    instructions: String,
+    input_items: Vec<Value>,
+    translated_tools: Value,
+    prompt_cache_key: Option<&str>,
+    previous_response_id: Option<&str>,
+    reasoning_effort: &str,
+) -> Value {
     let mut body = serde_json::json!({
         "model": model,
         "store": false,
         "parallel_tool_calls": true,
         "tool_choice": "auto",
-        "text": {
-            "verbosity": "low",
-        },
+        "text": { "verbosity": "low" },
         "include": ["reasoning.encrypted_content"],
-        "instructions": instructions.unwrap_or_else(|| "You are a helpful assistant.".to_string()),
+        "instructions": instructions,
         "input": input_items,
         "stream": true,
     });
+    if codex_model_supports_reasoning(model) && !reasoning_effort.trim().is_empty() {
+        body["reasoning"] = serde_json::json!({ "effort": reasoning_effort });
+    }
     if translated_tools
         .as_array()
         .is_some_and(|tools| !tools.is_empty())
@@ -151,7 +184,14 @@ fn build_responses_api_body(
     if let Some(cache_key) = prompt_cache_key {
         body["prompt_cache_key"] = Value::String(cache_key.to_string());
     }
+    if let Some(response_id) = previous_response_id {
+        body["previous_response_id"] = Value::String(response_id.to_string());
+    }
     body
+}
+
+fn codex_model_supports_reasoning(model: &str) -> bool {
+    matches!(model, "gpt-5.4" | "gpt-5.5")
 }
 
 fn build_codex_user_agent() -> String {
@@ -169,7 +209,7 @@ impl CodexClient {
     pub fn new(
         base_url: String,
         prompt_cache_key: Option<String>,
-        _reasoning_effort: String,
+        reasoning_effort: String,
         auth: CodexAuth,
         auth_writer: Box<dyn Fn(&CodexAuth) -> Result<()> + Send + Sync>,
     ) -> Self {
@@ -182,12 +222,14 @@ impl CodexClient {
             http: reqwest::Client::new(),
             base_url,
             prompt_cache_key,
+            reasoning_effort,
             user_agent: build_codex_user_agent(),
             session_id: request_id.clone(),
             thread_id: request_id,
             auth: Arc::new(RwLock::new(auth)),
             auth_writer,
             websocket: Arc::new(Mutex::new(None)),
+            prompt_context: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -304,13 +346,17 @@ impl CodexClient {
         access_token: &str,
         account_id: &str,
         body: &Value,
+        reconnect_body: Option<&Value>,
+        reconnect_status_line: Option<&str>,
         state: &mut CodexStreamState,
         on_chunk: &mut (dyn FnMut(String) + Send),
         on_status: &mut (dyn FnMut(String) + Send),
         should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
-    ) -> Result<(u16, Vec<RateLimitSnapshot>)> {
+    ) -> Result<(u16, Vec<RateLimitSnapshot>, bool)> {
         let mut guard = self.websocket.lock().await;
-        let mut retry_stale_reuse = true;
+        let mut retries_before_response = 0;
+        let mut request_body = body.clone();
+        let mut used_reconnect_body = false;
 
         loop {
             let reused = guard.is_some();
@@ -336,7 +382,7 @@ impl CodexClient {
 
             let result = stream_responses_websocket_request(
                 connection,
-                body,
+                &request_body,
                 state,
                 on_chunk,
                 on_status,
@@ -345,20 +391,28 @@ impl CodexClient {
             .await;
 
             match result {
-                Ok(()) => return Ok((response_status, rate_limit_snapshots)),
+                Ok(()) => return Ok((response_status, rate_limit_snapshots, used_reconnect_body)),
                 Err(err) => {
                     *guard = None;
-                    let can_retry_stale_reuse = reused
-                        && retry_stale_reuse
-                        && !received_response_event_before_request
+                    let can_retry_before_response = !received_response_event_before_request
                         && !state.received_response_event
+                        && retries_before_response < 2
                         && should_cancel.is_none_or(|cancel| !cancel());
-                    if can_retry_stale_reuse {
-                        retry_stale_reuse = false;
+                    if can_retry_before_response {
+                        retries_before_response += 1;
+                        if let Some(reconnect_body) = reconnect_body {
+                            request_body = reconnect_body.clone();
+                            used_reconnect_body = true;
+                        }
                         on_status(format!(
-                            "codex stream: websocket reconnecting after stale connection error={}",
+                            "codex stream: websocket resuming after disconnect reused={} attempt={} error={}",
+                            reused,
+                            retries_before_response,
                             err.source
                         ));
+                        if let Some(status_line) = reconnect_status_line {
+                            on_status(status_line.to_string());
+                        }
                         continue;
                     }
                     if state.received_response_event {
@@ -622,6 +676,150 @@ fn parse_credits(value: &Value) -> Option<CreditsSnapshot> {
     })
 }
 
+#[derive(Debug, Clone)]
+struct CodexPromptPlan {
+    body: Value,
+    full_body: Value,
+    full_input_items: Vec<Value>,
+    instructions: String,
+    translated_tools: Value,
+    mode: CodexPromptInputMode,
+}
+
+#[derive(Debug, Clone)]
+enum CodexPromptInputMode {
+    Full {
+        reason: &'static str,
+        sent_items: usize,
+    },
+    Incremental {
+        previous_response_id: String,
+        reused_items: usize,
+        sent_items: usize,
+    },
+}
+
+impl CodexPromptInputMode {
+    fn status_line(&self) -> String {
+        match self {
+            CodexPromptInputMode::Full { reason, sent_items } => {
+                format!("codex stream: prompt input mode=full reason={reason} sent_items={sent_items}")
+            }
+            CodexPromptInputMode::Incremental {
+                previous_response_id,
+                reused_items,
+                sent_items,
+            } => format!(
+                "codex stream: prompt input mode=incremental previous_response_id={} reused_items={} sent_items={}",
+                short_response_id(previous_response_id),
+                reused_items,
+                sent_items
+            ),
+        }
+    }
+}
+
+fn short_response_id(response_id: &str) -> String {
+    if response_id.len() <= 14 {
+        response_id.to_string()
+    } else {
+        format!("{}..", &response_id[..12])
+    }
+}
+
+fn plan_codex_prompt_request(
+    model: &str,
+    messages: &[Message],
+    tools: &Value,
+    prompt_cache_key: Option<&str>,
+    previous_context: Option<&CodexPromptContext>,
+    incremental_allowed: bool,
+    reasoning_effort: &str,
+) -> CodexPromptPlan {
+    let (instructions, full_input_items) = translate_messages(messages);
+    let instructions = instructions.unwrap_or_else(|| "You are a helpful assistant.".to_string());
+    let translated_tools = translate_tools(tools);
+
+    let full_body = build_responses_api_body_from_parts(
+        model,
+        instructions.clone(),
+        full_input_items.clone(),
+        translated_tools.clone(),
+        prompt_cache_key,
+        None,
+        reasoning_effort,
+    );
+
+    let incremental = incremental_allowed
+        .then_some(())
+        .and_then(|_| previous_context)
+        .and_then(|context| {
+            if context.model != model {
+                return None;
+            }
+            if context.instructions != instructions {
+                return None;
+            }
+            if context.tools != translated_tools {
+                return None;
+            }
+            let reused_items =
+                common_codex_item_prefix_len(&context.input_items, &full_input_items);
+            if reused_items == 0 || reused_items < context.input_items.len() {
+                return None;
+            }
+            let suffix = full_input_items.get(reused_items..)?.to_vec();
+            if suffix.is_empty() {
+                return None;
+            }
+            Some((context.response_id.clone(), reused_items, suffix))
+        });
+
+    let (body, mode) = if let Some((previous_response_id, reused_items, suffix)) = incremental {
+        let sent_items = suffix.len();
+        (
+            build_responses_api_body_from_parts(
+                model,
+                instructions.clone(),
+                suffix,
+                translated_tools.clone(),
+                prompt_cache_key,
+                Some(&previous_response_id),
+                reasoning_effort,
+            ),
+            CodexPromptInputMode::Incremental {
+                previous_response_id,
+                reused_items,
+                sent_items,
+            },
+        )
+    } else {
+        let sent_items = full_input_items.len();
+        (
+            full_body.clone(),
+            CodexPromptInputMode::Full {
+                reason: if previous_context.is_some() && !incremental_allowed {
+                    "websocket_reconnected"
+                } else if previous_context.is_some() {
+                    "context_changed"
+                } else {
+                    "no_previous_context"
+                },
+                sent_items,
+            },
+        )
+    };
+
+    CodexPromptPlan {
+        body,
+        full_body,
+        full_input_items,
+        instructions,
+        translated_tools,
+        mode,
+    }
+}
+
 fn translate_messages(messages: &[Message]) -> (Option<String>, Vec<Value>) {
     let mut instructions: Option<String> = None;
     let mut items: Vec<Value> = Vec::new();
@@ -736,6 +934,44 @@ fn translate_tools(tools: &Value) -> Value {
         })
         .collect();
     Value::Array(translated)
+}
+
+fn translated_response_items(response: &ResponseMessage) -> Vec<Value> {
+    let message = Message {
+        role: response.role.clone(),
+        content: response.content.clone(),
+        tool_calls: response.tool_calls.clone(),
+        tool_call_id: None,
+    };
+    let (_, items) = translate_messages(&[message]);
+    items
+}
+
+fn common_codex_item_prefix_len(previous: &[Value], next: &[Value]) -> usize {
+    previous
+        .iter()
+        .zip(next.iter())
+        .take_while(|(left, right)| codex_items_match_ignoring_generated_ids(left, right))
+        .count()
+}
+
+fn codex_items_match_ignoring_generated_ids(left: &Value, right: &Value) -> bool {
+    strip_codex_generated_ids(left) == strip_codex_generated_ids(right)
+}
+
+fn strip_codex_generated_ids(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let filtered = map
+                .iter()
+                .filter(|(key, _)| key.as_str() != "id")
+                .map(|(key, value)| (key.clone(), strip_codex_generated_ids(value)))
+                .collect();
+            Value::Object(filtered)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(strip_codex_generated_ids).collect()),
+        _ => value.clone(),
+    }
 }
 
 fn combine_usage(existing: Option<Usage>, next: Option<Usage>) -> Option<Usage> {
@@ -928,7 +1164,13 @@ impl ChatBackend for CodexClient {
         messages: &[Message],
         tools: &Value,
     ) -> Value {
-        build_responses_api_body(model, messages, tools, self.prompt_cache_key.as_deref())
+        build_responses_api_body(
+            model,
+            messages,
+            tools,
+            self.prompt_cache_key.as_deref(),
+            &self.reasoning_effort,
+        )
     }
 
     async fn chat_completion_stream(
@@ -952,28 +1194,52 @@ impl ChatBackend for CodexClient {
             "codex stream: generating prompt model={model} messages={} tools={tool_count}",
             messages.len()
         ));
-        let initial_body =
-            build_responses_api_body(model, messages, tools, self.prompt_cache_key.as_deref());
-        let trace_request = serde_json::json!({
-            "transport": "websocket",
-            "request": initial_body.clone(),
-        });
+        let incremental_allowed = self.websocket.lock().await.is_some();
+        let previous_context = self.prompt_context.lock().await.clone();
+        let prompt_plan = plan_codex_prompt_request(
+            model,
+            messages,
+            tools,
+            self.prompt_cache_key.as_deref(),
+            previous_context.as_ref(),
+            incremental_allowed,
+            &self.reasoning_effort,
+        );
+        on_status(prompt_plan.mode.status_line());
         on_status(format!(
             "codex stream: sending websocket model={model} session_id={}",
             short_session_id(&self.session_id)
         ));
         let mut state = CodexStreamState::new();
-        let (response_status, mut rate_limit_snapshots) = self
+        let reconnect_mode = CodexPromptInputMode::Full {
+            reason: "websocket_reconnected",
+            sent_items: prompt_plan.full_input_items.len(),
+        };
+        let reconnect_status_line = reconnect_mode.status_line();
+        let (response_status, mut rate_limit_snapshots, used_reconnect_body) = self
             .stream_responses_websocket(
                 &access_token,
                 &account_id,
-                &initial_body,
+                &prompt_plan.body,
+                Some(&prompt_plan.full_body),
+                Some(&reconnect_status_line),
                 &mut state,
                 &mut *on_chunk,
                 &mut *on_status,
                 should_cancel.as_deref(),
             )
             .await?;
+
+        let prompt_input_mode = if used_reconnect_body {
+            reconnect_status_line
+        } else {
+            prompt_plan.mode.status_line()
+        };
+        let trace_request = serde_json::json!({
+            "transport": "websocket",
+            "prompt_input_mode": prompt_input_mode,
+            "request": if used_reconnect_body { prompt_plan.full_body.clone() } else { prompt_plan.body.clone() },
+        });
 
         if let Some(meta) = state.pending_completion.take() {
             state.response_id = meta.response_id.clone();
@@ -1018,12 +1284,24 @@ impl ChatBackend for CodexClient {
             },
             tool_calls,
         };
+        if let Some(response_id) = state.response_id.clone() {
+            let mut input_items = prompt_plan.full_input_items;
+            input_items.extend(translated_response_items(&message));
+            *self.prompt_context.lock().await = Some(CodexPromptContext {
+                model: model.to_string(),
+                instructions: prompt_plan.instructions,
+                tools: prompt_plan.translated_tools,
+                input_items,
+                response_id,
+            });
+        }
+
         let trace = ChatRoundTrace {
             backend: "responses".to_string(),
             request: trace_request,
             response: Some(serde_json::json!({
-                "message": message,
-                "codex_completion": state.completion_meta,
+                "message": &message,
+                "codex_completion": &state.completion_meta,
             })),
             error: None,
             http_status: Some(response_status),
@@ -1065,5 +1343,151 @@ impl ChatBackend for CodexClient {
             context_window: m.context_window,
             max_context_window: m.max_context_window,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user_message() -> Vec<Message> {
+        vec![Message {
+            role: "user".to_string(),
+            content: Some("hello".to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        }]
+    }
+
+    #[test]
+    fn responses_body_includes_reasoning_for_supported_codex_models() {
+        for model in ["gpt-5.4", "gpt-5.5"] {
+            let body = build_responses_api_body(
+                model,
+                &user_message(),
+                &serde_json::json!([]),
+                None,
+                "xhigh",
+            );
+
+            assert_eq!(body["model"], model);
+            assert_eq!(body["reasoning"]["effort"], "xhigh");
+        }
+    }
+
+    #[test]
+    fn responses_body_omits_reasoning_for_other_models() {
+        let body = build_responses_api_body(
+            "gpt-4o",
+            &user_message(),
+            &serde_json::json!([]),
+            None,
+            "high",
+        );
+
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn prompt_plan_uses_incremental_when_context_matches_and_websocket_is_live() {
+        let previous_messages = vec![
+            Message {
+                role: "user".to_string(),
+                content: Some("hello".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: Some("hi".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+        let (_, previous_items) = translate_messages(&previous_messages);
+        let context = CodexPromptContext {
+            model: "gpt-5.4".to_string(),
+            instructions: "You are a helpful assistant.".to_string(),
+            tools: serde_json::json!([]),
+            input_items: previous_items,
+            response_id: "resp_previous".to_string(),
+        };
+        let mut next_messages = previous_messages;
+        next_messages.push(Message {
+            role: "user".to_string(),
+            content: Some("next".to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+
+        let plan = plan_codex_prompt_request(
+            "gpt-5.4",
+            &next_messages,
+            &serde_json::json!([]),
+            None,
+            Some(&context),
+            true,
+            "high",
+        );
+
+        assert_eq!(plan.body["previous_response_id"], "resp_previous");
+        assert_eq!(plan.body["input"].as_array().unwrap().len(), 1);
+        assert!(matches!(
+            plan.mode,
+            CodexPromptInputMode::Incremental { .. }
+        ));
+    }
+
+    #[test]
+    fn prompt_plan_forces_full_when_websocket_was_reconnected() {
+        let previous_messages = vec![
+            Message {
+                role: "user".to_string(),
+                content: Some("hello".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: Some("hi".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+        let (_, previous_items) = translate_messages(&previous_messages);
+        let context = CodexPromptContext {
+            model: "gpt-5.4".to_string(),
+            instructions: "You are a helpful assistant.".to_string(),
+            tools: serde_json::json!([]),
+            input_items: previous_items,
+            response_id: "resp_previous".to_string(),
+        };
+        let mut next_messages = previous_messages;
+        next_messages.push(Message {
+            role: "user".to_string(),
+            content: Some("next".to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+
+        let plan = plan_codex_prompt_request(
+            "gpt-5.4",
+            &next_messages,
+            &serde_json::json!([]),
+            None,
+            Some(&context),
+            false,
+            "high",
+        );
+
+        assert!(plan.body.get("previous_response_id").is_none());
+        assert_eq!(plan.body["input"].as_array().unwrap().len(), 3);
+        assert!(matches!(
+            plan.mode,
+            CodexPromptInputMode::Full {
+                reason: "websocket_reconnected",
+                ..
+            }
+        ));
     }
 }
