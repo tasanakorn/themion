@@ -81,6 +81,7 @@ struct CodexStreamState {
     pending_completion: Option<CodexCompletionMeta>,
     unhandled_notice_dedup: HashSet<String>,
     notices: Vec<String>,
+    received_response_event: bool,
     streamed_notice_count: usize,
     streamed_rate_limits: Vec<RateLimitSnapshot>,
 }
@@ -97,6 +98,7 @@ impl CodexStreamState {
             pending_completion: None,
             unhandled_notice_dedup: HashSet::new(),
             notices: Vec::new(),
+            received_response_event: false,
             streamed_notice_count: 0,
             streamed_rate_limits: Vec::new(),
         }
@@ -154,6 +156,13 @@ fn build_responses_api_body(
 
 fn build_codex_user_agent() -> String {
     format!("pi ({}; {})", std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn short_session_id(session_id: &str) -> String {
+    let Some(first_part) = session_id.split('-').next() else {
+        return session_id.to_string();
+    };
+    format!("{first_part}..")
 }
 
 impl CodexClient {
@@ -278,7 +287,7 @@ impl CodexClient {
         let started_at = std::time::Instant::now();
         let (stream, response) = tokio_tungstenite::connect_async(request).await?;
         on_status(format!(
-            "codex stream: connected websocket status={} elapsed_ms={}",
+            "codex stream: websocket connected status={} elapsed_ms={}",
             response.status().as_u16(),
             started_at.elapsed().as_millis()
         ));
@@ -301,41 +310,65 @@ impl CodexClient {
         should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
     ) -> Result<(u16, Vec<RateLimitSnapshot>)> {
         let mut guard = self.websocket.lock().await;
-        let reused = guard.is_some();
-        if guard.is_none() {
-            *guard = Some(
-                self.connect_responses_websocket(access_token, account_id, on_status)
-                    .await?,
-            );
-        } else {
-            on_status("codex stream: reusing websocket connection".to_string());
-        }
+        let mut retry_stale_reuse = true;
 
-        let connection = guard
-            .as_mut()
-            .ok_or_else(|| anyhow!("Codex websocket connection is unavailable"))?;
-        let response_status = connection.status;
-        let rate_limit_snapshots = if reused {
-            Vec::new()
-        } else {
-            connection.upgrade_rate_limits.clone()
-        };
+        loop {
+            let reused = guard.is_some();
+            if guard.is_none() {
+                *guard = Some(
+                    self.connect_responses_websocket(access_token, account_id, on_status)
+                        .await?,
+                );
+            } else {
+                on_status("codex stream: reusing websocket connection".to_string());
+            }
 
-        let result = stream_responses_websocket_request(
-            connection,
-            body,
-            state,
-            on_chunk,
-            on_status,
-            should_cancel,
-        )
-        .await;
+            let connection = guard
+                .as_mut()
+                .ok_or_else(|| anyhow!("Codex websocket connection is unavailable"))?;
+            let response_status = connection.status;
+            let rate_limit_snapshots = if reused {
+                Vec::new()
+            } else {
+                connection.upgrade_rate_limits.clone()
+            };
+            let received_response_event_before_request = state.received_response_event;
 
-        match result {
-            Ok(()) => Ok((response_status, rate_limit_snapshots)),
-            Err(err) => {
-                *guard = None;
-                Err(err)
+            let result = stream_responses_websocket_request(
+                connection,
+                body,
+                state,
+                on_chunk,
+                on_status,
+                should_cancel,
+            )
+            .await;
+
+            match result {
+                Ok(()) => return Ok((response_status, rate_limit_snapshots)),
+                Err(err) => {
+                    *guard = None;
+                    let can_retry_stale_reuse = reused
+                        && retry_stale_reuse
+                        && !received_response_event_before_request
+                        && !state.received_response_event
+                        && should_cancel.is_none_or(|cancel| !cancel());
+                    if can_retry_stale_reuse {
+                        retry_stale_reuse = false;
+                        on_status(format!(
+                            "codex stream: websocket reconnecting after stale connection error={}",
+                            err.source
+                        ));
+                        continue;
+                    }
+                    if state.received_response_event {
+                        on_status(
+                            "codex stream: websocket disconnected before response.completed"
+                                .to_string(),
+                        );
+                    }
+                    return Err(err.source);
+                }
             }
         }
     }
@@ -426,7 +459,7 @@ async fn stream_responses_websocket_request(
     on_chunk: &mut (dyn FnMut(String) + Send),
     on_status: &mut (dyn FnMut(String) + Send),
     should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
-) -> Result<()> {
+) -> std::result::Result<(), CodexWebsocketRequestError> {
     let mut request_body = body.clone();
     request_body["type"] = Value::String("response.create".to_string());
     connection
@@ -439,17 +472,25 @@ async fn stream_responses_websocket_request(
     loop {
         if should_cancel.is_some_and(|cancel| cancel()) {
             let _ = connection.stream.close(None).await;
-            anyhow::bail!("interrupted");
+            return Err(anyhow!("interrupted").into());
         }
 
         let Some(message) = connection.stream.next().await else {
-            return Err(anyhow!("Codex websocket closed before response.completed"));
+            on_status("codex stream: websocket disconnected".to_string());
+            return Err(anyhow!("Codex websocket closed before response.completed").into());
         };
 
-        match message? {
-            WsMessage::Text(text) => {
+        match message {
+            Err(err) => {
+                on_status(format!("codex stream: websocket disconnected error={err}"));
+                return Err(anyhow!(err).into());
+            }
+            Ok(WsMessage::Text(text)) => {
                 let data: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
                 let event_type = data["type"].as_str().unwrap_or("");
+                if !event_type.is_empty() {
+                    state.received_response_event = true;
+                }
                 let stream_done = process_codex_json_event(
                     event_type,
                     &data,
@@ -462,18 +503,43 @@ async fn stream_responses_websocket_request(
                     return Ok(());
                 }
             }
-            WsMessage::Close(_) => {
-                return Err(anyhow!("Codex websocket closed before response.completed"));
+            Ok(WsMessage::Close(_)) => {
+                on_status("codex stream: websocket disconnected".to_string());
+                return Err(anyhow!("Codex websocket closed before response.completed").into());
             }
-            WsMessage::Ping(payload) => {
+            Ok(WsMessage::Ping(payload)) => {
                 connection.stream.send(WsMessage::Pong(payload)).await?;
             }
-            WsMessage::Binary(_) => {
-                return Err(anyhow!(
-                    "Codex websocket returned unexpected binary message"
-                ));
+            Ok(WsMessage::Binary(_)) => {
+                return Err(anyhow!("Codex websocket returned unexpected binary message").into());
             }
-            WsMessage::Pong(_) | WsMessage::Frame(_) => {}
+            Ok(WsMessage::Pong(_)) | Ok(WsMessage::Frame(_)) => {}
+        }
+    }
+}
+
+struct CodexWebsocketRequestError {
+    source: anyhow::Error,
+}
+
+impl From<anyhow::Error> for CodexWebsocketRequestError {
+    fn from(source: anyhow::Error) -> Self {
+        Self { source }
+    }
+}
+
+impl From<serde_json::Error> for CodexWebsocketRequestError {
+    fn from(source: serde_json::Error) -> Self {
+        Self {
+            source: anyhow!(source),
+        }
+    }
+}
+
+impl From<tokio_tungstenite::tungstenite::Error> for CodexWebsocketRequestError {
+    fn from(source: tokio_tungstenite::tungstenite::Error) -> Self {
+        Self {
+            source: anyhow!(source),
         }
     }
 }
@@ -893,8 +959,8 @@ impl ChatBackend for CodexClient {
             "request": initial_body.clone(),
         });
         on_status(format!(
-            "codex stream: sending websocket endpoint=/responses model={model} session_id={}",
-            self.session_id
+            "codex stream: sending websocket model={model} session_id={}",
+            short_session_id(&self.session_id)
         ));
         let mut state = CodexStreamState::new();
         let (response_status, mut rate_limit_snapshots) = self
