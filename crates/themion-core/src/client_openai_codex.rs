@@ -600,8 +600,9 @@ impl From<tokio_tungstenite::tungstenite::Error> for CodexWebsocketRequestError 
 
 fn parse_rate_limit_snapshot(json: &Value) -> RateLimitSnapshot {
     let rate_limit = json
-        .get("rate_limit")
+        .get("rate_limits")
         .or_else(|| json.get("rateLimits"))
+        .or_else(|| json.get("rate_limit"))
         .and_then(|v| v.as_object());
 
     let primary = rate_limit
@@ -609,6 +610,7 @@ fn parse_rate_limit_snapshot(json: &Value) -> RateLimitSnapshot {
             rate_limit
                 .get("primary_window")
                 .or_else(|| rate_limit.get("primaryWindow"))
+                .or_else(|| rate_limit.get("primary"))
         })
         .and_then(parse_usage_window);
     let secondary = rate_limit
@@ -616,15 +618,24 @@ fn parse_rate_limit_snapshot(json: &Value) -> RateLimitSnapshot {
             rate_limit
                 .get("secondary_window")
                 .or_else(|| rate_limit.get("secondaryWindow"))
+                .or_else(|| rate_limit.get("secondary"))
         })
         .and_then(parse_usage_window);
     let credits = json
         .get("credits")
         .or_else(|| json.get("creditBalance"))
         .and_then(parse_credits);
+    let limit_id = json
+        .get("metered_limit_name")
+        .or_else(|| json.get("meteredLimitName"))
+        .or_else(|| json.get("limit_name"))
+        .or_else(|| json.get("limitName"))
+        .and_then(Value::as_str)
+        .map(crate::client_provider_types::normalize_limit_id)
+        .unwrap_or_else(|| "codex".to_string());
 
     RateLimitSnapshot {
-        limit_id: Some("codex".to_string()),
+        limit_id: Some(limit_id),
         limit_name: None,
         primary,
         secondary,
@@ -636,8 +647,10 @@ fn parse_usage_window(value: &Value) -> Option<RateLimitWindow> {
     let value = value.as_object()?;
     let used_percent = value
         .get("used_percent")
-        .or_else(|| value.get("usedPercent"))?
-        .as_f64()?;
+        .or_else(|| value.get("usedPercent"))?;
+    let used_percent = used_percent
+        .as_f64()
+        .or_else(|| used_percent.as_i64().map(|value| value as f64))?;
     let window_seconds = value
         .get("limit_window_seconds")
         .or_else(|| value.get("limitWindowSeconds"))
@@ -645,11 +658,15 @@ fn parse_usage_window(value: &Value) -> Option<RateLimitWindow> {
     let window_minutes = value
         .get("window_minutes")
         .or_else(|| value.get("windowMinutes"))
+        .or_else(|| value.get("limit_window_minutes"))
+        .or_else(|| value.get("limitWindowMinutes"))
         .and_then(Value::as_i64)
         .or_else(|| window_seconds.map(|seconds| (seconds + 59) / 60));
     let resets_at = value
         .get("reset_at")
         .or_else(|| value.get("resetAt"))
+        .or_else(|| value.get("resets_at"))
+        .or_else(|| value.get("resetsAt"))
         .and_then(Value::as_i64);
     Some(RateLimitWindow {
         used_percent,
@@ -663,6 +680,7 @@ fn parse_credits(value: &Value) -> Option<CreditsSnapshot> {
     Some(CreditsSnapshot {
         has_credits: value
             .get("has_credits")
+            .or_else(|| value.get("hasCredits"))
             .and_then(Value::as_bool)
             .unwrap_or(false),
         unlimited: value
@@ -671,6 +689,8 @@ fn parse_credits(value: &Value) -> Option<CreditsSnapshot> {
             .unwrap_or(false),
         balance: value
             .get("balance")
+            .or_else(|| value.get("credit_balance"))
+            .or_else(|| value.get("creditBalance"))
             .and_then(Value::as_str)
             .map(ToString::to_string),
     })
@@ -1489,5 +1509,44 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parse_rate_limit_snapshot_reads_websocket_event_shape() {
+        let snapshot = parse_rate_limit_snapshot(&serde_json::json!({
+            "type": "codex.rate_limits",
+            "rate_limits": {
+                "primary": {
+                    "used_percent": 42,
+                    "window_minutes": 300,
+                    "reset_at": 1700000000
+                },
+                "secondary": {
+                    "used_percent": 12.5,
+                    "window_minutes": 10080,
+                    "reset_at": 1700600000
+                }
+            },
+            "credits": {
+                "has_credits": true,
+                "unlimited": false,
+                "balance": "123"
+            },
+            "metered_limit_name": "codex_other"
+        }));
+
+        assert_eq!(snapshot.limit_id.as_deref(), Some("codex_other"));
+        let primary = snapshot.primary.expect("missing primary window");
+        assert_eq!(primary.used_percent, 42.0);
+        assert_eq!(primary.window_minutes, Some(300));
+        assert_eq!(primary.resets_at, Some(1700000000));
+        let secondary = snapshot.secondary.expect("missing secondary window");
+        assert_eq!(secondary.used_percent, 12.5);
+        assert_eq!(secondary.window_minutes, Some(10080));
+        assert_eq!(secondary.resets_at, Some(1700600000));
+        let credits = snapshot.credits.expect("missing credits");
+        assert!(credits.has_credits);
+        assert!(!credits.unlimited);
+        assert_eq!(credits.balance.as_deref(), Some("123"));
     }
 }
