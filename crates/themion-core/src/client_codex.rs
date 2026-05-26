@@ -321,8 +321,10 @@ impl CodexClient {
         auth_writer: Box<dyn Fn(&CodexAuth) -> Result<()> + Send + Sync>,
     ) -> Self {
         let request_id = prompt_cache_key
-            .clone()
-            .unwrap_or_else(|| format!("session_{}", Uuid::new_v4()));
+            .as_deref()
+            .and_then(|key| key.strip_prefix("session_"))
+            .map(ToString::to_string)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
         Self {
             http: reqwest::Client::new(),
             base_url,
@@ -1294,9 +1296,15 @@ impl ChatBackend for CodexClient {
             "codex stream: sending api endpoint=/responses model={model} session_id={}",
             self.session_id
         ));
+        let request_started_at = std::time::Instant::now();
         let response = self
             .send_responses_request(&access_token, &account_id, &initial_body)
             .await?;
+        on_status(format!(
+            "codex stream: received api response status={} elapsed_ms={}",
+            response.status().as_u16(),
+            request_started_at.elapsed().as_millis()
+        ));
 
         let response_headers = response.headers().clone();
         let response_status = response.status();
@@ -1345,9 +1353,17 @@ impl ChatBackend for CodexClient {
                         "codex stream: sending api endpoint=/responses model={model} continuation=true previous_response_id={previous_response_id} session_id={}",
                         self.session_id
                     ));
+                    let continuation_started_at = std::time::Instant::now();
                     let continuation_response = self
                         .send_responses_request(&access_token, &account_id, &continuation_body)
                         .await;
+                    if let Ok(response) = &continuation_response {
+                        on_status(format!(
+                            "codex stream: received api response status={} elapsed_ms={}",
+                            response.status().as_u16(),
+                            continuation_started_at.elapsed().as_millis()
+                        ));
+                    }
                     match continuation_response {
                         Ok(response) if response.status().is_success() => {
                             let headers = response.headers().clone();
