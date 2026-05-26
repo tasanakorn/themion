@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use crate::auth::CodexAuth;
 use crate::client::{
@@ -129,6 +130,9 @@ pub struct CodexClient {
     http: reqwest::Client,
     base_url: String,
     prompt_cache_key: Option<String>,
+    user_agent: String,
+    session_id: String,
+    thread_id: String,
     auth: Arc<RwLock<CodexAuth>>,
     auth_writer: Box<dyn Fn(&CodexAuth) -> Result<()> + Send + Sync>,
 }
@@ -304,6 +308,10 @@ fn build_codex_continuation_body(
     body
 }
 
+fn build_codex_user_agent() -> String {
+    format!("pi ({}; {})", std::env::consts::OS, std::env::consts::ARCH)
+}
+
 impl CodexClient {
     pub fn new(
         base_url: String,
@@ -312,10 +320,16 @@ impl CodexClient {
         auth: CodexAuth,
         auth_writer: Box<dyn Fn(&CodexAuth) -> Result<()> + Send + Sync>,
     ) -> Self {
+        let request_id = prompt_cache_key
+            .clone()
+            .unwrap_or_else(|| format!("session_{}", Uuid::new_v4()));
         Self {
             http: reqwest::Client::new(),
             base_url,
             prompt_cache_key,
+            user_agent: build_codex_user_agent(),
+            session_id: request_id.clone(),
+            thread_id: request_id,
             auth: Arc::new(RwLock::new(auth)),
             auth_writer,
         }
@@ -392,6 +406,10 @@ impl CodexClient {
             .header("Authorization", format!("Bearer {}", access_token))
             .header("chatgpt-account-id", account_id)
             .header("originator", "pi")
+            .header("User-Agent", &self.user_agent)
+            .header("session-id", &self.session_id)
+            .header("thread-id", &self.thread_id)
+            .header("x-client-request-id", &self.thread_id)
             .header("OpenAI-Beta", "responses=experimental")
             .header("accept", "text/event-stream")
             .json(body)
@@ -410,6 +428,7 @@ impl CodexClient {
             .header("Authorization", format!("Bearer {}", access_token))
             .header("chatgpt-account-id", &account_id)
             .header("originator", "pi")
+            .header("User-Agent", &self.user_agent)
             .send()
             .await?;
 
@@ -1418,6 +1437,7 @@ impl ChatBackend for CodexClient {
             .header("Authorization", format!("Bearer {}", access_token))
             .header("chatgpt-account-id", &account_id)
             .header("originator", "pi")
+            .header("User-Agent", &self.user_agent)
             .send()
             .await?;
 

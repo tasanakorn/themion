@@ -50,9 +50,13 @@ Requests to Codex backend endpoints include:
 - `Authorization: Bearer <access_token>`
 - `chatgpt-account-id: <account_id>`
 - `originator: pi`
+- `User-Agent: pi (<os>; <arch>)`
 
 Requests to `/responses` additionally include:
 
+- `session-id: <session id>`
+- `thread-id: <thread id>`
+- `x-client-request-id: <thread id>`
 - `OpenAI-Beta: responses=experimental`
 - `Accept: text/event-stream`
 
