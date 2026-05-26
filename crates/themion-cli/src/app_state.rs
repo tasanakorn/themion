@@ -1384,8 +1384,11 @@ pub(crate) fn publish_runtime_snapshot(app: &mut App) {
 
     #[cfg(feature = "stylos")]
     let stylos = app.runtime.stylos.as_ref().map(|_| {
-        let agent_status_entries =
-            crate::app_runtime::build_local_agent_status_entries(&app.runtime.agents);
+        let agent_status_entries = crate::app_runtime::build_local_agent_status_entries(
+            &app.runtime.agents,
+            &app.runtime.agent_activity_by_session,
+            &app.runtime.agent_activity_changed_at_by_session,
+        );
         crate::app_runtime::StylosRuntimeStatusPublishState {
             hub: &app.runtime.shared_status_hub,
             startup_project_dir: &app.runtime.startup_project_dir,
@@ -1914,7 +1917,8 @@ pub(crate) fn submit_text_to_agent(app: &mut App, agent_index: usize, text: Stri
     app.runtime.activity_counters.record_agent_turn_started();
     app.runtime.agent_busy = true;
     runtime_reset_stream_counters(&mut app.runtime);
-    set_agent_activity(app, AgentActivity::PreparingRequest);
+    let target_session_id = app.runtime.agents[agent_index].session_id;
+    set_agent_activity_for_session(app, target_session_id, AgentActivity::PreparingRequest);
 
     let runtime_launch =
         crate::app_runtime::prepare_agent_turn_runtime_launch(&mut app.runtime.agents, agent_index);
@@ -2106,7 +2110,11 @@ fn process_incoming_prompt_request(
 
     let outcome = crate::app_runtime::plan_incoming_prompt(
         &app.runtime.db,
-        &crate::app_runtime::build_local_agent_status_entries(&app.runtime.agents),
+        &crate::app_runtime::build_local_agent_status_entries(
+            &app.runtime.agents,
+            &app.runtime.agent_activity_by_session,
+            &app.runtime.agent_activity_changed_at_by_session,
+        ),
         &app.runtime.board_claims,
         request,
     );
@@ -2394,17 +2402,7 @@ fn handle_schedule_tick_local_event(app: &mut App) {
         return;
     };
     let claim_agent = task.target_agent_id.as_deref().unwrap_or("scheduler");
-    match app.runtime.db.claim_scheduled_task(
-        &task.schedule_id,
-        due_at_ms,
-        &local_instance,
-        &local_instance,
-        claim_agent,
-    ) {
-        Ok(true) => {}
-        _ => return,
-    }
-
+    // Determine the initial target agent before busy-policy resolution.
     let mut agent_index = if let Some(target) = task.target_agent_id.as_deref() {
         app.runtime.agents.iter().position(|h| h.agent_id == target)
     } else {
@@ -2516,6 +2514,22 @@ fn handle_schedule_tick_local_event(app: &mut App) {
                 }
             }
         }
+    }
+
+    // Claim the task with the actual handling agent, not the original target.
+    let actual_claim_agent = agent_index
+        .and_then(|i| app.runtime.agents.get(i))
+        .map(|h| h.agent_id.as_str())
+        .unwrap_or(claim_agent);
+    match app.runtime.db.claim_scheduled_task(
+        &task.schedule_id,
+        due_at_ms,
+        &local_instance,
+        &local_instance,
+        actual_claim_agent,
+    ) {
+        Ok(true) => {}
+        _ => return,
     }
     let Some(index) = agent_index else {
         return;

@@ -186,6 +186,8 @@ pub(crate) struct LocalAgentStatusEntry {
     pub workflow: Option<WorkflowState>,
     pub project_dir: Option<PathBuf>,
     pub busy: bool,
+    pub activity_status: Option<String>,
+    pub activity_status_changed_at_ms: Option<u64>,
 }
 
 pub(crate) fn local_agent_status_entry(
@@ -196,6 +198,8 @@ pub(crate) fn local_agent_status_entry(
     workflow: Option<WorkflowState>,
     project_dir: Option<PathBuf>,
     busy: bool,
+    activity_status: Option<String>,
+    activity_status_changed_at_ms: Option<u64>,
 ) -> LocalAgentStatusEntry {
     LocalAgentStatusEntry {
         agent_id: agent_id.into(),
@@ -205,6 +209,8 @@ pub(crate) fn local_agent_status_entry(
         workflow,
         project_dir,
         busy,
+        activity_status,
+        activity_status_changed_at_ms,
     }
 }
 
@@ -1586,6 +1592,8 @@ pub(crate) fn build_local_agent_status_entries_local(
                     .map(|agent| agent.workflow_state().clone()),
                 handle.agent.as_ref().map(|agent| agent.project_dir.clone()),
                 handle.busy,
+                None,
+                None,
             )
         })
         .collect()
@@ -1594,6 +1602,8 @@ pub(crate) fn build_local_agent_status_entries_local(
 #[cfg(feature = "stylos")]
 pub(crate) fn build_local_agent_status_entries(
     agents: &[crate::tui::AgentHandle],
+    activity_by_session: &std::collections::HashMap<Uuid, crate::app_state::AgentActivity>,
+    activity_changed_at_by_session: &std::collections::HashMap<Uuid, u64>,
 ) -> Vec<LocalAgentStatusEntry> {
     agents
         .iter()
@@ -1609,6 +1619,12 @@ pub(crate) fn build_local_agent_status_entries(
                     .map(|agent| agent.workflow_state().clone()),
                 handle.agent.as_ref().map(|agent| agent.project_dir.clone()),
                 handle.busy,
+                activity_by_session
+                    .get(&handle.session_id)
+                    .map(|activity| activity.label(0, 0)),
+                activity_changed_at_by_session
+                    .get(&handle.session_id)
+                    .copied(),
             )
         })
         .collect()
@@ -2260,6 +2276,8 @@ pub(crate) struct AgentSnapshotInput {
     pub session_id: String,
     pub workflow: Option<WorkflowState>,
     pub project_dir: Option<PathBuf>,
+    pub activity_status: Option<String>,
+    pub activity_status_changed_at_ms: Option<u64>,
 }
 
 #[cfg(feature = "stylos")]
@@ -2291,35 +2309,41 @@ pub(crate) fn build_stylos_status_snapshot_from_runtime(
         .into_iter()
         .enumerate()
         .map(|(idx, agent)| {
-            let (activity_status, activity_status_changed_at_ms) = if idx == 0 {
-                if let Some(activity_label) = input.primary_activity_label.as_ref() {
-                    (
-                        activity_label.clone(),
-                        input
-                            .primary_activity_changed_at_ms
-                            .unwrap_or_else(unix_epoch_now_ms),
-                    )
-                } else {
-                    const NAP_AFTER: Duration = Duration::from_secs(5 * 60);
-                    match input.idle_since {
-                        Some(idle_since) if idle_since.elapsed() > NAP_AFTER => (
-                            "nap".to_string(),
+            let (activity_status, activity_status_changed_at_ms) =
+                if let Some(activity_status) = agent.activity_status.clone() {
+                    let changed_at = agent
+                        .activity_status_changed_at_ms
+                        .unwrap_or_else(unix_epoch_now_ms);
+                    (activity_status, changed_at)
+                } else if idx == 0 {
+                    if let Some(activity_label) = input.primary_activity_label.as_ref() {
+                        (
+                            activity_label.clone(),
                             input
-                                .idle_status_changed_at
-                                .unwrap_or_else(unix_epoch_now_ms)
-                                + NAP_AFTER.as_millis() as u64,
-                        ),
-                        _ => (
-                            "idle".to_string(),
-                            input
-                                .idle_status_changed_at
+                                .primary_activity_changed_at_ms
                                 .unwrap_or_else(unix_epoch_now_ms),
-                        ),
+                        )
+                    } else {
+                        const NAP_AFTER: Duration = Duration::from_secs(5 * 60);
+                        match input.idle_since {
+                            Some(idle_since) if idle_since.elapsed() > NAP_AFTER => (
+                                "nap".to_string(),
+                                input
+                                    .idle_status_changed_at
+                                    .unwrap_or_else(unix_epoch_now_ms)
+                                    + NAP_AFTER.as_millis() as u64,
+                            ),
+                            _ => (
+                                "idle".to_string(),
+                                input
+                                    .idle_status_changed_at
+                                    .unwrap_or_else(unix_epoch_now_ms),
+                            ),
+                        }
                     }
-                }
-            } else {
-                ("idle".to_string(), unix_epoch_now_ms())
-            };
+                } else {
+                    ("idle".to_string(), unix_epoch_now_ms())
+                };
 
             AgentStatusSource {
                 agent_id: agent.agent_id,
@@ -2465,6 +2489,8 @@ pub(crate) fn build_and_publish_stylos_status_snapshot(
                 session_id: h.session_id.clone(),
                 workflow: h.workflow.clone(),
                 project_dir: h.project_dir.clone(),
+                activity_status: h.activity_status.clone(),
+                activity_status_changed_at_ms: h.activity_status_changed_at_ms,
             })
             .collect(),
     });
@@ -2501,18 +2527,67 @@ body";
             "note_id=123e4567-e89b-12d3-a456-426614174000"
         );
     }
+
+    #[test]
+    fn stylos_status_uses_non_primary_agent_activity() {
+        let snapshot =
+            super::build_stylos_status_snapshot_from_runtime(super::StylosStatusRefreshInput {
+                startup_project_dir: "/tmp/project".into(),
+                fallback_project_dir: "/tmp/project".into(),
+                provider: "test-provider".to_string(),
+                model: "test-model".to_string(),
+                active_profile: "test-profile".to_string(),
+                app_version: "0.0.0".to_string(),
+                app_version_hash: "test".to_string(),
+                app_version_dirty: false,
+                rate_limits: None,
+                idle_since: None,
+                idle_status_changed_at: Some(100),
+                primary_activity_label: None,
+                primary_activity_changed_at_ms: None,
+                primary_workflow: Default::default(),
+                agents: vec![
+                    super::AgentSnapshotInput {
+                        agent_id: "master".to_string(),
+                        label: "master".to_string(),
+                        roles: vec!["master".to_string(), "interactive".to_string()],
+                        session_id: uuid::Uuid::new_v4().to_string(),
+                        workflow: None,
+                        project_dir: None,
+                        activity_status: None,
+                        activity_status_changed_at_ms: None,
+                    },
+                    super::AgentSnapshotInput {
+                        agent_id: "smith-1".to_string(),
+                        label: "smith-1".to_string(),
+                        roles: vec!["executor".to_string()],
+                        session_id: uuid::Uuid::new_v4().to_string(),
+                        workflow: None,
+                        project_dir: None,
+                        activity_status: Some("running tool… shell_run_command".to_string()),
+                        activity_status_changed_at_ms: Some(200),
+                    },
+                ],
+            });
+
+        let smith = snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.agent_id == "smith-1")
+            .expect("smith status");
+        assert_eq!(smith.activity_status, "running tool… shell_run_command");
+        assert_eq!(smith.activity_status_changed_at_ms, 200);
+    }
 }
 
 #[cfg(test)]
 mod local_agent_delete_tests {
-    use super::{delete_local_agent, LocalAgentRuntimeContext};
+    use super::{delete_local_agent, LocalAgentRosterEntry, LocalAgentRuntimeContext};
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
-    use tempfile::tempdir;
     use themion_core::agent::Agent;
     use themion_core::client::ChatClient;
     use themion_core::db::DbHandle;
-    use uuid::Uuid;
 
     fn test_handle(agent_id: &str, busy: bool) -> crate::tui::AgentHandle {
         crate::tui::AgentHandle {
@@ -2521,7 +2596,7 @@ mod local_agent_delete_tests {
                 "test-model".to_string(),
                 "test-system".to_string(),
             )),
-            session_id: Uuid::new_v4(),
+            session_id: uuid::Uuid::new_v4(),
             agent_id: agent_id.to_string(),
             label: agent_id.to_string(),
             roles: vec!["executor".to_string()],
@@ -2531,15 +2606,33 @@ mod local_agent_delete_tests {
         }
     }
 
+    fn test_session() -> crate::Session {
+        crate::Session {
+            id: uuid::Uuid::new_v4(),
+            configured_profile: "default".to_string(),
+            active_profile: "default".to_string(),
+            profiles: Default::default(),
+            provider: "openrouter".to_string(),
+            base_url: "http://localhost".to_string(),
+            api_key: None,
+            model: "test-model".to_string(),
+            effort: "medium".to_string(),
+            system_prompt: "test-system".to_string(),
+            model_info: None,
+            temporary_profile_override: None,
+            temporary_model_override: None,
+            temporary_effort_override: None,
+        }
+    }
+
     fn test_context<'a>(
         agents: &'a mut Vec<crate::tui::AgentHandle>,
         acting_agent_id: Option<&'a str>,
     ) -> LocalAgentRuntimeContext<'a> {
-        let project_dir = tempdir().expect("tempdir").keep();
-        let session = crate::Session::new();
+        let project_dir = std::env::temp_dir();
+        let session = test_session();
         let db = Arc::new(DbHandle::open_in_memory().expect("db"));
-        let roster: &'a [crate::app_state::LocalAgentRosterEntry] = &[];
-        let agent_busy = agents.iter().any(|a| a.busy);
+        let roster: &'a [LocalAgentRosterEntry] = &[];
         LocalAgentRuntimeContext {
             session: Box::leak(Box::new(session)),
             project_dir: Box::leak(Box::new(project_dir)),
@@ -2547,6 +2640,10 @@ mod local_agent_delete_tests {
             agents,
             roster,
             acting_agent_id,
+            #[cfg(feature = "stylos")]
+            stylos_tool_bridge: None,
+            #[cfg(feature = "stylos")]
+            local_instance_id: None,
             local_agent_tool_invoker: None,
             source_analysis_tool_invoker: None,
             api_log_enabled: false,
@@ -2593,6 +2690,71 @@ mod local_agent_delete_tests {
             .expect("delete succeeds");
         assert!(result.contains("\"operation\":\"delete\""));
         assert_eq!(agents.iter().filter(|a| a.agent_id == "smith-1").count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod app_snapshot_tests {
+    use super::{build_app_snapshot, AppSnapshotBuildState};
+    use crate::app_state::{AgentActivity, AppSnapshot};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use uuid::Uuid;
+
+    fn test_handle(agent_id: &str, busy: bool, session_id: Uuid) -> crate::tui::AgentHandle {
+        crate::tui::AgentHandle {
+            agent: None,
+            session_id,
+            agent_id: agent_id.to_string(),
+            label: agent_id.to_string(),
+            roles: if agent_id == "master" {
+                vec!["master".to_string(), "interactive".to_string()]
+            } else {
+                vec!["executor".to_string()]
+            },
+            busy,
+            turn_cancellation: None,
+            queued_prompts: Arc::new(Mutex::new(Default::default())),
+        }
+    }
+
+    #[test]
+    fn non_master_activity_does_not_mark_master_agent_busy() {
+        let master_session = Uuid::new_v4();
+        let smith_session = Uuid::new_v4();
+        let agents = vec![
+            test_handle("master", false, master_session),
+            test_handle("smith-1", true, smith_session),
+        ];
+        let mut activity_by_session = HashMap::new();
+        activity_by_session.insert(smith_session, AgentActivity::PreparingRequest);
+        let snapshot = build_app_snapshot(
+            &AppSnapshot::default(),
+            AppSnapshotBuildState {
+                agents: &agents,
+                agent_activity_by_session: &activity_by_session,
+                agent_activity_changed_at_by_session: &HashMap::new(),
+                agent_busy: true,
+                activity_status: "idle".to_string(),
+                #[cfg(feature = "stylos")]
+                stylos_status: Some("off".to_string()),
+            },
+        );
+
+        let master = snapshot
+            .local_agents
+            .iter()
+            .find(|agent| agent.agent_id == "master")
+            .expect("master snapshot");
+        let smith = snapshot
+            .local_agents
+            .iter()
+            .find(|agent| agent.agent_id == "smith-1")
+            .expect("smith snapshot");
+        assert!(!master.busy);
+        assert_eq!(master.activity_status, None);
+        assert!(smith.busy);
+        assert_eq!(smith.activity_status.as_deref(), Some("preparing"));
     }
 }
 

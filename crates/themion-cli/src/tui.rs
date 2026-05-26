@@ -2543,6 +2543,7 @@ mod tests {
             roles: roles.iter().map(|r| r.to_string()).collect(),
             busy: false,
             turn_cancellation: None,
+            queued_prompts: Default::default(),
         }
     }
 
