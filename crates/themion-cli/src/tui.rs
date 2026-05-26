@@ -174,6 +174,10 @@ pub(crate) enum Entry {
         source: Option<NonAgentSource>,
         text: String,
     },
+    Reasoning {
+        agent_id: Option<String>,
+        text: String,
+    },
     #[cfg(feature = "stylos")]
     RemoteEvent {
         agent_id: Option<String>,
@@ -302,6 +306,24 @@ fn trim_live_transcript_entries_window(
     true
 }
 
+fn reasoning_status_text(text: &str) -> String {
+    if let Some(open) = text.find("**") {
+        let after_open = &text[(open + 2)..];
+        if let Some(close) = after_open.find("**") {
+            let header = after_open[..close].trim();
+            if !header.is_empty() {
+                return header.to_string();
+            }
+        }
+    }
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        "…".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn runtime_recent_event_from_entry(entry: &Entry) -> Option<(&'static str, String)> {
     match entry {
         Entry::User { text, .. } => Some(("user", text.clone())),
@@ -314,6 +336,7 @@ fn runtime_recent_event_from_entry(entry: &Entry) -> Option<(&'static str, Strin
             },
         )),
         Entry::Status { text, .. } => Some(("status", text.clone())),
+        Entry::Reasoning { text, .. } => Some(("reasoning", text.clone())),
         #[cfg(feature = "stylos")]
         Entry::RemoteEvent { text, .. } => Some(("remote", text.clone())),
         Entry::TurnDone { summary, stats, .. } => Some(("turn", format!("{summary} — {stats}"))),
@@ -2058,6 +2081,14 @@ fn build_lines<'a>(
                     Style::default().fg(source.unwrap_or(NonAgentSource::Runtime).color())
                 };
                 spans.push(Span::styled(format!("󰇺 {}", text), status_style));
+                lines.push(Line::from(spans));
+            }
+            Entry::Reasoning { agent_id, text } => {
+                let mut spans = agent_tag_spans(agent_id.as_deref(), agents);
+                spans.push(Span::styled(
+                    format!("󰇺 thinking: {}", reasoning_status_text(text)),
+                    Style::default().fg(Color::DarkGray),
+                ));
                 lines.push(Line::from(spans));
             }
             Entry::ToolDone { .. } => {

@@ -96,7 +96,6 @@ struct CodexStreamState {
     streamed_notice_count: usize,
     streamed_rate_limits: Vec<RateLimitSnapshot>,
     reasoning_summary: String,
-    streamed_reasoning_len: usize,
 }
 
 impl CodexStreamState {
@@ -115,7 +114,6 @@ impl CodexStreamState {
             streamed_notice_count: 0,
             streamed_rate_limits: Vec::new(),
             reasoning_summary: String::new(),
-            streamed_reasoning_len: 0,
         }
     }
 
@@ -132,16 +130,6 @@ impl CodexStreamState {
                 on_status,
             );
         }
-    }
-
-    fn stream_pending_reasoning_summary(&mut self, on_status: &mut dyn FnMut(String)) {
-        let pending = self.reasoning_summary[self.streamed_reasoning_len..].trim();
-        if pending.is_empty() {
-            self.streamed_reasoning_len = self.reasoning_summary.len();
-            return;
-        }
-        self.streamed_reasoning_len = self.reasoning_summary.len();
-        self.record_notice(format!("thinking: {pending}"), on_status);
     }
 }
 
@@ -364,6 +352,7 @@ impl CodexClient {
         reconnect_status_line: Option<&str>,
         state: &mut CodexStreamState,
         on_chunk: &mut (dyn FnMut(String) + Send),
+        on_reasoning_delta: &mut (dyn FnMut(String) + Send),
         on_status: &mut (dyn FnMut(String) + Send),
         should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
     ) -> Result<(u16, Vec<RateLimitSnapshot>, bool)> {
@@ -399,6 +388,7 @@ impl CodexClient {
                 &request_body,
                 state,
                 on_chunk,
+                on_reasoning_delta,
                 on_status,
                 should_cancel,
             )
@@ -525,6 +515,7 @@ async fn stream_responses_websocket_request(
     body: &Value,
     state: &mut CodexStreamState,
     on_chunk: &mut (dyn FnMut(String) + Send),
+    on_reasoning_delta: &mut (dyn FnMut(String) + Send),
     on_status: &mut (dyn FnMut(String) + Send),
     should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
 ) -> std::result::Result<(), CodexWebsocketRequestError> {
@@ -564,6 +555,7 @@ async fn stream_responses_websocket_request(
                     &data,
                     state,
                     on_chunk,
+                    on_reasoning_delta,
                     on_status,
                     should_cancel,
                 )?;
@@ -1106,6 +1098,7 @@ fn process_codex_json_event(
     data: &Value,
     state: &mut CodexStreamState,
     on_chunk: &mut (dyn FnMut(String) + Send),
+    on_reasoning_delta: &mut (dyn FnMut(String) + Send),
     on_status: &mut (dyn FnMut(String) + Send),
     should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
 ) -> Result<bool> {
@@ -1133,13 +1126,13 @@ fn process_codex_json_event(
                 if let Some(delta) = data["delta"].as_str() {
                     if !delta.is_empty() {
                         state.reasoning_summary.push_str(delta);
+                        on_reasoning_delta(delta.to_string());
                     }
                 }
             }
             "response.reasoning_summary_part.done" => {
-                state.stream_pending_reasoning_summary(on_status);
                 state.reasoning_summary.push_str("\n\n");
-                state.streamed_reasoning_len = state.reasoning_summary.len();
+                on_reasoning_delta("\n\n".to_string());
             }
             "response.output_item.added" => {
                 let item = &data["item"];
@@ -1165,7 +1158,6 @@ fn process_codex_json_event(
                     .push(parse_rate_limit_snapshot(data));
             }
             "response.completed" => {
-                state.stream_pending_reasoning_summary(on_status);
                 let completion_meta = parse_completion_meta(data);
                 state.record_notice("codex stream: response.completed".to_string(), on_status);
                 state.usage = combine_usage(state.usage.take(), completion_meta.usage.clone());
@@ -1230,6 +1222,7 @@ impl ChatBackend for CodexClient {
         messages: &[Message],
         tools: &Value,
         mut on_chunk: Box<dyn FnMut(String) + Send + 'static>,
+        mut on_reasoning_delta: Box<dyn FnMut(String) + Send + 'static>,
         mut on_status: Box<dyn FnMut(String) + Send + 'static>,
         should_cancel: Option<Box<dyn Fn() -> bool + Send + Sync + 'static>>,
     ) -> Result<(
@@ -1276,6 +1269,7 @@ impl ChatBackend for CodexClient {
                 Some(&reconnect_status_line),
                 &mut state,
                 &mut *on_chunk,
+                &mut *on_reasoning_delta,
                 &mut *on_status,
                 should_cancel.as_deref(),
             )
@@ -1444,9 +1438,11 @@ mod tests {
     fn process_codex_json_event_streams_reasoning_summary_status() {
         let mut state = CodexStreamState::new();
         let mut statuses = Vec::new();
+        let mut reasoning = Vec::new();
         let mut chunks = Vec::new();
         let done = {
             let mut on_status = |text: String| statuses.push(text);
+            let mut on_reasoning_delta = |text: String| reasoning.push(text);
             let mut on_chunk = |text: String| chunks.push(text);
             process_codex_json_event(
                 "response.reasoning_summary_text.delta",
@@ -1456,6 +1452,7 @@ mod tests {
                 }),
                 &mut state,
                 &mut on_chunk,
+                &mut on_reasoning_delta,
                 &mut on_status,
                 None,
             )
@@ -1466,9 +1463,11 @@ mod tests {
         assert!(chunks.is_empty());
         assert_eq!(state.reasoning_summary, "checking context");
         assert!(statuses.is_empty());
+        assert_eq!(reasoning, vec!["checking context"]);
 
         {
             let mut on_status = |text: String| statuses.push(text);
+            let mut on_reasoning_delta = |text: String| reasoning.push(text);
             let mut on_chunk = |text: String| chunks.push(text);
             process_codex_json_event(
                 "response.reasoning_summary_part.done",
@@ -1477,21 +1476,25 @@ mod tests {
                 }),
                 &mut state,
                 &mut on_chunk,
+                &mut on_reasoning_delta,
                 &mut on_status,
                 None,
             )
             .expect("reasoning summary done event should parse");
         }
 
-        assert_eq!(statuses, vec!["thinking: checking context"]);
+        assert!(statuses.is_empty());
+        assert_eq!(reasoning, vec!["checking context", "\n\n"]);
     }
 
     #[test]
-    fn process_codex_json_event_flushes_reasoning_summary_on_completion() {
+    fn process_codex_json_event_streams_raw_reasoning_delta() {
         let mut state = CodexStreamState::new();
         let mut statuses = Vec::new();
+        let mut reasoning = Vec::new();
         let mut chunks = Vec::new();
         let mut on_status = |text: String| statuses.push(text);
+        let mut on_reasoning_delta = |text: String| reasoning.push(text);
         let mut on_chunk = |text: String| chunks.push(text);
 
         process_codex_json_event(
@@ -1499,6 +1502,7 @@ mod tests {
             &serde_json::json!({ "type": "response.reasoning_text.delta", "delta": "checking context" }),
             &mut state,
             &mut on_chunk,
+            &mut on_reasoning_delta,
             &mut on_status,
             None,
         )
@@ -1508,12 +1512,13 @@ mod tests {
             &serde_json::json!({ "type": "response.completed", "response": { "id": "resp_1" } }),
             &mut state,
             &mut on_chunk,
+            &mut on_reasoning_delta,
             &mut on_status,
             None,
         )
         .expect("completion event should parse");
 
-        assert_eq!(statuses[0], "thinking: checking context");
+        assert_eq!(reasoning, vec!["checking context"]);
     }
 
     #[test]

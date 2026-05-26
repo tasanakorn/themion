@@ -111,6 +111,7 @@ impl ChatBackend for OpenAICompatClient {
         messages: &[Message],
         tools: &Value,
         mut on_chunk: Box<dyn FnMut(String) + Send + 'static>,
+        _on_reasoning_delta: Box<dyn FnMut(String) + Send + 'static>,
         mut on_status: Box<dyn FnMut(String) + Send + 'static>,
         should_cancel: Option<Box<dyn Fn() -> bool + Send + Sync + 'static>>,
     ) -> Result<(

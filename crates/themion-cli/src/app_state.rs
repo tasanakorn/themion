@@ -372,6 +372,35 @@ fn mark_completed_status_with_tool_call(app: &mut App, sid: Uuid) {
     }
 }
 
+fn push_or_update_status(app: &mut App, sid: Uuid, text: String) {
+    let agent_id = crate::tui::agent_id_for_session(&app.runtime.agents, sid);
+    app.push(crate::tui::Entry::Status {
+        agent_id,
+        source: None,
+        text,
+    });
+}
+
+fn push_or_update_reasoning(app: &mut App, sid: Uuid, delta: String) {
+    let agent_id = crate::tui::agent_id_for_session(&app.runtime.agents, sid);
+    if let Some(Entry::Reasoning {
+        agent_id: existing_agent_id,
+        text,
+    }) = app.entries.last_mut()
+    {
+        if existing_agent_id == &agent_id {
+            text.push_str(&delta);
+            app.mark_dirty_all();
+            return;
+        }
+    }
+
+    app.push(crate::tui::Entry::Reasoning {
+        agent_id,
+        text: delta,
+    });
+}
+
 impl AppState {
     pub fn for_tui(cfg: Config, project_dir_override: Option<PathBuf>) -> anyhow::Result<Self> {
         Self::build(cfg, project_dir_override, true)
@@ -1648,13 +1677,12 @@ pub(crate) fn process_agent_event(
             }
             set_agent_activity_for_session(app, sid, AgentActivity::WaitingAfterTool);
         }
+        themion_core::agent::AgentEvent::ReasoningDelta(delta) => {
+            push_or_update_reasoning(app, sid, delta);
+        }
         themion_core::agent::AgentEvent::Status(text) => {
             let mark_completed = text == "codex stream: response.completed";
-            app.push(crate::tui::Entry::Status {
-                agent_id: crate::tui::agent_id_for_session(&app.runtime.agents, sid),
-                source: None,
-                text,
-            });
+            push_or_update_status(app, sid, text);
             if mark_completed {
                 app.runtime.pending_completed_status_entry = Some((sid, app.entries.len() - 1));
             }

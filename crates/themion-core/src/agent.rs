@@ -354,6 +354,7 @@ pub enum AgentEvent {
     ToolEnd {
         tool_call_id: Option<String>,
     },
+    ReasoningDelta(String),
     Status(String),
     AssistantChunk(String),
     AssistantText(String),
@@ -1802,6 +1803,7 @@ impl Agent {
                 .unwrap_or(0);
             let stream_event_tx = self.event_tx.clone();
             let status_event_tx = self.event_tx.clone();
+            let reasoning_event_tx = self.event_tx.clone();
             let cancellation_for_stream = cancellation.clone();
             let backend_name = self.client.backend_name();
             let request_payload =
@@ -1822,6 +1824,20 @@ impl Agent {
                         }
                         if let Some(ref tx) = stream_event_tx {
                             let _ = tx.send(AgentEvent::AssistantChunk(chunk));
+                        }
+                    }),
+                    Box::new({
+                        let cancellation_for_reasoning = cancellation.clone();
+                        move |delta| {
+                            if cancellation_for_reasoning
+                                .as_ref()
+                                .is_some_and(|c| c.is_interrupted())
+                            {
+                                return;
+                            }
+                            if let Some(ref tx) = reasoning_event_tx {
+                                let _ = tx.send(AgentEvent::ReasoningDelta(delta));
+                            }
                         }
                     }),
                     Box::new({

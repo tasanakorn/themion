@@ -696,6 +696,14 @@ fn publish_web_agent_event(
                 at_ms,
             });
         }
+        themion_core::agent::AgentEvent::ReasoningDelta(text) => {
+            let _ = agent_event_tx.send(WebAgentEvent {
+                agent_id,
+                event_kind: "reasoning".to_string(),
+                text: text.clone(),
+                at_ms,
+            });
+        }
         themion_core::agent::AgentEvent::Status(text) => {
             let _ = agent_event_tx.send(WebAgentEvent {
                 agent_id,
@@ -1057,6 +1065,20 @@ fn build_chat_entries(entries: &[crate::tui::Entry]) -> Vec<WebChatEntry> {
                     agent_id: agent_id.clone(),
                     tool_call_id: None,
                     source: source.map(non_agent_source_label),
+                    text: text.clone(),
+                    detail: None,
+                    reason: None,
+                    stats: None,
+                    completed: false,
+                });
+            }
+            crate::tui::Entry::Reasoning { agent_id, text } => {
+                last_tool_entry_index = None;
+                chat_entries.push(WebChatEntry {
+                    kind: "reasoning",
+                    agent_id: agent_id.clone(),
+                    tool_call_id: None,
+                    source: None,
                     text: text.clone(),
                     detail: None,
                     reason: None,
