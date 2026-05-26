@@ -1282,9 +1282,18 @@ impl ChatBackend for CodexClient {
     )> {
         let (access_token, account_id) = self.auth_headers().await?;
 
+        let tool_count = tools.as_array().map_or(0, Vec::len);
+        on_status(format!(
+            "codex stream: generating prompt model={model} messages={} tools={tool_count}",
+            messages.len()
+        ));
         let initial_body =
             build_responses_api_body(model, messages, tools, self.prompt_cache_key.as_deref());
         let mut trace_request = initial_body.clone();
+        on_status(format!(
+            "codex stream: sending api endpoint=/responses model={model} session_id={}",
+            self.session_id
+        ));
         let response = self
             .send_responses_request(&access_token, &account_id, &initial_body)
             .await?;
@@ -1332,6 +1341,10 @@ impl ChatBackend for CodexClient {
                         "initial": initial_body,
                         "continuations": [continuation_body.clone()]
                     });
+                    on_status(format!(
+                        "codex stream: sending api endpoint=/responses model={model} continuation=true previous_response_id={previous_response_id} session_id={}",
+                        self.session_id
+                    ));
                     let continuation_response = self
                         .send_responses_request(&access_token, &account_id, &continuation_body)
                         .await;
