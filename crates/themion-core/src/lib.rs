@@ -3,6 +3,9 @@ pub mod agents_md;
 pub mod auth;
 pub mod client;
 pub mod client_codex;
+pub mod client_openai_codex;
+pub mod client_openai_compat;
+pub mod client_provider_types;
 pub mod codex_cli_instruction;
 pub mod context_report;
 pub mod db;
@@ -13,7 +16,9 @@ pub mod workflow;
 
 pub use auth::CodexAuth;
 pub use client::{ChatBackend, ModelInfo};
-pub use client_codex::{ApiCallRateLimitReport, ExtractedLimitWindow, ExtractedRateLimitSnapshot};
+pub use client_provider_types::{
+    ApiCallRateLimitReport, ExtractedLimitWindow, ExtractedRateLimitSnapshot,
+};
 pub use context_report::{
     EstimateMode, HistoryTurnReport, PromptContextReport, PromptSectionKind, PromptSectionReport,
     ReplayForm, TokenizerResolutionSource, ToolEstimateMode, ToolEstimateReport,

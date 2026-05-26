@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::task::yield_now;
 
-use crate::client_codex::ApiCallRateLimitReport;
+use crate::client_provider_types::ApiCallRateLimitReport;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Message {
@@ -366,7 +366,7 @@ impl ChatClient {
     }
 }
 
-fn build_chat_completions_body(
+pub fn build_chat_completions_body(
     model: &str,
     messages: &[Message],
     tools: &Value,
@@ -386,7 +386,7 @@ fn build_chat_completions_body(
     body
 }
 
-fn chat_completions_messages(messages: &[Message]) -> Value {
+pub fn chat_completions_messages(messages: &[Message]) -> Value {
     let mut value = serde_json::to_value(messages).unwrap_or_else(|_| Value::Array(Vec::new()));
     if let Some(messages) = value.as_array_mut() {
         for message in messages {

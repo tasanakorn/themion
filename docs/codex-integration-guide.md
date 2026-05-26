@@ -8,13 +8,14 @@ The Codex integration in Themion covers:
 
 - OAuth-backed authentication and token refresh
 - model metadata fetches from Codex `/models`
-- response generation via Codex `/responses`
-- rate-limit and quota extraction from HTTP headers
+- response generation via the Codex `/responses` WebSocket endpoint
+- rate-limit extraction from WebSocket upgrade headers and streamed rate-limit events
 - translation between Themion's internal chat/tool model and the Codex Responses API
 
 Implementation lives primarily in:
 
-- `crates/themion-core/src/client_codex.rs`
+- `crates/themion-core/src/client_openai_codex.rs`
+- `crates/themion-core/src/client_codex.rs` compatibility re-export
 - `crates/themion-core/src/client.rs`
 - `crates/themion-core/src/agent.rs`
 
@@ -23,12 +24,12 @@ Implementation lives primarily in:
 Themion currently uses the following Codex backend endpoints:
 
 - `GET https://chatgpt.com/backend-api/codex/models?client_version=1.0.0`
-- `POST https://chatgpt.com/backend-api/codex/responses`
+- `wss://chatgpt.com/backend-api/codex/responses` for streamed response generation
 - `POST https://auth.openai.com/oauth/token`
 
 The `/models` endpoint is used for model discovery and model metadata.
 
-The `/responses` endpoint is used for streamed model execution.
+The `/responses` WebSocket endpoint is used for streamed model execution. Themion keeps one WebSocket connection per Codex client session and reuses it across turns when available. Each turn still sends the full translated prompt in a `response.create` WebSocket message. It does not yet use incremental WebSocket continuation state.
 
 The OAuth token endpoint is used only for refresh-token exchange.
 
@@ -52,13 +53,12 @@ Requests to Codex backend endpoints include:
 - `originator: pi`
 - `User-Agent: pi (<os>; <arch>)`
 
-Requests to `/responses` additionally include:
+WebSocket upgrade requests to `/responses` additionally include:
 
 - `session-id: <session id>`
 - `thread-id: <thread id>`
 - `x-client-request-id: <thread id>`
 - `OpenAI-Beta: responses=experimental`
-- `Accept: text/event-stream`
 
 ## Model metadata contract
 

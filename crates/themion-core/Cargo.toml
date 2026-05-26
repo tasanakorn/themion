@@ -17,6 +17,8 @@ anyhow.workspace = true
 base64.workspace = true
 urlencoding.workspace = true
 tokio.workspace = true
+futures-util.workspace = true
+tokio-tungstenite.workspace = true
 rusqlite.workspace = true
 uuid.workspace = true
 chrono = { version = "0.4", default-features = true, features = ["clock"] }
