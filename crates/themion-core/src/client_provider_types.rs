@@ -156,7 +156,7 @@ pub(crate) fn parse_openai_quota_error(body: &str) -> Option<ProviderQuotaError>
         error_type: error.error_type,
         message: error.message,
         plan_type: error.plan_type,
-        resets_at: error.resets_at,
+        resets_at: error.resets_at.and_then(normalize_unix_epoch_seconds),
         resets_in_seconds: error.resets_in_seconds,
     })
 }
@@ -219,6 +219,16 @@ fn display_window_label(window: &RateLimitWindow, fallback: &str) -> String {
 
 pub fn percent_left(used_percent: f64) -> f64 {
     (100.0 - used_percent).clamp(0.0, 100.0)
+}
+
+pub(crate) fn normalize_unix_epoch_seconds(value: i64) -> Option<i64> {
+    if value <= 0 {
+        return None;
+    }
+    Some(match value {
+        value if value >= 1_000_000_000_000 => value / 1_000,
+        value => value,
+    })
 }
 
 fn format_reset_time(resets_at: i64) -> Option<String> {
@@ -309,7 +319,8 @@ fn parse_window_from_headers(
 ) -> Option<RateLimitWindow> {
     let used_percent = parse_header_f64(headers, &format!("{prefix}-{kind}-used-percent"))?;
     let window_minutes = parse_header_i64(headers, &format!("{prefix}-{kind}-window-minutes"));
-    let resets_at = parse_header_i64(headers, &format!("{prefix}-{kind}-reset-at"));
+    let resets_at = parse_header_i64(headers, &format!("{prefix}-{kind}-reset-at"))
+        .and_then(normalize_unix_epoch_seconds);
     Some(RateLimitWindow {
         used_percent,
         window_minutes,
@@ -500,5 +511,51 @@ pub fn report_for_api_call(
         http_status,
         active_limit,
         snapshots: snapshots.iter().map(extract_snapshot).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::header::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn normalizes_reset_timestamps_from_milliseconds() {
+        assert_eq!(
+            normalize_unix_epoch_seconds(1_700_000_000),
+            Some(1_700_000_000)
+        );
+        assert_eq!(
+            normalize_unix_epoch_seconds(1_700_000_000_000),
+            Some(1_700_000_000)
+        );
+        assert_eq!(normalize_unix_epoch_seconds(0), None);
+    }
+
+    #[test]
+    fn parses_header_reset_timestamp_as_seconds() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-primary-used-percent",
+            HeaderValue::from_static("42"),
+        );
+        headers.insert(
+            "x-codex-primary-reset-at",
+            HeaderValue::from_static("1700000000000"),
+        );
+
+        let snapshot =
+            parse_rate_limit_for_limit_from_headers(&headers, "codex").expect("missing snapshot");
+        let primary = snapshot.primary.expect("missing primary window");
+        assert_eq!(primary.resets_at, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn parses_quota_error_reset_timestamp_as_seconds() {
+        let quota = parse_openai_quota_error(
+            r#"{"error":{"message":"limited","resets_at":1700000000000}}"#,
+        )
+        .expect("missing quota");
+        assert_eq!(quota.resets_at, Some(1_700_000_000));
     }
 }

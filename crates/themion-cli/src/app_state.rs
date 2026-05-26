@@ -402,6 +402,15 @@ fn push_or_update_reasoning(app: &mut App, sid: Uuid, delta: String) {
     });
 }
 
+fn rate_limit_report_has_status_data(
+    report: &themion_core::client_codex::ApiCallRateLimitReport,
+) -> bool {
+    report
+        .snapshots
+        .iter()
+        .any(|snapshot| !snapshot.limits.is_empty() || snapshot.credits.is_some())
+}
+
 impl AppState {
     pub fn for_tui(cfg: Config, project_dir_override: Option<PathBuf>) -> anyhow::Result<Self> {
         Self::build(cfg, project_dir_override, true)
@@ -1702,9 +1711,11 @@ pub(crate) fn process_agent_event(
                 if let Ok(report) =
                     serde_json::from_str::<themion_core::client_codex::ApiCallRateLimitReport>(json)
                 {
-                    app.runtime.status_rate_limits = Some(report);
-                    app.mark_dirty_status();
-                    publish_runtime_snapshot(app);
+                    if rate_limit_report_has_status_data(&report) {
+                        app.runtime.status_rate_limits = Some(report);
+                        app.mark_dirty_status();
+                        publish_runtime_snapshot(app);
+                    }
                 }
                 return;
             }

@@ -699,7 +699,8 @@ fn parse_usage_window(value: &Value) -> Option<RateLimitWindow> {
         .or_else(|| value.get("resetAt"))
         .or_else(|| value.get("resets_at"))
         .or_else(|| value.get("resetsAt"))
-        .and_then(Value::as_i64);
+        .and_then(Value::as_i64)
+        .and_then(crate::client_provider_types::normalize_unix_epoch_seconds);
     Some(RateLimitWindow {
         used_percent,
         window_minutes,
@@ -1105,6 +1106,8 @@ fn classify_codex_event(event_type: &str) -> CodexStreamEventCategory {
         | "response.failed"
         | "error" => CodexStreamEventCategory::Handled,
         "Created"
+        | "response.created"
+        | "response.in_progress"
         | "ServerModel"
         | "ModelVerifications"
         | "ServerReasoningIncluded"
@@ -1658,7 +1661,7 @@ mod tests {
                 "primary": {
                     "used_percent": 42,
                     "window_minutes": 300,
-                    "reset_at": 1700000000
+                    "reset_at": 1700000000000i64
                 },
                 "secondary": {
                     "used_percent": 12.5,
