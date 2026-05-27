@@ -22,6 +22,7 @@ fn test_ctx(db: std::sync::Arc<DbHandle>) -> ToolCtx {
         stylos_enabled: false,
         local_agent_tool_invoker: None,
         source_analysis_tool_invoker: None,
+        tool_set: None,
         system_inspection: None,
     }
 }

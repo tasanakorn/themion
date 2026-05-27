@@ -22,7 +22,7 @@ use crate::client_provider_types::{
 };
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-const CODEX_WEBSOCKET_RESTART_ATTEMPTS: usize = 2;
+const CODEX_WEBSOCKET_RECONNECT_RETRY_ATTEMPTS: usize = 2;
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 pub struct CodexClient {
     http: reqwest::Client,
@@ -380,7 +380,7 @@ impl CodexClient {
         should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
     ) -> Result<(u16, Vec<RateLimitSnapshot>, bool)> {
         let mut guard = self.websocket.lock().await;
-        let mut restart_attempts = 0;
+        let mut reconnect_attempts = 0;
         let mut request_body = body.clone();
         let mut used_reconnect_body = false;
 
@@ -422,13 +422,13 @@ impl CodexClient {
                 Err(err) => {
                     let has_partial_response_content = state.has_partial_response_content();
                     *guard = None;
-                    let can_restart_after_disconnect = restart_attempts
-                        < CODEX_WEBSOCKET_RESTART_ATTEMPTS
+                    let can_retry_after_disconnect = reconnect_attempts
+                        < CODEX_WEBSOCKET_RECONNECT_RETRY_ATTEMPTS
                         && err.kind == CodexWebsocketRequestErrorKind::Disconnect
                         && !state.response_completed
                         && should_cancel.is_none_or(|cancel| !cancel());
-                    if can_restart_after_disconnect {
-                        restart_attempts += 1;
+                    if can_retry_after_disconnect {
+                        reconnect_attempts += 1;
                         if let Some(reconnect_body) = reconnect_body {
                             request_body = reconnect_body.clone();
                             used_reconnect_body = true;
@@ -437,8 +437,8 @@ impl CodexClient {
                         on_status(format!(
                             "codex stream: websocket disconnected; reconnecting and retrying full request reused={} attempt={}/{} partial_content={} error={}",
                             reused,
-                            restart_attempts,
-                            CODEX_WEBSOCKET_RESTART_ATTEMPTS,
+                            reconnect_attempts,
+                            CODEX_WEBSOCKET_RECONNECT_RETRY_ATTEMPTS,
                             has_partial_response_content,
                             err.source
                         ));
@@ -456,7 +456,7 @@ impl CodexClient {
                     };
                     on_status(format!(
                         "codex stream: websocket reconnect not available {close_context} partial_content={has_partial_response_content} completed={} retryable_disconnect={} attempts={}/{}",
-                        state.response_completed, err.kind == CodexWebsocketRequestErrorKind::Disconnect, restart_attempts, CODEX_WEBSOCKET_RESTART_ATTEMPTS
+                        state.response_completed, err.kind == CodexWebsocketRequestErrorKind::Disconnect, reconnect_attempts, CODEX_WEBSOCKET_RECONNECT_RETRY_ATTEMPTS
                     ));
                     return Err(anyhow!(
                         "stream closed before response.completed: {}",
@@ -1583,6 +1583,32 @@ mod tests {
         .expect("completion event should parse");
 
         assert_eq!(reasoning, vec!["checking context"]);
+    }
+
+    #[test]
+    fn reconnect_reset_clears_partial_stream_state() {
+        let mut state = CodexStreamState::new();
+        state.response_message_id = Some("msg_1".to_string());
+        state.response_id = Some("resp_1".to_string());
+        state.content = "partial".to_string();
+        state.tool_slots.insert(
+            "item_1".to_string(),
+            ToolCallSlot {
+                id: "call_1".to_string(),
+                name: "shell_run_command".to_string(),
+                arguments: "{\"command\":\"echo".to_string(),
+            },
+        );
+        state.reasoning_summary = "thinking".to_string();
+        state.received_response_event = true;
+        state.response_completed = true;
+
+        state.reset_for_reconnect();
+
+        assert!(!state.has_partial_response_content());
+        assert!(!state.received_response_event);
+        assert!(!state.response_completed);
+        assert!(state.response_id.is_none());
     }
 
     #[test]
