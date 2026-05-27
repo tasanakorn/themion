@@ -22,6 +22,7 @@ use crate::client_provider_types::{
 };
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const CODEX_WEBSOCKET_RESTART_ATTEMPTS: usize = 2;
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 pub struct CodexClient {
     http: reqwest::Client,
@@ -96,6 +97,7 @@ struct CodexStreamState {
     streamed_notice_count: usize,
     streamed_rate_limits: Vec<RateLimitSnapshot>,
     reasoning_summary: String,
+    response_completed: bool,
 }
 
 impl CodexStreamState {
@@ -114,6 +116,7 @@ impl CodexStreamState {
             streamed_notice_count: 0,
             streamed_rate_limits: Vec::new(),
             reasoning_summary: String::new(),
+            response_completed: false,
         }
     }
 
@@ -134,6 +137,7 @@ impl CodexStreamState {
         self.received_response_event = false;
         self.streamed_rate_limits.clear();
         self.reasoning_summary.clear();
+        self.response_completed = false;
     }
 
     fn record_notice(&mut self, text: String, on_status: &mut dyn FnMut(String)) {
@@ -376,7 +380,7 @@ impl CodexClient {
         should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
     ) -> Result<(u16, Vec<RateLimitSnapshot>, bool)> {
         let mut guard = self.websocket.lock().await;
-        let mut retries_before_response = 0;
+        let mut restart_attempts = 0;
         let mut request_body = body.clone();
         let mut used_reconnect_body = false;
 
@@ -418,20 +422,24 @@ impl CodexClient {
                 Err(err) => {
                     let has_partial_response_content = state.has_partial_response_content();
                     *guard = None;
-                    let can_retry_without_duplicate_output = !has_partial_response_content
-                        && retries_before_response < 2
+                    let can_restart_after_disconnect = restart_attempts
+                        < CODEX_WEBSOCKET_RESTART_ATTEMPTS
+                        && err.kind == CodexWebsocketRequestErrorKind::Disconnect
+                        && !state.response_completed
                         && should_cancel.is_none_or(|cancel| !cancel());
-                    if can_retry_without_duplicate_output {
-                        retries_before_response += 1;
+                    if can_restart_after_disconnect {
+                        restart_attempts += 1;
                         if let Some(reconnect_body) = reconnect_body {
                             request_body = reconnect_body.clone();
                             used_reconnect_body = true;
                         }
                         state.reset_for_reconnect();
                         on_status(format!(
-                            "codex stream: websocket resuming after disconnect reused={} attempt={} error={}",
+                            "codex stream: websocket disconnected; reconnecting and retrying full request reused={} attempt={}/{} partial_content={} error={}",
                             reused,
-                            retries_before_response,
+                            restart_attempts,
+                            CODEX_WEBSOCKET_RESTART_ATTEMPTS,
+                            has_partial_response_content,
                             err.source
                         ));
                         if let Some(status_line) = reconnect_status_line {
@@ -447,7 +455,8 @@ impl CodexClient {
                         "before response events"
                     };
                     on_status(format!(
-                        "codex stream: websocket reconnect not safe {close_context} partial_content={has_partial_response_content}"
+                        "codex stream: websocket reconnect not available {close_context} partial_content={has_partial_response_content} completed={} retryable_disconnect={} attempts={}/{}",
+                        state.response_completed, err.kind == CodexWebsocketRequestErrorKind::Disconnect, restart_attempts, CODEX_WEBSOCKET_RESTART_ATTEMPTS
                     ));
                     return Err(anyhow!(
                         "stream closed before response.completed: {}",
@@ -563,12 +572,14 @@ async fn stream_responses_websocket_request(
 
         let Some(message) = connection.stream.next().await else {
             on_status("codex stream: websocket disconnected".to_string());
-            return Err(anyhow!("Codex websocket closed before response.completed").into());
+            return Err(CodexWebsocketRequestError::disconnect(anyhow!(
+                "Codex websocket closed before response.completed"
+            )));
         };
 
         match message {
             Err(err) => {
-                return Err(anyhow!(err).into());
+                return Err(CodexWebsocketRequestError::disconnect(anyhow!(err)));
             }
             Ok(WsMessage::Text(text)) => {
                 let data: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
@@ -591,13 +602,17 @@ async fn stream_responses_websocket_request(
             }
             Ok(WsMessage::Close(_)) => {
                 on_status("codex stream: websocket disconnected".to_string());
-                return Err(anyhow!("Codex websocket closed before response.completed").into());
+                return Err(CodexWebsocketRequestError::disconnect(anyhow!(
+                    "Codex websocket closed before response.completed"
+                )));
             }
             Ok(WsMessage::Ping(payload)) => {
                 connection.stream.send(WsMessage::Pong(payload)).await?;
             }
             Ok(WsMessage::Binary(_)) => {
-                return Err(anyhow!("Codex websocket returned unexpected binary message").into());
+                return Err(CodexWebsocketRequestError::other(anyhow!(
+                    "Codex websocket returned unexpected binary message"
+                )));
             }
             Ok(WsMessage::Pong(_)) | Ok(WsMessage::Frame(_)) => {}
         }
@@ -606,27 +621,46 @@ async fn stream_responses_websocket_request(
 
 struct CodexWebsocketRequestError {
     source: anyhow::Error,
+    kind: CodexWebsocketRequestErrorKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CodexWebsocketRequestErrorKind {
+    Disconnect,
+    Other,
+}
+
+impl CodexWebsocketRequestError {
+    fn disconnect(source: anyhow::Error) -> Self {
+        Self {
+            source,
+            kind: CodexWebsocketRequestErrorKind::Disconnect,
+        }
+    }
+
+    fn other(source: anyhow::Error) -> Self {
+        Self {
+            source,
+            kind: CodexWebsocketRequestErrorKind::Other,
+        }
+    }
 }
 
 impl From<anyhow::Error> for CodexWebsocketRequestError {
     fn from(source: anyhow::Error) -> Self {
-        Self { source }
+        Self::other(source)
     }
 }
 
 impl From<serde_json::Error> for CodexWebsocketRequestError {
     fn from(source: serde_json::Error) -> Self {
-        Self {
-            source: anyhow!(source),
-        }
+        Self::other(anyhow!(source))
     }
 }
 
 impl From<tokio_tungstenite::tungstenite::Error> for CodexWebsocketRequestError {
     fn from(source: tokio_tungstenite::tungstenite::Error) -> Self {
-        Self {
-            source: anyhow!(source),
-        }
+        Self::disconnect(anyhow!(source))
     }
 }
 
@@ -1188,6 +1222,7 @@ fn process_codex_json_event(
             }
             "response.completed" => {
                 let completion_meta = parse_completion_meta(data);
+                state.response_completed = true;
                 state.record_notice("codex stream: response.completed".to_string(), on_status);
                 state.usage = combine_usage(state.usage.take(), completion_meta.usage.clone());
                 state.pending_completion = Some(completion_meta.clone());
