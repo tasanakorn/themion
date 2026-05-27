@@ -2,7 +2,7 @@
 
 This project keeps numbered PRD documents in `docs/prd/`.
 
-The name stays `PRD` so the repository keeps one numeric sequence and one source of truth, but a PRD may be a classic product requirement, a bug-fix requirement, or a focused issue/incident decision record.
+The name stays `PRD` so the repository keeps one numeric sequence and one source of truth, but a PRD in this repository is mainly an engineering decision record. It should describe architecture, system behavior, solution shape, and implementation requirements. It is not a business case or marketing problem statement.
 
 Use this guide whenever you create or update a PRD.
 
@@ -75,9 +75,9 @@ After the metadata block, add a short plain-language summary section before the 
 - Use the heading `## Summary`.
 - Keep it short, usually 3–5 flat bullets.
 - Go beyond 5 bullets only when the extra bullets change a review decision.
-- Explain the proposal in simple terms so a reader can quickly understand it without reading the full PRD.
-- Lead with the product problem, intended outcome, or user-visible behavior before implementation tactics.
-- Prefer direct language such as "keep X, add Y, avoid Z".
+- Explain the technical change in simple terms so a reader can quickly understand it without reading the full PRD.
+- Lead with the affected system behavior, architecture constraint, or implementation outcome.
+- Prefer direct language such as "keep X, add Y, avoid Z, store Y in memory, do not add table Z".
 - Avoid repeating lower-level design detail that appears later.
 
 This section is for fast comprehension, not for replacing the full PRD.
@@ -86,7 +86,7 @@ This section is for fast comprehension, not for replacing the full PRD.
 
 Use the same numbered PRD system for these document types:
 
-- **Product requirement PRD** — new feature, product behavior, workflow change, or durable user-visible requirement
+- **System requirement PRD** — architecture, runtime policy, provider behavior, tool behavior, workflow change, or durable user-visible requirement
 - **Bug-fix PRD** — a defect that needs explicit behavioral rules, scope limits, or a durable decision record
 - **Issue / incident PRD** — a focused operational or architectural issue where the repository should keep one numbered source-of-truth document for the problem, decision, and expected fix
 
@@ -104,7 +104,7 @@ For a tiny obvious code fix with no product or policy question, a PRD is optiona
 
 Choose the lightest PRD shape that fits the problem:
 
-- use the full product-style PRD format for new features, broad behavior changes, or larger design work
+- use the full system-spec PRD format for architecture changes, broad behavior changes, provider/runtime work, or larger design work
 - use the minimal bug/issue PRD format for focused defects, regressions, incidents, or implementation-scoped issues that do not need a full product-requirement narrative
 
 The repository still calls both forms `PRD` to keep numbering simple and preserve one source of truth.
@@ -126,7 +126,7 @@ Use this top-level order when relevant:
 Rules for the minimal format:
 
 - keep the same standard metadata header and `## Summary` section
-- omit product-style sections such as `Goals` or `Migration` when they add no value
+- omit full system-spec sections such as `Goals` or `Migration` when they add no value
 - write the problem plainly: what is wrong, who sees it, and why it matters
 - keep `Scope` short and explicit, including non-goals when useful
 - keep `Fix approach` at decision level, not line-by-line implementation detail
@@ -153,7 +153,7 @@ When a draft becomes implementation-ready, replace the semantic target with a co
 
 ## Canonical section order
 
-For a full product-style PRD, use these top-level sections in this order when they are relevant:
+For a full system-spec PRD, use these top-level sections in this order when they are relevant:
 
 1. Goals
 2. Non-goals
@@ -166,7 +166,7 @@ For a full product-style PRD, use these top-level sections in this order when th
 
 Rules:
 - The `## Summary` section appears before these canonical sections.
-- The minimal bug / issue PRD format above is also valid when it fits better than the full product-style order.
+- The minimal bug / issue PRD format above is also valid when it fits better than the full system-spec order.
 - Omit sections that would only contain placeholders.
 - Omit any section that does not help the reader make a decision.
 - Do not add filler text such as `None` just to preserve numbering.
@@ -186,13 +186,21 @@ Treat PRDs as short decision documents by default.
 - If a PRD becomes hard to skim in a few minutes, shorten it.
 - If detailed evidence is needed, move it to an appendix.
 
+## Technical focus
+
+- PRDs should be architecture and system specs first.
+- State the current system behavior, the required system behavior, the chosen solution, and the implementation boundaries.
+- Prefer concrete runtime, provider, storage, tool, config, API, UI, or validation requirements over broad business statements.
+- Keep motivation short. Do not write a market, sales, or business justification unless it changes a technical decision.
+- When the important decision is “do not build X”, say that directly in Goals, Non-goals, or Design.
+
 ## Section expectations
 
 ### Goals
 - Describe what the PRD intends to achieve.
 - Prefer concrete, user-visible or architecture-visible outcomes.
 - Prefer short bullets.
-- Keep the product requirement or user/problem outcome primary.
+- Keep the system requirement, architecture constraint, or behavior outcome primary.
 
 ### Non-goals
 - State what is explicitly out of scope.
@@ -207,7 +215,7 @@ Treat PRDs as short decision documents by default.
 - Explain the problem, why it matters, and why now.
 - Avoid long history retellings.
 
-### Design
+### Design / Solution
 - Describe the proposed behavior and structure.
 - Break into focused subsections only when each subsection adds a distinct decision.
 - Prefer 2–5 design subsections for most PRDs.
@@ -215,8 +223,13 @@ Treat PRDs as short decision documents by default.
 - Include alternative discussion only when it helps a reviewer understand a meaningful design decision, tradeoff, or rejected direction.
 - If an alternative note is useful, keep it to one short sentence when possible.
 - Make each subsection easy to review: state what changes, what stays the same, and why.
-- Prefer requirements phrased as what the product must do.
+- Prefer requirements phrased as what the system must do.
 - Avoid speculative implementation detail unless it is needed to make the requirement clear.
+
+### System spec
+- Add a `## System spec` or `### System spec` section when exact contracts matter.
+- Use it for API shapes, tool schemas, persistence rules, event semantics, state ownership, lifecycle rules, retry policy, or feature-flag behavior.
+- Keep it normative: say what must happen and what must not happen.
 
 ### Changes by Component
 - Use a table.
@@ -288,10 +301,11 @@ Before finishing:
 - Filename matches `prd-NNN-<slug>.md`.
 - Header metadata is complete.
 - Add a `## Summary` section after the metadata block.
-- Summary is short and leads with the product problem or outcome.
+- Summary is short and leads with the system problem, behavior, or outcome.
+- PRD focuses on architecture, system behavior, solution, and implementation requirements, not business narrative.
 - Top-level sections follow the required order.
 - Empty or low-value sections were omitted.
-- For a full product-style PRD, Goals describe the product requirement or user/problem outcome, not only the implementation phase.
+- For a full system-spec PRD, Goals describe the system requirement or architecture outcome, not only the implementation phase.
 - Background or Current behavior explains the real problem, not transcript history.
 - Design or Expected behavior states what the system must do.
 - Repeated explanation was removed.
