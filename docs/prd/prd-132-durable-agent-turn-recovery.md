@@ -8,136 +8,154 @@
 
 ## Summary
 
-- Codex websocket requests should survive a live websocket disconnect by reconnecting and retrying the last model request.
-- Recovery is live and in-memory only. It must not add database tables or migrations.
-- A Codex websocket response is complete only after `response.completed` is received.
-- If the websocket closes before `response.completed`, Themion should discard partial streamed output for that attempt and retry from the last committed conversation state.
+- Treat Codex `response.completed` as the success boundary for websocket streaming.
+- If the live websocket closes before completion, reconnect and retry the active request in memory.
+- Retry from committed conversation context only. Do not reuse partial streamed text or partial tool-call state.
+- Do not add durable request-attempt storage, migrations, or crash recovery for this fix.
+- Keep generic agent turn commit behavior unchanged: only completed backend responses become committed assistant output.
 
-## Goals
+## Problem
 
-- Maintain the active Codex websocket connection when it is healthy.
-- Reconnect when the active websocket disconnects before `response.completed`.
-- Retry the same model request in memory after reconnect.
-- Retry from committed conversation history, not from partial streamed text.
-- Avoid provider-side incremental continuation after a reconnect unless it is known safe.
-- Surface clear status messages when reconnect/retry is used or exhausted.
+Codex websocket streams can close before the provider sends `response.completed`. Partial text, reasoning, or tool-call arguments may already be visible, but that does not prove the provider finished the request.
 
-## Non-goals
+Without a clear reconnect rule, Themion can treat an interrupted provider attempt like a normal failure. The active turn then loses work even though the process is still alive and can safely rebuild the request from committed context.
 
-- Do not add a durable request-attempt table.
-- Do not add database migrations or persistent recovery metadata.
-- Do not recover an in-flight request after process crash or app restart.
-- Do not replay tool execution.
-- Do not persist partial streamed chunks for recovery.
-- Do not redesign generic agent turn orchestration.
-- Do not make the TUI or web UI infer completion from displayed text.
+This PRD records the narrow implemented fix: live, in-memory retry for Codex websocket disconnects before completion.
 
-## Background & Motivation
+## Scope
 
-Codex streaming uses a websocket. A live websocket can close before the provider sends the final `response.completed` event. Partial text or partial tool-call arguments do not prove that the provider request completed.
+In scope:
 
-The needed behavior is narrow: while the process is still alive, reconnect the websocket and retry the last request. The retry should use the last committed conversation state. It should not depend on any new durable storage.
+- Codex websocket streaming in `themion-core`
+- reconnecting after transport disconnect before `response.completed`
+- retrying the active request from committed conversation input
+- clearing partial streamed state before retry
+- clear status/error messages for reconnect, retry, and exhaustion
+- focused Codex client tests and docs alignment
 
-This keeps the fix small and avoids storing provider attempt state that the current product does not need.
+Out of scope:
 
-## Design
+- durable request-attempt tables or migrations
+- process-crash or app-restart recovery
+- replaying tool execution from a failed attempt
+- persisting partial streamed chunks for recovery
+- generic agent turn orchestration redesign
+- TUI or web logic that infers provider completion from displayed text
 
-### 1. Completion marker is the success boundary
+## Current behavior
 
-For Codex websocket streaming, the request is successful only after `response.completed` is received.
+Codex streaming uses a websocket. The stream may produce text, reasoning, tool-call arguments, rate-limit snapshots, and metadata before the final completion event.
+
+The only reliable success marker is `response.completed`. A transport close before that event leaves the attempt incomplete. Provider terminal events such as `response.failed` and provider `error` are different from reconnectable transport disconnects.
+
+## Expected behavior
+
+Required behavior:
+
+- a Codex websocket response is complete only after `response.completed`
+- websocket close before `response.completed` is incomplete and may trigger reconnect retry
+- websocket error before `response.completed` may trigger reconnect retry only when it is a transport disconnect
+- provider `response.failed` and provider `error` fail without reconnect retry
+- user cancellation stops the request and must not auto-retry
+- partial text, reasoning, or tool-call arguments from a failed attempt must not be committed or reused
+- after reconnect, the retry must send the full request from committed conversation context
+- retry exhaustion must return a clear incomplete-stream error
+
+## Fix approach
+
+### 1. Keep retry state live and in memory
+
+The Codex client keeps retry state only inside the active `chat_completion_stream` call.
+
+The live state tracks:
+
+- retry count
+- whether `response.completed` was seen
+- whether response events or partial content were seen
+- whether the retry has switched to a full request body
+- final successful attempt metadata such as rate-limit snapshots
+
+This state is discarded when the call succeeds, fails, is cancelled, or the process exits.
+
+### 2. Retry from committed context after reconnect
+
+A retry after reconnect must rebuild the provider request from committed conversation input.
 
 Rules:
 
-- websocket close before `response.completed` means incomplete
-- websocket error before `response.completed` means incomplete when the error is a transport disconnect
-- partial text, reasoning, or tool-call arguments do not mean complete
-- `response.failed` and provider `error` events are terminal provider failures, not reconnect triggers
-- user cancellation interrupts the request and must not auto-retry
+- clear the stream accumulator before retrying
+- do not include partial assistant output from the failed attempt
+- do not continue from a failed in-flight provider response id
+- do not use `previous_response_id` after reconnect unless the existing websocket context is still live and known safe
+- keep normal history commit behavior unchanged
 
-### 2. In-memory retry state
+This avoids mixing incomplete provider output into a new attempt.
 
-The Codex client keeps retry state only for the active `chat_completion_stream` call:
+### 3. Use a bounded reconnect policy
 
-- retry count
-- whether a reconnect retry already switched to a full request body
-- whether any response event or partial content was seen
-- whether `response.completed` was seen
-- rate-limit snapshots and stream metadata for the final successful attempt
+Default policy:
 
-This state is discarded when the call finishes, fails, is cancelled, or the process exits.
-
-### 3. Retry request shape
-
-Themion may use Codex `previous_response_id` only while the existing websocket context is still live and safe to reuse.
-
-After a reconnect, the retry must send the full request built from committed conversation history:
-
-- do not include partial streamed assistant output from the failed attempt
-- do not continue from a provider response id from the failed attempt
-- do not use `previous_response_id` from the failed in-flight response
-- clear the in-memory stream accumulator before retrying
-
-This avoids mixing partial failed output into the next attempt.
-
-### 4. Retry policy
-
-Default first policy:
-
-- retry up to 2 reconnect attempts for transport disconnects before `response.completed`
+- retry up to two reconnect attempts for transport disconnects before `response.completed`
 - stop immediately on user cancellation
 - stop immediately on provider terminal failure
-- on retry exhaustion, return a clear error that the stream closed before `response.completed`
-- emit status lines for disconnect, reconnect retry, full-request fallback, and retry exhaustion
+- emit compact status lines for disconnect, reconnect retry, full-request fallback, and retry exhaustion
+- return a clear error when the stream closes before completion and retry budget is exhausted
 
-### 5. Ownership
+### 4. Keep ownership provider-local
 
-Codex client responsibilities:
+The Codex client owns this policy because the failure mode and safe retry shape are Codex websocket specific.
 
-- detect websocket disconnect before `response.completed`
-- reconnect the websocket
-- retry the last active request from committed input
-- report compact status and trace metadata
+Generic agent core keeps its existing responsibilities:
 
-Generic agent core responsibilities:
+- build committed conversation context
+- call the backend
+- stream events through existing callbacks
+- commit assistant output only after the backend returns a completed response
 
-- keep normal history commit behavior unchanged
-- commit assistant output only from a completed provider response returned by the backend
-- keep TUI/web/headless behavior driven by existing streaming callbacks and final backend result
+## Risks / edge cases
 
-The provider client may own this narrow live reconnect policy because the failure mode and safe request shape are Codex websocket specific.
-
-## Changes by Component
-
-| File / area | Change |
-| --- | --- |
-| `docs/prd/prd-132-durable-agent-turn-recovery.md` | Define the narrow in-memory reconnect/retry behavior and explicitly reject durable request-attempt storage. |
-| `crates/themion-core/src/client_openai_codex.rs` | Maintain live Codex websocket reuse, detect disconnect before `response.completed`, reconnect, clear partial state, and retry the full request from committed context. |
-| `docs/README.md` | Keep the PRD table aligned with the narrowed scope. |
-
-## Edge Cases
-
-- websocket disconnect before any response event → retry after reconnect using committed request input.
-- websocket disconnect after partial text → clear partial text and retry after reconnect using committed request input.
-- websocket disconnect after partial tool-call arguments → clear partial tool state and retry after reconnect using committed request input.
-- websocket disconnect after `response.completed` → do not retry; treat the response as complete.
-- provider `response.failed` → fail the call without reconnect retry.
-- provider `error` event → fail the call without reconnect retry.
-- user cancellation during stream → close/interruption path wins and does not auto-retry.
-- retry limit reached → return a clear incomplete-stream error.
+- websocket disconnect before any response event → verify: reconnect and retry with committed request input
+- websocket disconnect after partial text → verify: clear partial text before retry
+- websocket disconnect after partial tool-call arguments → verify: clear partial tool state before retry
+- websocket disconnect after `response.completed` → verify: do not retry; treat the response as complete
+- provider `response.failed` → verify: fail without reconnect retry
+- provider `error` event → verify: fail without reconnect retry
+- user cancellation during stream → verify: stop without reconnect retry
+- retry limit reached → verify: return a clear incomplete-stream error
 
 ## Migration
 
-No migration. This PRD must not add tables, columns, indexes, or persistent request-attempt metadata.
+No migration.
 
-## Testing
+This PRD must not add tables, columns, indexes, or persistent request-attempt metadata.
 
-- force websocket close before any response event → verify: Themion reconnects and retries the full request.
-- force websocket close after partial streamed text → verify: partial text is cleared and retry uses committed context only.
-- force websocket close after partial tool-call arguments → verify: partial tool state is cleared and retry uses committed context only.
-- send `response.completed` → verify: stream succeeds and no reconnect retry is attempted.
-- send provider `response.failed` → verify: call fails without reconnect retry.
-- cancel while streaming → verify: call stops without reconnect retry.
-- exhaust reconnect retries → verify: error states that stream closed before `response.completed`.
-- run `cargo test -p themion-core client_openai_codex` → verify: focused Codex tests pass.
-- run `cargo check -p themion-core` → verify: default core build passes.
-- run `cargo check -p themion-core --all-features` → verify: all feature core build passes.
+## Validation
+
+- force websocket close before any response event → verify: Themion reconnects and retries the full request
+- force websocket close after partial streamed text → verify: partial text is cleared and retry uses committed context only
+- force websocket close after partial tool-call arguments → verify: partial tool state is cleared and retry uses committed context only
+- send `response.completed` → verify: stream succeeds and no reconnect retry is attempted
+- send provider `response.failed` → verify: call fails without reconnect retry
+- cancel while streaming → verify: call stops without reconnect retry
+- exhaust reconnect retries → verify: error states that stream closed before `response.completed`
+- run `cargo test -p themion-core client_openai_codex` → verify: focused Codex tests pass
+- run `cargo check -p themion-core` → verify: default core build passes
+- run `cargo check -p themion-core --all-features` → verify: all-feature core build passes
+
+## Implementation notes
+
+The implemented slice keeps recovery live-only and provider-local in `crates/themion-core/src/client_openai_codex.rs`.
+
+Landed behavior:
+
+- detects Codex websocket disconnects before `response.completed`
+- reconnects and retries the active request from committed context
+- clears partial stream accumulators before retry
+- avoids durable request-attempt storage and migrations
+- preserves normal agent history commit behavior
+
+Validation completed for the landed slice:
+
+- `cargo test -p themion-core client_openai_codex`
+- `cargo check -p themion-core`
+- `cargo check -p themion-core --all-features`
