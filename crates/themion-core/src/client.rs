@@ -78,6 +78,48 @@ pub struct ChatRoundTrace {
     pub rate_limits: Option<ApiCallRateLimitReport>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderConnectionState {
+    Disconnected,
+    Connecting,
+    Connected,
+    Streaming,
+    Reconnecting,
+    Degraded,
+    Closing,
+    Closed,
+}
+
+impl ProviderConnectionState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Disconnected => "disconnected",
+            Self::Connecting => "connecting",
+            Self::Connected => "connected",
+            Self::Streaming => "streaming",
+            Self::Reconnecting => "reconnecting",
+            Self::Degraded => "degraded",
+            Self::Closing => "closing",
+            Self::Closed => "closed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderConnectionStatus {
+    pub agent_id: String,
+    pub provider: String,
+    pub state: ProviderConnectionState,
+    pub state_changed_at_ms: u64,
+    pub last_connected_at_ms: Option<u64>,
+    pub last_disconnected_at_ms: Option<u64>,
+    pub last_error: Option<String>,
+    pub reconnect_attempts: u32,
+    pub active_request_id: Option<String>,
+    pub last_response_completed_at_ms: Option<u64>,
+}
+
 #[derive(Deserialize, Default)]
 struct StreamDelta {
     content: Option<String>,
@@ -124,6 +166,10 @@ pub trait ChatBackend: Send + Sync {
         messages: &[Message],
         tools: &Value,
     ) -> Value;
+
+    fn provider_connection_status(&self) -> Option<ProviderConnectionStatus> {
+        None
+    }
 
     async fn chat_completion_stream(
         &self,

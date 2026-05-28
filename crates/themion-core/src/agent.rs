@@ -1,5 +1,5 @@
 use crate::agents_md;
-use crate::client::{ChatBackend, ChatRoundTrace, Message, ModelInfo};
+use crate::client::{ChatBackend, ChatRoundTrace, Message, ModelInfo, ProviderConnectionStatus};
 use crate::codex_cli_instruction::CODEX_CLI_WEB_SEARCH_INSTRUCTION;
 use crate::context_report::{
     estimate_messages_chars, estimate_messages_tokens, estimate_text_tokens, EstimateMode,
@@ -482,6 +482,10 @@ pub struct ApiRoundLogArtifact {
 }
 
 impl Agent {
+    pub fn provider_connection_status(&self) -> Option<ProviderConnectionStatus> {
+        self.client.provider_connection_status()
+    }
+
     pub fn new(
         client: Box<dyn ChatBackend + Send + Sync>,
         model: String,

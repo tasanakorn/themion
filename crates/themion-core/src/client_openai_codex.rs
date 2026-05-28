@@ -3,7 +3,11 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::RwLock as StdRwLock;
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -13,8 +17,8 @@ use uuid::Uuid;
 
 use crate::auth::CodexAuth;
 use crate::client::{
-    ChatBackend, ChatRoundTrace, FunctionCall, Message, ModelInfo, ResponseMessage, ToolCall,
-    Usage, UsageDetails,
+    ChatBackend, ChatRoundTrace, FunctionCall, Message, ModelInfo, ProviderConnectionState,
+    ProviderConnectionStatus, ResponseMessage, ToolCall, Usage, UsageDetails,
 };
 use crate::client_provider_types::{
     parse_active_rate_limit_from_headers, parse_all_rate_limits_from_headers, report_for_api_call,
@@ -36,6 +40,10 @@ pub struct CodexClient {
     auth_writer: Box<dyn Fn(&CodexAuth) -> Result<()> + Send + Sync>,
     websocket: Arc<Mutex<Option<CodexWebsocketConnection>>>,
     prompt_context: Arc<Mutex<Option<CodexPromptContext>>>,
+    active_request: Arc<AtomicBool>,
+    idle_monitor_started: AtomicBool,
+    shutdown: Arc<AtomicBool>,
+    connection_status: Arc<StdRwLock<ProviderConnectionStatus>>,
 }
 
 struct CodexWebsocketConnection {
@@ -51,6 +59,14 @@ struct CodexPromptContext {
     tools: Value,
     input_items: Vec<Value>,
     response_id: String,
+}
+
+struct ActiveCodexRequestGuard(Arc<AtomicBool>);
+
+impl Drop for ActiveCodexRequestGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -230,6 +246,46 @@ fn short_session_id(session_id: &str) -> String {
     format!("{first_part}..")
 }
 
+fn unix_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn update_provider_connection_status(
+    connection_status: &StdRwLock<ProviderConnectionStatus>,
+    state: ProviderConnectionState,
+    active_request_id: Option<String>,
+    last_error: Option<String>,
+    reconnect_attempts: Option<u32>,
+) {
+    let now_ms = unix_epoch_ms();
+    let Ok(mut status) = connection_status.write() else {
+        return;
+    };
+    if status.state != state {
+        status.state = state.clone();
+        status.state_changed_at_ms = now_ms;
+    }
+    match state {
+        ProviderConnectionState::Connected | ProviderConnectionState::Streaming => {
+            status.last_connected_at_ms.get_or_insert(now_ms);
+        }
+        ProviderConnectionState::Disconnected | ProviderConnectionState::Closed => {
+            status.last_disconnected_at_ms = Some(now_ms);
+        }
+        _ => {}
+    }
+    status.active_request_id = active_request_id;
+    status.last_error = last_error;
+    if let Some(reconnect_attempts) = reconnect_attempts {
+        status.reconnect_attempts = reconnect_attempts;
+    }
+}
+
 impl CodexClient {
     pub fn new(
         base_url: String,
@@ -243,6 +299,7 @@ impl CodexClient {
             .and_then(|key| key.strip_prefix("session_"))
             .map(ToString::to_string)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let now_ms = unix_epoch_ms();
         Self {
             http: reqwest::Client::new(),
             base_url,
@@ -250,12 +307,144 @@ impl CodexClient {
             reasoning_effort,
             user_agent: build_codex_user_agent(),
             session_id: request_id.clone(),
-            thread_id: request_id,
+            thread_id: request_id.clone(),
             auth: Arc::new(RwLock::new(auth)),
             auth_writer,
             websocket: Arc::new(Mutex::new(None)),
             prompt_context: Arc::new(Mutex::new(None)),
+            active_request: Arc::new(AtomicBool::new(false)),
+            idle_monitor_started: AtomicBool::new(false),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            connection_status: Arc::new(StdRwLock::new(ProviderConnectionStatus {
+                agent_id: request_id.clone(),
+                provider: "openai-codex".to_string(),
+                state: ProviderConnectionState::Disconnected,
+                state_changed_at_ms: now_ms,
+                last_connected_at_ms: None,
+                last_disconnected_at_ms: None,
+                last_error: None,
+                reconnect_attempts: 0,
+                active_request_id: None,
+                last_response_completed_at_ms: None,
+            })),
         }
+    }
+
+    fn update_connection_status(
+        &self,
+        state: ProviderConnectionState,
+        active_request_id: Option<String>,
+        last_error: Option<String>,
+        reconnect_attempts: Option<u32>,
+    ) {
+        update_provider_connection_status(
+            &self.connection_status,
+            state,
+            active_request_id,
+            last_error,
+            reconnect_attempts,
+        );
+    }
+
+    fn mark_response_completed(&self) {
+        let Ok(mut status) = self.connection_status.write() else {
+            return;
+        };
+        status.last_response_completed_at_ms = Some(unix_epoch_ms());
+    }
+
+    fn start_idle_monitor_if_needed(&self) {
+        if self
+            .idle_monitor_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        let websocket = self.websocket.clone();
+        let active_request = self.active_request.clone();
+        let shutdown = self.shutdown.clone();
+        let connection_status = self.connection_status.clone();
+
+        tokio::spawn(async move {
+            while !shutdown.load(Ordering::Acquire) {
+                if active_request.load(Ordering::Acquire) {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+
+                let mut guard = websocket.lock().await;
+                if active_request.load(Ordering::Acquire) {
+                    drop(guard);
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    continue;
+                }
+
+                let Some(connection) = guard.as_mut() else {
+                    drop(guard);
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                };
+
+                match tokio::time::timeout(Duration::from_millis(250), connection.stream.next())
+                    .await
+                {
+                    Ok(Some(Ok(WsMessage::Ping(payload)))) => {
+                        if let Err(err) = connection.stream.send(WsMessage::Pong(payload)).await {
+                            *guard = None;
+                            update_provider_connection_status(
+                                &connection_status,
+                                ProviderConnectionState::Disconnected,
+                                None,
+                                Some(format!("idle pong failed: {err}")),
+                                None,
+                            );
+                        }
+                    }
+                    Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => {
+                        *guard = None;
+                        update_provider_connection_status(
+                            &connection_status,
+                            ProviderConnectionState::Disconnected,
+                            None,
+                            Some("idle websocket closed".to_string()),
+                            None,
+                        );
+                    }
+                    Ok(Some(Err(err))) => {
+                        *guard = None;
+                        update_provider_connection_status(
+                            &connection_status,
+                            ProviderConnectionState::Disconnected,
+                            None,
+                            Some(format!("idle websocket error: {err}")),
+                            None,
+                        );
+                    }
+                    Ok(Some(Ok(WsMessage::Text(_)))) | Ok(Some(Ok(WsMessage::Binary(_)))) => {
+                        update_provider_connection_status(
+                            &connection_status,
+                            ProviderConnectionState::Degraded,
+                            None,
+                            Some("unexpected idle websocket message".to_string()),
+                            None,
+                        );
+                    }
+                    Ok(Some(Ok(WsMessage::Pong(_)))) | Ok(Some(Ok(WsMessage::Frame(_)))) => {}
+                    Err(_) => {}
+                }
+                drop(guard);
+            }
+
+            update_provider_connection_status(
+                &connection_status,
+                ProviderConnectionState::Closed,
+                None,
+                None,
+                None,
+            );
+        });
     }
 
     async fn ensure_fresh_token(&self) -> Result<()> {
@@ -374,6 +563,7 @@ impl CodexClient {
         reconnect_body: Option<&Value>,
         reconnect_status_line: Option<&str>,
         state: &mut CodexStreamState,
+        request_id: &str,
         on_chunk: &mut (dyn FnMut(String) + Send),
         on_reasoning_delta: &mut (dyn FnMut(String) + Send),
         on_status: &mut (dyn FnMut(String) + Send),
@@ -387,13 +577,44 @@ impl CodexClient {
         loop {
             let reused = guard.is_some();
             if guard.is_none() {
-                *guard = Some(
-                    self.connect_responses_websocket(access_token, account_id, on_status)
-                        .await?,
+                self.update_connection_status(
+                    ProviderConnectionState::Connecting,
+                    None,
+                    None,
+                    Some(reconnect_attempts as u32),
+                );
+                let connection = match self
+                    .connect_responses_websocket(access_token, account_id, on_status)
+                    .await
+                {
+                    Ok(connection) => connection,
+                    Err(err) => {
+                        self.update_connection_status(
+                            ProviderConnectionState::Disconnected,
+                            None,
+                            Some(err.to_string()),
+                            Some(reconnect_attempts as u32),
+                        );
+                        return Err(err);
+                    }
+                };
+                *guard = Some(connection);
+                self.start_idle_monitor_if_needed();
+                self.update_connection_status(
+                    ProviderConnectionState::Connected,
+                    None,
+                    None,
+                    Some(reconnect_attempts as u32),
                 );
             } else {
                 on_status("codex stream: reusing websocket connection".to_string());
             }
+            self.update_connection_status(
+                ProviderConnectionState::Streaming,
+                Some(request_id.to_string()),
+                None,
+                Some(reconnect_attempts as u32),
+            );
 
             let connection = guard
                 .as_mut()
@@ -418,9 +639,24 @@ impl CodexClient {
             .await;
 
             match result {
-                Ok(()) => return Ok((response_status, rate_limit_snapshots, used_reconnect_body)),
+                Ok(()) => {
+                    self.mark_response_completed();
+                    self.update_connection_status(
+                        ProviderConnectionState::Connected,
+                        None,
+                        None,
+                        Some(reconnect_attempts as u32),
+                    );
+                    return Ok((response_status, rate_limit_snapshots, used_reconnect_body));
+                }
                 Err(err) => {
                     let has_partial_response_content = state.has_partial_response_content();
+                    self.update_connection_status(
+                        ProviderConnectionState::Disconnected,
+                        None,
+                        Some(err.source.to_string()),
+                        Some(reconnect_attempts as u32),
+                    );
                     *guard = None;
                     let can_retry_after_disconnect = reconnect_attempts
                         < CODEX_WEBSOCKET_RECONNECT_RETRY_ATTEMPTS
@@ -429,6 +665,12 @@ impl CodexClient {
                         && should_cancel.is_none_or(|cancel| !cancel());
                     if can_retry_after_disconnect {
                         reconnect_attempts += 1;
+                        self.update_connection_status(
+                            ProviderConnectionState::Reconnecting,
+                            Some(request_id.to_string()),
+                            None,
+                            Some(reconnect_attempts as u32),
+                        );
                         if let Some(reconnect_body) = reconnect_body {
                             request_body = reconnect_body.clone();
                             used_reconnect_body = true;
@@ -1280,6 +1522,13 @@ impl ChatBackend for CodexClient {
         )
     }
 
+    fn provider_connection_status(&self) -> Option<ProviderConnectionStatus> {
+        self.connection_status
+            .read()
+            .ok()
+            .map(|status| status.clone())
+    }
+
     async fn chat_completion_stream(
         &self,
         model: &str,
@@ -1295,7 +1544,19 @@ impl ChatBackend for CodexClient {
         Option<ApiCallRateLimitReport>,
         ChatRoundTrace,
     )> {
+        if self
+            .active_request
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            anyhow::bail!(
+                "Codex request already in progress for this agent; concurrent same-agent Codex requests are not queued"
+            );
+        }
+        let _active_request_guard = ActiveCodexRequestGuard(self.active_request.clone());
+
         let (access_token, account_id) = self.auth_headers().await?;
+        let request_id = Uuid::new_v4().to_string();
 
         let tool_count = tools.as_array().map_or(0, Vec::len);
         on_status(format!(
@@ -1332,6 +1593,7 @@ impl ChatBackend for CodexClient {
                 Some(&prompt_plan.full_body),
                 Some(&reconnect_status_line),
                 &mut state,
+                &request_id,
                 &mut *on_chunk,
                 &mut *on_reasoning_delta,
                 &mut *on_status,
@@ -1455,6 +1717,12 @@ impl ChatBackend for CodexClient {
     }
 }
 
+impl Drop for CodexClient {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1466,6 +1734,25 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
         }]
+    }
+
+    fn test_auth() -> CodexAuth {
+        CodexAuth {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: i64::MAX,
+            account_id: "account".to_string(),
+        }
+    }
+
+    fn test_client(prompt_cache_key: Option<String>) -> CodexClient {
+        CodexClient::new(
+            "https://chatgpt.com/backend-api/codex".to_string(),
+            prompt_cache_key,
+            String::new(),
+            test_auth(),
+            Box::new(|_| Ok(())),
+        )
     }
 
     #[test]
@@ -1483,6 +1770,42 @@ mod tests {
             assert_eq!(body["reasoning"]["effort"], "xhigh");
             assert_eq!(body["reasoning"]["summary"], "auto");
         }
+    }
+
+    #[test]
+    fn codex_provider_identity_is_agent_scoped_from_prompt_cache_key() {
+        let master = test_client(Some("session_session-1_agent_master".to_string()));
+        let worker = test_client(Some("session_session-1_agent_smith-1".to_string()));
+
+        assert_ne!(master.session_id, worker.session_id);
+        assert_eq!(master.session_id, master.thread_id);
+        assert_eq!(worker.session_id, worker.thread_id);
+        assert_eq!(
+            master.provider_connection_status().unwrap().agent_id,
+            "session-1_agent_master"
+        );
+        assert_eq!(
+            worker.provider_connection_status().unwrap().agent_id,
+            "session-1_agent_smith-1"
+        );
+    }
+
+    #[test]
+    fn codex_rejects_concurrent_same_agent_request_flag() {
+        let client = test_client(Some("session_session-1_agent_master".to_string()));
+        assert!(client
+            .active_request
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok());
+        assert!(client
+            .active_request
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err());
+        client.active_request.store(false, Ordering::Release);
+        assert!(client
+            .active_request
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok());
     }
 
     #[test]

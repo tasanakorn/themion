@@ -29,7 +29,11 @@ Themion currently uses the following Codex backend endpoints:
 
 The `/models` endpoint is used for model discovery and model metadata.
 
-The `/responses` WebSocket endpoint is used for streamed model execution. Themion keeps one WebSocket connection per Codex client session and reuses it across turns when available. Each turn still sends the full translated prompt in a `response.create` WebSocket message. It does not yet use incremental WebSocket continuation state.
+The `/responses` WebSocket endpoint is used for streamed model execution. Themion keeps one WebSocket lifecycle per Codex-backed local agent and reuses that agent's socket across turns when available. It does not share one socket across agents.
+
+Each provider request is still request-scoped. Themion allows at most one active Codex request per agent socket. A concurrent second request for the same agent is rejected with a clear busy/in-progress error instead of being queued or multiplexed.
+
+Themion uses full or incremental prompt input depending on the committed prompt context and live socket state. On reconnect after a transport failure before `response.completed`, it falls back to the PRD-132 committed-context retry rule.
 
 The OAuth token endpoint is used only for refresh-token exchange.
 
@@ -59,6 +63,8 @@ WebSocket upgrade requests to `/responses` additionally include:
 - `thread-id: <thread id>`
 - `x-client-request-id: <thread id>`
 - `OpenAI-Beta: responses=experimental`
+
+For CLI local agents, `session-id`, `thread-id`, `x-client-request-id`, and the prompt cache key include both the Themion session and local agent identity. This prevents cross-agent provider continuation or prompt-cache collisions when several local agents share one Themion session.
 
 ## Model metadata contract
 
@@ -135,6 +141,35 @@ The request body sent to `/responses` includes at least:
 - `tools`
 - `stream: true`
 - `instructions` when a first system prompt exists
+
+## WebSocket lifecycle and status
+
+Codex WebSocket lifecycle is owned by `themion-core`, close to `client_openai_codex.rs`. CLI, TUI, web, and headless surfaces do not own provider socket policy.
+
+Runtime behavior:
+
+- one Codex client/backend is built per local agent
+- one agent never sends through another agent's socket
+- the socket is opened lazily when the agent sends a Codex request
+- while a request is active, the request loop owns streaming frames and may reconnect eagerly within PRD-132 retry limits
+- after a successful response, an async idle monitor keeps the socket observable while no request is active
+- idle `Ping` frames are answered with `Pong`
+- idle `Close` frames or read errors clear the socket and publish `disconnected`
+- idle reconnect is lazy; the next request reconnects when needed
+- dropping or replacing the Codex backend asks the idle monitor to stop and publish `closed`
+
+Provider connection status is exposed as runtime-owned snapshot data with UTC epoch millisecond timestamps. Current states are:
+
+- `disconnected`
+- `connecting`
+- `connected`
+- `streaming`
+- `reconnecting`
+- `degraded`
+- `closing`
+- `closed`
+
+The status includes agent identity, provider name, state change time, last connect/disconnect time, last error, reconnect attempts, active request id, and last response completion time.
 
 ## Stream parsing contract
 

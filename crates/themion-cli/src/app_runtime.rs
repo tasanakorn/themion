@@ -432,6 +432,10 @@ pub(crate) fn build_app_snapshot(
                     .agent_activity_changed_at_by_session
                     .get(&handle.session_id)
                     .copied(),
+                provider_connection: handle
+                    .agent
+                    .as_ref()
+                    .and_then(|agent| agent.provider_connection_status()),
             })
             .collect(),
         rate_limits: state

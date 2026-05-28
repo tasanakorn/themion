@@ -132,6 +132,7 @@ pub struct AppSnapshotAgent {
     pub activity_status: Option<String>,
     pub activity_label: Option<String>,
     pub activity_changed_at_ms: Option<u64>,
+    pub provider_connection: Option<themion_core::ProviderConnectionStatus>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -455,6 +456,7 @@ impl AppState {
                 activity_status: None,
                 activity_label: None,
                 activity_changed_at_ms: None,
+                provider_connection: None,
             }],
             rate_limits: None,
             #[cfg(feature = "stylos")]
@@ -2856,7 +2858,10 @@ pub fn build_agent(
             })?;
             Box::new(CodexClient::new(
                 session.base_url.clone(),
-                Some(format!("session_{}", session_id)),
+                Some(format!(
+                    "session_{}_agent_{}",
+                    session_id, local_role_agent_id
+                )),
                 session.effort.clone(),
                 auth,
                 Box::new(move |a: &themion_core::CodexAuth| {

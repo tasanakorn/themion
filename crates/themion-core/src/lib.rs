@@ -15,7 +15,7 @@ pub mod tools;
 pub mod workflow;
 
 pub use auth::CodexAuth;
-pub use client::{ChatBackend, ModelInfo};
+pub use client::{ChatBackend, ModelInfo, ProviderConnectionState, ProviderConnectionStatus};
 pub use client_provider_types::{
     ApiCallRateLimitReport, ExtractedLimitWindow, ExtractedRateLimitSnapshot,
 };
