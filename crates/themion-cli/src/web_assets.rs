@@ -8,6 +8,8 @@ const SPA_WASM: &[u8] = include_bytes!(concat!(
     env!("OUT_DIR"),
     "/web-assets/themion_cli_web_ui_bg.wasm"
 ));
+const CODEMIRROR_EDITOR_JS: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/web-assets/codemirror_editor.js"));
 const JETBRAINS_MONO_NERD_FONT: &[u8] = include_bytes!(concat!(
     env!("OUT_DIR"),
     "/web-assets/fonts/JetBrainsMonoNerdFont-Regular.ttf"
@@ -29,6 +31,10 @@ pub fn spa_wasm() -> &'static [u8] {
     SPA_WASM
 }
 
+pub fn codemirror_editor_js() -> &'static str {
+    CODEMIRROR_EDITOR_JS
+}
+
 pub fn jetbrains_mono_nerd_font() -> &'static [u8] {
     JETBRAINS_MONO_NERD_FONT
 }
@@ -46,6 +52,9 @@ pub fn missing_spa_assets() -> Vec<&'static str> {
     }
     if SPA_WASM.is_empty() {
         missing.push("web-assets/themion_cli_web_ui_bg.wasm");
+    }
+    if CODEMIRROR_EDITOR_JS.is_empty() {
+        missing.push("web-assets/codemirror_editor.js");
     }
     if JETBRAINS_MONO_NERD_FONT.is_empty() {
         missing.push("web-assets/fonts/JetBrainsMonoNerdFont-Regular.ttf");

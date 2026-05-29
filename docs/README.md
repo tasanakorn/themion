@@ -5,6 +5,7 @@
 
 - [architecture.md](architecture.md) — workspace structure, core design philosophy, component map, process/thread model, harness loop, context windowing, streaming, tools, persistent history, TUI behavior, and Stylos multi-agent status shape.
 - [engine-runtime.md](engine-runtime.md) — detailed walkthrough of prompt inputs, `AGENTS.md` injection, context building, tool-calling flow, workflow runtime behavior, SQLite session storage, and the boundary between CLI-local agent roles and core harness state.
+- [web-mode.md](web-mode.md) — `themion-cli --web` browser surface behavior, including the project workspace, file APIs, path scope, editor packaging, and preview safety rules.
 - [`../crates/themion-web/README.md`](../crates/themion-web/README.md) — local web binary scope, bind behavior, and pinned bundled terminal assets for `themion-web`.
 - [prd-self-note-guidance.md](prd-self-note-guidance.md) — focused guidance on when to create self-notes and how to avoid noisy board-note behavior.
 
@@ -14,6 +15,7 @@ Active and recent numbered PRD documents live in `docs/prd/`. The repository kee
 
 | ID      | Title                                                                                                       | Status        | Version | Scope                                    |
 | ------- | ----------------------------------------------------------------------------------------------------------- | ------------- | ------- | ---------------------------------------- |
+| PRD-134 | [Web Code Editor and File Preview](prd/prd-134-web-code-editor-and-file-preview.md) | Proposed | v0.81.0 | `themion-cli --web`, `themion-cli-web-ui`, docs; adds an IDE-like project workspace using packaged CodeMirror 6 and embedded JetBrains Mono Nerd Font, with directory exploration, text/code editing, syntax highlighting, safe previews for image/video/Markdown/HTML/PDF files, and project-scoped filesystem safeguards |
 | PRD-133 | [Per-Agent Codex WebSocket Lifecycle and Event Handling](prd/prd-133-per-agent-codex-websocket-lifecycle.md) | Implemented | v0.80.2 | `themion-core`, `themion-cli`, docs; makes Codex WebSocket ownership explicit per local agent, rejects shared multiplexing, adds runtime-owned async idle socket handling, rejects same-agent concurrent requests, and publishes event-driven provider connection status |
 | PRD-132 | [In-Memory Provider Request Reconnect and Retry](prd/prd-132-durable-agent-turn-recovery.md) | Implemented | v0.80.1 | `themion-core`, docs; maintains live Codex websocket reconnect and retries the last request from committed context without database tables or migrations |
 | PRD-131 | [Scheduled Agent Tasks](prd/prd-131-scheduled-agent-tasks.md) | Implemented | v0.80.0 | `themion-core`, `themion-cli`, docs; adds durable schedule storage/tools, a runtime-owned dispatcher, scheduler-agent routing, specific-agent busy policies, UTC one-shot and interval cron timing, focused schedule tests, and version-bump follow-through |

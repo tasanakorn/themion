@@ -1,4 +1,4 @@
-use leptos::ev::{KeyboardEvent, SubmitEvent};
+use leptos::ev::{KeyboardEvent, PointerEvent, SubmitEvent};
 use leptos::html::Div;
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,18 @@ use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{CloseEvent, ErrorEvent, Event, MessageEvent, WebSocket};
+use web_sys::{CloseEvent, Element, ErrorEvent, Event, MessageEvent, WebSocket};
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_name = themionMountCodeEditor)]
+    fn themion_mount_code_editor(
+        host: &Element,
+        content: &str,
+        on_change: &JsValue,
+        language: &str,
+    ) -> bool;
+}
 
 #[derive(Clone, Debug, Default, Deserialize)]
 struct WebStatusResponse {
@@ -97,6 +108,76 @@ struct WebRecentEvent {
     kind: String,
     text: String,
     at_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[allow(dead_code)]
+struct WorkspaceTreeResponse {
+    path: String,
+    entries: Vec<WorkspaceEntry>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[allow(dead_code)]
+struct WorkspaceEntry {
+    path: String,
+    name: String,
+    kind: WorkspaceFileKind,
+    size_bytes: u64,
+    modified_at_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct WorkspaceFileResponse {
+    path: String,
+    kind: WorkspaceFileKind,
+    size_bytes: u64,
+    modified_at_ms: Option<u64>,
+    conflict_token: String,
+    content: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[allow(dead_code)]
+struct WorkspaceSaveResponse {
+    path: String,
+    kind: WorkspaceFileKind,
+    size_bytes: u64,
+    modified_at_ms: Option<u64>,
+    conflict_token: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct WorkspaceErrorResponse {
+    error: WorkspaceErrorDetail,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct WorkspaceErrorDetail {
+    code: String,
+    message: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct WorkspaceSaveRequest {
+    path: String,
+    content: String,
+    conflict_token: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkspaceFileKind {
+    Directory,
+    Text,
+    Image,
+    Video,
+    Markdown,
+    Html,
+    Pdf,
+    Binary,
+    #[default]
+    Unsupported,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -518,6 +599,14 @@ enum ViewTab {
     Transcript,
     Agents,
     Terminal,
+    Workspace,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspaceViewMode {
+    CodeOnly,
+    CodePreview,
+    PreviewOnly,
 }
 
 #[wasm_bindgen(start)]
@@ -540,6 +629,19 @@ fn App() -> impl IntoView {
     let prompt_error = RwSignal::new(None::<String>);
     let transcript_history_ref = NodeRef::<Div>::new();
     let transcript_trailing = RwSignal::new(true);
+    let workspace_tree = RwSignal::new(None::<WorkspaceTreeResponse>);
+    let workspace_path = RwSignal::new(String::new());
+    let workspace_file = RwSignal::new(None::<WorkspaceFileResponse>);
+    let workspace_content = RwSignal::new(String::new());
+    let workspace_dirty = RwSignal::new(false);
+    let workspace_status = RwSignal::new(String::from("Loading workspace…"));
+    let workspace_preview_path = RwSignal::new(None::<String>);
+    let workspace_editor_ref = NodeRef::<Div>::new();
+    let workspace_editor_mounted = RwSignal::new(false);
+    let workspace_view_mode = RwSignal::new(WorkspaceViewMode::CodeOnly);
+    let workspace_split_percent = RwSignal::new(50_u8);
+    let workspace_grid_ref = NodeRef::<Div>::new();
+    let workspace_split_dragging = RwSignal::new(false);
 
     let shared_socket = create_shared_socket(
         socket_state,
@@ -597,6 +699,41 @@ fn App() -> impl IntoView {
                 active_agent.set(next_agent);
             }
         }
+    });
+
+    Effect::new(move |_| {
+        leptos::task::spawn_local(async move {
+            match fetch_workspace_tree("").await {
+                Ok(payload) => {
+                    workspace_status.set(format!(
+                        "Workspace root loaded: {} entries",
+                        payload.entries.len()
+                    ));
+                    workspace_tree.set(Some(payload));
+                }
+                Err(error) => workspace_status.set(error),
+            }
+        });
+    });
+
+    let editor_change = Closure::<dyn FnMut(String)>::new(move |value: String| {
+        workspace_content.set(value);
+        workspace_dirty.set(true);
+    });
+    let editor_change_fn = editor_change.as_ref().clone();
+    editor_change.forget();
+
+    Effect::new(move |_| {
+        let Some(file) = workspace_file.get() else {
+            return;
+        };
+        let Some(host) = workspace_editor_ref.get() else {
+            return;
+        };
+        let language = workspace_language(&file.path, file.kind);
+        let content = workspace_content.get_untracked();
+        let _ = themion_mount_code_editor(&host, &content, &editor_change_fn, language);
+        workspace_editor_mounted.set(true);
     });
 
     Effect::new(move |_| {
@@ -667,6 +804,87 @@ fn App() -> impl IntoView {
         }
     };
 
+    let open_workspace_entry = move |entry: WorkspaceEntry| {
+        let path = entry.path.clone();
+        if entry.kind == WorkspaceFileKind::Directory {
+            workspace_path.set(path.clone());
+            workspace_status.set(format!("Opening directory {path}"));
+            leptos::task::spawn_local(async move {
+                match fetch_workspace_tree(&path).await {
+                    Ok(payload) => {
+                        workspace_status.set(format!(
+                            "Directory loaded: {} entries",
+                            payload.entries.len()
+                        ));
+                        workspace_tree.set(Some(payload));
+                    }
+                    Err(error) => workspace_status.set(error),
+                }
+            });
+            return;
+        }
+
+        if workspace_kind_is_editable(entry.kind) {
+            workspace_status.set(format!("Opening file {path}"));
+            leptos::task::spawn_local(async move {
+                match fetch_workspace_file(&path).await {
+                    Ok(payload) => {
+                        workspace_content.set(payload.content.clone());
+                        workspace_preview_path
+                            .set(workspace_kind_preview_url(payload.kind, &payload.path));
+                        workspace_file.set(Some(payload));
+                        workspace_dirty.set(false);
+                        workspace_status.set("File loaded".to_string());
+                    }
+                    Err(error) => workspace_status.set(error),
+                }
+            });
+        } else if workspace_kind_is_previewable(entry.kind) {
+            workspace_file.set(None);
+            workspace_content.set(String::new());
+            workspace_preview_path.set(Some(workspace_preview_url(&path)));
+            workspace_status.set(format!("Previewing {path}"));
+        } else {
+            workspace_status.set(format!("Unsupported file type: {path}"));
+        }
+    };
+
+    let start_workspace_split_drag = move |ev: PointerEvent| {
+        ev.prevent_default();
+        workspace_split_dragging.set(true);
+        if let Some(target) = ev.current_target() {
+            if let Ok(element) = target.dyn_into::<Element>() {
+                let _ = element.set_pointer_capture(ev.pointer_id());
+            }
+        }
+        update_workspace_split_from_client_x(
+            workspace_grid_ref,
+            workspace_split_percent,
+            ev.client_x(),
+        );
+    };
+
+    let drag_workspace_split = move |ev: PointerEvent| {
+        if !workspace_split_dragging.get_untracked() {
+            return;
+        }
+        ev.prevent_default();
+        update_workspace_split_from_client_x(
+            workspace_grid_ref,
+            workspace_split_percent,
+            ev.client_x(),
+        );
+    };
+
+    let stop_workspace_split_drag = move |ev: PointerEvent| {
+        workspace_split_dragging.set(false);
+        if let Some(target) = ev.current_target() {
+            if let Ok(element) = target.dyn_into::<Element>() {
+                let _ = element.release_pointer_capture(ev.pointer_id());
+            }
+        }
+    };
+
     let sidebar_button = move |tab: ViewTab,
                                icon: &'static str,
                                label: &'static str,
@@ -707,8 +925,79 @@ fn App() -> impl IntoView {
 
                 <nav class="sidebar-nav" aria-label="main menu">
                     {sidebar_button(ViewTab::Transcript, "󰈙", "Agent", "chat transcript")}
+                    {sidebar_button(ViewTab::Workspace, "󰉋", "Workspace", "code editor")}
                     {sidebar_button(ViewTab::Terminal, "", "Terminal", "placeholder page")}
                 </nav>
+
+                {move || if active_tab.get() == ViewTab::Workspace {
+                    view! {
+                        <div class="sidebar-file-explorer">
+                            <div class="sidebar-section-title">
+                                <strong>"Files"</strong>
+                                <small>{move || workspace_path.get().if_empty_label("root")}</small>
+                            </div>
+                            <div class="file-tree-actions compact">
+                                <button
+                                    type="button"
+                                    class="secondary-action"
+                                    on:click=move |_| {
+                                        let current = workspace_path.get_untracked();
+                                        let parent = workspace_parent_path(&current);
+                                        workspace_path.set(parent.clone());
+                                        leptos::task::spawn_local(async move {
+                                            match fetch_workspace_tree(&parent).await {
+                                                Ok(payload) => {
+                                                    workspace_status.set(format!("Directory loaded: {} entries", payload.entries.len()));
+                                                    workspace_tree.set(Some(payload));
+                                                }
+                                                Err(error) => workspace_status.set(error),
+                                            }
+                                        });
+                                    }
+                                >"Up"</button>
+                                <button
+                                    type="button"
+                                    class="secondary-action"
+                                    on:click=move |_| {
+                                        let current = workspace_path.get_untracked();
+                                        leptos::task::spawn_local(async move {
+                                            match fetch_workspace_tree(&current).await {
+                                                Ok(payload) => {
+                                                    workspace_status.set(format!("Directory loaded: {} entries", payload.entries.len()));
+                                                    workspace_tree.set(Some(payload));
+                                                }
+                                                Err(error) => workspace_status.set(error),
+                                            }
+                                        });
+                                    }
+                                >"Refresh"</button>
+                            </div>
+                            <div class="file-tree-list sidebar-tree">
+                                {move || match workspace_tree.get() {
+                                    Some(tree) => view! {
+                                        <For
+                                            each=move || tree.entries.clone().into_iter()
+                                            key=|entry| entry.path.clone()
+                                            children=move |entry| {
+                                                let click_entry = entry.clone();
+                                                view! {
+                                                    <button type="button" class="file-tree-entry" on:click=move |_| open_workspace_entry(click_entry.clone())>
+                                                        <span class="file-kind-icon">{workspace_kind_icon(entry.kind)}</span>
+                                                        <span class="file-entry-name">{entry.name}</span>
+                                                        <small>{workspace_kind_label(entry.kind)}</small>
+                                                    </button>
+                                                }
+                                            }
+                                        />
+                                    }.into_any(),
+                                    None => view! { <p class="muted">"Loading workspace tree…"</p> }.into_any(),
+                                }}
+                            </div>
+                        </div>
+                    }.into_any()
+                } else {
+                    view! { <></> }.into_any()
+                }}
 
                 <div class="sidebar-footer">
                     <div class="meta-row">
@@ -727,7 +1016,7 @@ fn App() -> impl IntoView {
             </aside>
 
             <main class="workspace">
-                <header class=move || if active_tab.get() == ViewTab::Terminal { "topbar hidden" } else { "topbar" }>
+                <header class=move || if tab_is_standalone(active_tab.get()) { "topbar hidden" } else { "topbar" }>
                     <div>
                         <p class="eyebrow">"themion-cli --web"</p>
                         <h2>{move || match active_tab.get() {
@@ -735,6 +1024,7 @@ fn App() -> impl IntoView {
                             ViewTab::Transcript => "Transcript",
                             ViewTab::Agents => "Agents",
                             ViewTab::Terminal => "Terminal",
+                            ViewTab::Workspace => "Workspace",
                         }}</h2>
                     </div>
                     <div class="topbar-pills">
@@ -743,7 +1033,7 @@ fn App() -> impl IntoView {
                     </div>
                 </header>
 
-                <section class=move || if active_tab.get() == ViewTab::Terminal { "agent-tab-strip hidden" } else { "agent-tab-strip" } aria-label="agent tabs">
+                <section class=move || if tab_is_standalone(active_tab.get()) { "agent-tab-strip hidden" } else { "agent-tab-strip" } aria-label="agent tabs">
                     {move || match agents.get() {
                         Some(payload) => view! {
                             <For
@@ -824,13 +1114,13 @@ fn App() -> impl IntoView {
                     }}
                 </section>
 
-                <section class=move || if active_tab.get() == ViewTab::Terminal { "tab-strip hidden" } else { "tab-strip" } aria-label="workspace tabs">
+                <section class=move || if tab_is_standalone(active_tab.get()) { "tab-strip hidden" } else { "tab-strip" } aria-label="workspace tabs">
                     <button type="button" class=move || if active_tab.get() == ViewTab::Transcript { "tab active" } else { "tab" } on:click=move |_| active_tab.set(ViewTab::Transcript)>"Transcript"</button>
                     <button type="button" class=move || if active_tab.get() == ViewTab::Status { "tab active" } else { "tab" } on:click=move |_| active_tab.set(ViewTab::Status)>"Status"</button>
                     <button type="button" class=move || if active_tab.get() == ViewTab::Agents { "tab active" } else { "tab" } on:click=move |_| active_tab.set(ViewTab::Agents)>"Agents"</button>
                 </section>
 
-                <div class=move || if active_tab.get() == ViewTab::Terminal { "content-grid terminal-empty" } else { "content-grid" }>
+                <div class=move || if tab_is_standalone(active_tab.get()) { "content-grid standalone-page" } else { "content-grid" }>
                     {move || match active_tab.get() {
                         ViewTab::Status => view! {
                             <>
@@ -941,10 +1231,77 @@ fn App() -> impl IntoView {
                                 }}
                             </section>
                         }.into_any(),
+                        ViewTab::Workspace => view! {
+                            <section class="panel wide-panel workspace-panel">
+                                <div class="panel-title">
+                                    <div>
+                                        <h3>"Project Workspace"</h3>
+                                        <p class="muted">"CodeMirror 6 target · JetBrains Mono Nerd Font · project-scoped file APIs"</p>
+                                    </div>
+                                    <div class="workspace-layout-controls">
+                                        <div class="view-mode-toggle" aria-label="code preview layout">
+                                            <button type="button" class=move || if workspace_view_mode.get() == WorkspaceViewMode::CodeOnly { "toggle-chip active" } else { "toggle-chip" } on:click=move |_| workspace_view_mode.set(WorkspaceViewMode::CodeOnly)>"code only"</button>
+                                            <button type="button" class=move || if workspace_view_mode.get() == WorkspaceViewMode::CodePreview { "toggle-chip active" } else { "toggle-chip" } on:click=move |_| workspace_view_mode.set(WorkspaceViewMode::CodePreview)>"code - preview"</button>
+                                            <button type="button" class=move || if workspace_view_mode.get() == WorkspaceViewMode::PreviewOnly { "toggle-chip active" } else { "toggle-chip" } on:click=move |_| workspace_view_mode.set(WorkspaceViewMode::PreviewOnly)>"preview only"</button>
+                                        </div>
+                                        <span class=move || if workspace_view_mode.get() == WorkspaceViewMode::CodePreview { "split-readout" } else { "split-readout hidden" }>{move || format!("split {}:{}", workspace_split_percent.get(), 100_u8.saturating_sub(workspace_split_percent.get()))}</span>
+                                    </div>
+                                </div>
+                                <div class=move || workspace_editor_grid_class(workspace_view_mode.get()) style=move || workspace_editor_grid_style(workspace_view_mode.get(), workspace_split_percent.get()) node_ref=workspace_grid_ref>
+                                    <div class=move || workspace_code_panel_class(workspace_view_mode.get())>
+                                        <div class="editor-toolbar">
+                                            <span>{move || workspace_file.get().map(|file| file.path).unwrap_or_else(|| "No file open".to_string())}</span>
+                                            <span class="badge subtle">{move || if workspace_dirty.get() { "dirty" } else { "clean" }}</span>
+                                            <button
+                                                type="button"
+                                                class="primary-action small"
+                                                on:click=move |_| {
+                                                    let Some(file) = workspace_file.get_untracked() else { return; };
+                                                    let content = workspace_content.get_untracked();
+                                                    workspace_status.set(format!("Saving {}", file.path));
+                                                    leptos::task::spawn_local(async move {
+                                                        match save_workspace_file(&file.path, content, &file.conflict_token).await {
+                                                            Ok(saved) => {
+                                                                workspace_file.update(|open| {
+                                                                    if let Some(open_file) = open {
+                                                                        open_file.conflict_token = saved.conflict_token;
+                                                                        open_file.size_bytes = saved.size_bytes;
+                                                                        open_file.modified_at_ms = saved.modified_at_ms;
+                                                                    }
+                                                                });
+                                                                workspace_dirty.set(false);
+                                                                workspace_status.set("File saved".to_string());
+                                                            }
+                                                            Err(error) => workspace_status.set(error),
+                                                        }
+                                                    });
+                                                }
+                                            >"Save"</button>
+                                        </div>
+                                        <div class="codemirror-host" node_ref=workspace_editor_ref>
+                                            <p class="muted editor-placeholder">"Open a text/code file from the project tree…"</p>
+                                        </div>
+                                        <p class="muted">{move || workspace_status.get()}</p>
+                                    </div>
+                                    <div
+                                        class=move || workspace_splitter_class(workspace_view_mode.get(), workspace_split_dragging.get())
+                                        on:pointerdown=start_workspace_split_drag
+                                        on:pointermove=drag_workspace_split
+                                        on:pointerup=stop_workspace_split_drag
+                                        on:pointercancel=stop_workspace_split_drag
+                                        title="Drag to resize code and preview"
+                                    ></div>
+                                    <aside class=move || workspace_preview_panel_class(workspace_view_mode.get())>
+                                        <div class="panel-title"><h3>"Preview"</h3></div>
+                                        {move || workspace_preview_path.get().map(|url| view! { <WorkspacePreview url=url /> }.into_any()).unwrap_or_else(|| view! { <p class="muted">"Open an image, video, Markdown, HTML, or PDF file to preview it."</p> }.into_any())}
+                                    </aside>
+                                </div>
+                            </section>
+                        }.into_any(),
                         ViewTab::Terminal => view! { <></> }.into_any(),
                     }}
                 </div>
-                <section class=move || if active_tab.get() == ViewTab::Terminal { "composer-card composer-bottom hidden" } else { "composer-card composer-bottom" }>
+                <section class=move || if tab_is_standalone(active_tab.get()) { "composer-card composer-bottom hidden" } else { "composer-card composer-bottom" }>
                     <div class="composer-head">
                         <div>
                             <h3>{move || format!("Prompt → {}", active_agent.get())}</h3>
@@ -1006,10 +1363,17 @@ fn active_agent_activities(
 
 fn sidebar_tab_is_active(active_tab: ViewTab, tab: ViewTab) -> bool {
     match tab {
-        ViewTab::Transcript => active_tab != ViewTab::Terminal,
+        ViewTab::Transcript => matches!(
+            active_tab,
+            ViewTab::Transcript | ViewTab::Status | ViewTab::Agents
+        ),
         ViewTab::Terminal => active_tab == ViewTab::Terminal,
         _ => active_tab == tab,
     }
+}
+
+fn tab_is_standalone(tab: ViewTab) -> bool {
+    matches!(tab, ViewTab::Terminal | ViewTab::Workspace)
 }
 
 fn activity_status_is_active(status: &str) -> bool {
@@ -1280,6 +1644,273 @@ async fn fetch_agents() -> Result<WebAgentsResponse, String> {
         .json::<WebAgentsResponse>()
         .await
         .map_err(|error| error.to_string())
+}
+
+async fn fetch_workspace_tree(path: &str) -> Result<WorkspaceTreeResponse, String> {
+    let response = gloo_net::http::Request::get(&format!(
+        "/api/workspace/tree?path={}",
+        encode_query_component(path)
+    ))
+    .send()
+    .await
+    .map_err(|error| error.to_string())?;
+    decode_workspace_response::<WorkspaceTreeResponse>(response).await
+}
+
+async fn fetch_workspace_file(path: &str) -> Result<WorkspaceFileResponse, String> {
+    let response = gloo_net::http::Request::get(&format!(
+        "/api/workspace/file?path={}",
+        encode_query_component(path)
+    ))
+    .send()
+    .await
+    .map_err(|error| error.to_string())?;
+    decode_workspace_response::<WorkspaceFileResponse>(response).await
+}
+
+async fn save_workspace_file(
+    path: &str,
+    content: String,
+    conflict_token: &str,
+) -> Result<WorkspaceSaveResponse, String> {
+    let request = WorkspaceSaveRequest {
+        path: path.to_string(),
+        content,
+        conflict_token: conflict_token.to_string(),
+    };
+    let response = gloo_net::http::Request::put("/api/workspace/file")
+        .json(&request)
+        .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    decode_workspace_response::<WorkspaceSaveResponse>(response).await
+}
+
+async fn decode_workspace_response<T>(response: gloo_net::http::Response) -> Result<T, String>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    if response.ok() {
+        return response
+            .json::<T>()
+            .await
+            .map_err(|error| error.to_string());
+    }
+    let status = response.status();
+    match response.json::<WorkspaceErrorResponse>().await {
+        Ok(error) => Err(format!(
+            "{}: {} ({})",
+            error.error.code, error.error.message, status
+        )),
+        Err(error) => Err(format!("workspace request failed ({status}): {error}")),
+    }
+}
+
+fn workspace_preview_url(path: &str) -> String {
+    format!(
+        "/api/workspace/preview?path={}",
+        encode_query_component(path)
+    )
+}
+
+fn workspace_kind_preview_url(kind: WorkspaceFileKind, path: &str) -> Option<String> {
+    workspace_kind_is_previewable(kind).then(|| workspace_preview_url(path))
+}
+
+fn workspace_kind_is_editable(kind: WorkspaceFileKind) -> bool {
+    matches!(
+        kind,
+        WorkspaceFileKind::Text | WorkspaceFileKind::Markdown | WorkspaceFileKind::Html
+    )
+}
+
+fn workspace_kind_is_previewable(kind: WorkspaceFileKind) -> bool {
+    matches!(
+        kind,
+        WorkspaceFileKind::Image
+            | WorkspaceFileKind::Video
+            | WorkspaceFileKind::Markdown
+            | WorkspaceFileKind::Html
+            | WorkspaceFileKind::Pdf
+    )
+}
+
+fn workspace_kind_icon(kind: WorkspaceFileKind) -> &'static str {
+    match kind {
+        WorkspaceFileKind::Directory => "",
+        WorkspaceFileKind::Image => "󰋩",
+        WorkspaceFileKind::Video => "󰈫",
+        WorkspaceFileKind::Markdown => "",
+        WorkspaceFileKind::Html => "",
+        WorkspaceFileKind::Pdf => "",
+        WorkspaceFileKind::Text => "󰈙",
+        WorkspaceFileKind::Binary => "󰞷",
+        WorkspaceFileKind::Unsupported => "󰈔",
+    }
+}
+
+fn workspace_kind_label(kind: WorkspaceFileKind) -> &'static str {
+    match kind {
+        WorkspaceFileKind::Directory => "dir",
+        WorkspaceFileKind::Text => "text",
+        WorkspaceFileKind::Image => "image",
+        WorkspaceFileKind::Video => "video",
+        WorkspaceFileKind::Markdown => "md",
+        WorkspaceFileKind::Html => "html",
+        WorkspaceFileKind::Pdf => "pdf",
+        WorkspaceFileKind::Binary => "binary",
+        WorkspaceFileKind::Unsupported => "file",
+    }
+}
+
+fn workspace_editor_grid_class(mode: WorkspaceViewMode) -> &'static str {
+    match mode {
+        WorkspaceViewMode::CodeOnly => "workspace-editor-grid code-only",
+        WorkspaceViewMode::CodePreview => "workspace-editor-grid code-preview",
+        WorkspaceViewMode::PreviewOnly => "workspace-editor-grid preview-only",
+    }
+}
+
+fn workspace_editor_grid_style(mode: WorkspaceViewMode, split_percent: u8) -> String {
+    match mode {
+        WorkspaceViewMode::CodePreview => {
+            let code = split_percent.clamp(25, 75);
+            let preview = 100_u8.saturating_sub(code);
+            format!("grid-template-columns: minmax(0, {code}fr) 0.45rem minmax(0, {preview}fr);")
+        }
+        _ => String::new(),
+    }
+}
+
+fn workspace_code_panel_class(mode: WorkspaceViewMode) -> &'static str {
+    match mode {
+        WorkspaceViewMode::PreviewOnly => "code-editor-panel hidden",
+        _ => "code-editor-panel",
+    }
+}
+
+fn workspace_splitter_class(mode: WorkspaceViewMode, dragging: bool) -> &'static str {
+    match (mode, dragging) {
+        (WorkspaceViewMode::CodePreview, true) => "workspace-splitter dragging",
+        (WorkspaceViewMode::CodePreview, false) => "workspace-splitter",
+        _ => "workspace-splitter hidden",
+    }
+}
+
+fn workspace_preview_panel_class(mode: WorkspaceViewMode) -> &'static str {
+    match mode {
+        WorkspaceViewMode::CodeOnly => "preview-panel hidden",
+        _ => "preview-panel",
+    }
+}
+
+fn update_workspace_split_from_client_x(
+    grid_ref: NodeRef<Div>,
+    split_percent: RwSignal<u8>,
+    client_x: i32,
+) {
+    let Some(grid) = grid_ref.get_untracked() else {
+        return;
+    };
+    let rect = grid.get_bounding_client_rect();
+    let width = rect.width();
+    if width <= 0.0 {
+        return;
+    }
+    let raw = ((client_x as f64 - rect.left()) / width) * 100.0;
+    split_percent.set(raw.round().clamp(25.0, 75.0) as u8);
+}
+
+fn workspace_language(path: &str, kind: WorkspaceFileKind) -> &'static str {
+    if kind == WorkspaceFileKind::Markdown {
+        return "markdown";
+    }
+    if kind == WorkspaceFileKind::Html {
+        return "html";
+    }
+    let extension = path
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .unwrap_or_default();
+    match extension.as_str() {
+        "rs" => "rust",
+        "toml" => "toml",
+        "json" => "json",
+        "yaml" | "yml" => "yaml",
+        "md" | "markdown" => "markdown",
+        "html" | "htm" => "html",
+        "css" => "css",
+        "js" | "jsx" => "javascript",
+        "ts" | "tsx" => "typescript",
+        "sh" | "bash" | "zsh" | "fish" => "shell",
+        _ => {
+            let name = path
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if matches!(name.as_str(), "makefile" | "dockerfile") {
+                "shell"
+            } else {
+                "text"
+            }
+        }
+    }
+}
+
+fn workspace_parent_path(path: &str) -> String {
+    path.rsplit_once('/')
+        .map(|(parent, _)| parent.to_string())
+        .unwrap_or_default()
+}
+
+fn encode_query_component(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                vec![byte as char]
+            }
+            b' ' => vec!['%', '2', '0'],
+            _ => format!("%{byte:02X}").chars().collect(),
+        })
+        .collect()
+}
+
+trait EmptyLabel {
+    fn if_empty_label(self, label: &str) -> String;
+}
+
+impl EmptyLabel for String {
+    fn if_empty_label(self, label: &str) -> String {
+        if self.is_empty() {
+            label.to_string()
+        } else {
+            self
+        }
+    }
+}
+
+#[component]
+fn WorkspacePreview(url: String) -> impl IntoView {
+    let lowered = url.to_ascii_lowercase();
+    if lowered.contains(".png")
+        || lowered.contains(".jpg")
+        || lowered.contains(".jpeg")
+        || lowered.contains(".gif")
+        || lowered.contains(".webp")
+        || lowered.contains(".svg")
+    {
+        return view! { <img class="workspace-preview-media" src=url alt="file preview" /> }
+            .into_any();
+    }
+    if lowered.contains(".mp4") || lowered.contains(".webm") || lowered.contains(".ogg") {
+        return view! { <video class="workspace-preview-media" src=url controls=true /> }
+            .into_any();
+    }
+    view! { <iframe class="workspace-preview-frame" src=url sandbox="allow-same-origin" /> }
+        .into_any()
 }
 
 #[cfg(test)]

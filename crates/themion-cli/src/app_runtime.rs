@@ -2777,6 +2777,7 @@ mod app_snapshot_tests {
                 agent_activity_changed_at_by_session: &HashMap::new(),
                 agent_busy: true,
                 activity_status: "idle".to_string(),
+                rate_limits: None,
                 #[cfg(feature = "stylos")]
                 stylos_status: Some("off".to_string()),
             },

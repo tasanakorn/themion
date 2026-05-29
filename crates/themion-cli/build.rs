@@ -55,6 +55,9 @@ fn build_web_assets(repo_root: &Path) {
     println!("cargo:rerun-if-changed=../../Cargo.toml");
     println!("cargo:rerun-if-changed=../themion-cli-web-ui/Cargo.toml");
     emit_rerun_if_changed_recursive(&repo_root.join("crates/themion-cli-web-ui/src"));
+    println!("cargo:rerun-if-changed=../themion-cli-web-ui/package.json");
+    println!("cargo:rerun-if-changed=../themion-cli-web-ui/package-lock.json");
+    emit_rerun_if_changed_recursive(&repo_root.join("crates/themion-cli-web-ui/js"));
     emit_rerun_if_changed_recursive(&repo_root.join("crates/themion-cli-web-ui/assets"));
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR set"));
@@ -69,6 +72,8 @@ fn build_web_assets(repo_root: &Path) {
 
     std::fs::create_dir_all(&web_out_dir).expect("create web asset output dir");
     std::fs::create_dir_all(&wasm_target_dir).expect("create web UI target dir");
+
+    build_codemirror_editor_bundle(repo_root);
 
     run_command(
         Command::new("rustup")
@@ -112,11 +117,31 @@ fn build_web_assets(repo_root: &Path) {
         &repo_root.join("crates/themion-cli-web-ui/assets/app.css"),
         &web_out_dir.join("app.css"),
     );
+    copy_file(
+        &repo_root.join("crates/themion-cli-web-ui/assets/codemirror_editor.js"),
+        &web_out_dir.join("codemirror_editor.js"),
+    );
     let font_out_dir = web_out_dir.join("fonts");
     std::fs::create_dir_all(&font_out_dir).expect("create web font output dir");
     copy_file(
         &repo_root.join("crates/themion-cli-web-ui/assets/fonts/JetBrainsMonoNerdFont-Regular.ttf"),
         &font_out_dir.join("JetBrainsMonoNerdFont-Regular.ttf"),
+    );
+}
+
+fn build_codemirror_editor_bundle(repo_root: &Path) {
+    let web_ui_dir = repo_root.join("crates/themion-cli-web-ui");
+    if !web_ui_dir.join("node_modules").exists() {
+        run_command(
+            Command::new("npm").arg("install").current_dir(&web_ui_dir),
+            "install themion-cli-web-ui npm dependencies",
+        );
+    }
+    run_command(
+        Command::new("npm")
+            .args(["run", "build:editor"])
+            .current_dir(&web_ui_dir),
+        "build CodeMirror editor bundle",
     );
 }
 

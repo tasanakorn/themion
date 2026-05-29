@@ -5,24 +5,28 @@ use crate::surface_runner::{
 };
 use anyhow::{anyhow, Context};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, put};
 use axum::Json;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc};
 
 const DEFAULT_WEB_BIND_ADDR: &str = "127.0.0.1:8420";
 const RECENT_EVENT_TEXT_MAX_CHARS: usize = 160;
 const RECENT_EVENTS_LIMIT: usize = 8;
 const TRANSCRIPT_EVENTS_LIMIT: usize = 24;
+const WORKSPACE_TEXT_FILE_MAX_BYTES: u64 = 1_048_576;
+const WORKSPACE_PREVIEW_FILE_MAX_BYTES: u64 = 52_428_800;
 
 #[derive(Clone)]
 struct WebAppState {
@@ -209,6 +213,90 @@ struct TerminalListPayload {
     terminals: Vec<crate::web_terminal::TerminalDescriptor>,
 }
 
+#[derive(Debug, Deserialize)]
+struct WorkspacePathQuery {
+    #[serde(default)]
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceSaveRequest {
+    path: String,
+    content: String,
+    conflict_token: String,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceEntry {
+    path: String,
+    name: String,
+    kind: WorkspaceFileKind,
+    size_bytes: u64,
+    modified_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceTreeResponse {
+    path: String,
+    kind: WorkspaceFileKind,
+    entries: Vec<WorkspaceEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceFileResponse {
+    path: String,
+    kind: WorkspaceFileKind,
+    size_bytes: u64,
+    modified_at_ms: Option<u64>,
+    conflict_token: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceMetaResponse {
+    path: String,
+    kind: WorkspaceFileKind,
+    size_bytes: u64,
+    modified_at_ms: Option<u64>,
+    editable: bool,
+    previewable: bool,
+    conflict_token: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceSaveResponse {
+    path: String,
+    kind: WorkspaceFileKind,
+    size_bytes: u64,
+    modified_at_ms: Option<u64>,
+    conflict_token: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkspaceFileKind {
+    Directory,
+    Text,
+    Image,
+    Video,
+    Markdown,
+    Html,
+    Pdf,
+    Binary,
+    Unsupported,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceErrorBody {
+    error: WorkspaceErrorDetail,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceErrorDetail {
+    code: &'static str,
+    message: String,
+}
+
 pub fn parse_bind_addr(raw: Option<&str>) -> anyhow::Result<SocketAddr> {
     let candidate = raw
         .map(str::trim)
@@ -270,6 +358,10 @@ fn router(state: WebAppState) -> Router {
         .route("/assets/themion_cli_web_ui.js", get(spa_js_asset))
         .route("/assets/themion_cli_web_ui_bg.wasm", get(spa_wasm_asset))
         .route(
+            "/assets/codemirror_editor.js",
+            get(codemirror_editor_js_asset),
+        )
+        .route(
             "/assets/fonts/JetBrainsMonoNerdFont-Regular.ttf",
             get(font_asset),
         )
@@ -281,6 +373,11 @@ fn router(state: WebAppState) -> Router {
         .route("/api/status", get(status))
         .route("/api/agents", get(agents_api))
         .route("/api/transcript", get(transcript_api))
+        .route("/api/workspace/tree", get(workspace_tree_api))
+        .route("/api/workspace/file", get(workspace_file_api))
+        .route("/api/workspace/file", put(workspace_save_api))
+        .route("/api/workspace/meta", get(workspace_meta_api))
+        .route("/api/workspace/preview", get(workspace_preview_api))
         .with_state(state)
 }
 
@@ -298,6 +395,13 @@ async fn spa_css_asset() -> Response {
 async fn spa_js_asset() -> Response {
     asset_response(
         crate::web_assets::spa_js().as_bytes(),
+        "application/javascript; charset=utf-8",
+    )
+}
+
+async fn codemirror_editor_js_asset() -> Response {
+    asset_response(
+        crate::web_assets::codemirror_editor_js().as_bytes(),
         "application/javascript; charset=utf-8",
     )
 }
@@ -797,6 +901,289 @@ async fn agents_api(State(state): State<WebAppState>) -> Json<WebAgentsResponse>
     ))
 }
 
+async fn workspace_tree_api(
+    State(state): State<WebAppState>,
+    Query(query): Query<WorkspacePathQuery>,
+) -> Response {
+    match build_workspace_tree_response(&state, &query.path) {
+        Ok(response) => Json(response).into_response(),
+        Err(response) => response,
+    }
+}
+
+async fn workspace_file_api(
+    State(state): State<WebAppState>,
+    Query(query): Query<WorkspacePathQuery>,
+) -> Response {
+    match build_workspace_file_response(&state, &query.path) {
+        Ok(response) => Json(response).into_response(),
+        Err(response) => response,
+    }
+}
+
+async fn workspace_meta_api(
+    State(state): State<WebAppState>,
+    Query(query): Query<WorkspacePathQuery>,
+) -> Response {
+    match build_workspace_meta_response(&state, &query.path) {
+        Ok(response) => Json(response).into_response(),
+        Err(response) => response,
+    }
+}
+
+async fn workspace_save_api(
+    State(state): State<WebAppState>,
+    Json(request): Json<WorkspaceSaveRequest>,
+) -> Response {
+    match save_workspace_file(&state, request) {
+        Ok(response) => Json(response).into_response(),
+        Err(response) => response,
+    }
+}
+
+async fn workspace_preview_api(
+    State(state): State<WebAppState>,
+    Query(query): Query<WorkspacePathQuery>,
+) -> Response {
+    match build_workspace_preview_response(&state, &query.path) {
+        Ok(response) => response,
+        Err(response) => response,
+    }
+}
+
+fn build_workspace_tree_response(
+    state: &WebAppState,
+    raw_path: &str,
+) -> Result<WorkspaceTreeResponse, Response> {
+    let root = workspace_root(state)?;
+    let path = resolve_workspace_path(&root, raw_path)?;
+    let metadata = std::fs::metadata(&path).map_err(|error| {
+        workspace_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("workspace path not found: {error}"),
+        )
+    })?;
+    if !metadata.is_dir() {
+        return Err(workspace_error(
+            StatusCode::BAD_REQUEST,
+            "not_directory",
+            "workspace tree path is not a directory",
+        ));
+    }
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(&path).map_err(|error| {
+        workspace_error(
+            StatusCode::FORBIDDEN,
+            "read_dir_failed",
+            format!("failed to read directory: {error}"),
+        )
+    })? {
+        let entry = entry.map_err(|error| {
+            workspace_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "read_dir_entry_failed",
+                format!("failed to read directory entry: {error}"),
+            )
+        })?;
+        let child_path = entry.path();
+        let metadata = match std::fs::metadata(&child_path) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if !path_within_root(&root, &child_path) {
+            continue;
+        }
+        let relative = project_relative_path(&root, &child_path)?;
+        entries.push(WorkspaceEntry {
+            path: relative,
+            name: entry.file_name().to_string_lossy().to_string(),
+            kind: workspace_file_kind(&child_path, &metadata),
+            size_bytes: metadata.len(),
+            modified_at_ms: metadata_modified_at_ms(&metadata),
+        });
+    }
+    entries.sort_by(|left, right| {
+        let left_dir = left.kind == WorkspaceFileKind::Directory;
+        let right_dir = right.kind == WorkspaceFileKind::Directory;
+        right_dir
+            .cmp(&left_dir)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+    Ok(WorkspaceTreeResponse {
+        path: project_relative_path(&root, &path)?,
+        kind: WorkspaceFileKind::Directory,
+        entries,
+    })
+}
+
+fn build_workspace_file_response(
+    state: &WebAppState,
+    raw_path: &str,
+) -> Result<WorkspaceFileResponse, Response> {
+    let root = workspace_root(state)?;
+    let path = resolve_workspace_path(&root, raw_path)?;
+    let metadata = file_metadata_for_edit(&path)?;
+    let kind = workspace_file_kind(&path, &metadata);
+    if !workspace_kind_is_editable(kind) {
+        return Err(workspace_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "not_editable",
+            "workspace file is not editable text",
+        ));
+    }
+    if metadata.len() > WORKSPACE_TEXT_FILE_MAX_BYTES {
+        return Err(workspace_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "file_too_large",
+            format!("text files must be <= {WORKSPACE_TEXT_FILE_MAX_BYTES} bytes"),
+        ));
+    }
+    let content = std::fs::read_to_string(&path).map_err(|error| {
+        workspace_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "not_utf8",
+            format!("failed to read UTF-8 text file: {error}"),
+        )
+    })?;
+    Ok(WorkspaceFileResponse {
+        path: project_relative_path(&root, &path)?,
+        kind,
+        size_bytes: metadata.len(),
+        modified_at_ms: metadata_modified_at_ms(&metadata),
+        conflict_token: conflict_token(&metadata),
+        content,
+    })
+}
+
+fn build_workspace_meta_response(
+    state: &WebAppState,
+    raw_path: &str,
+) -> Result<WorkspaceMetaResponse, Response> {
+    let root = workspace_root(state)?;
+    let path = resolve_workspace_path(&root, raw_path)?;
+    let metadata = std::fs::metadata(&path).map_err(|error| {
+        workspace_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("workspace path not found: {error}"),
+        )
+    })?;
+    let kind = workspace_file_kind(&path, &metadata);
+    Ok(WorkspaceMetaResponse {
+        path: project_relative_path(&root, &path)?,
+        kind,
+        size_bytes: metadata.len(),
+        modified_at_ms: metadata_modified_at_ms(&metadata),
+        editable: workspace_kind_is_editable(kind)
+            && metadata.len() <= WORKSPACE_TEXT_FILE_MAX_BYTES,
+        previewable: workspace_kind_is_previewable(kind)
+            && metadata.len() <= WORKSPACE_PREVIEW_FILE_MAX_BYTES,
+        conflict_token: metadata.is_file().then(|| conflict_token(&metadata)),
+    })
+}
+
+fn save_workspace_file(
+    state: &WebAppState,
+    request: WorkspaceSaveRequest,
+) -> Result<WorkspaceSaveResponse, Response> {
+    let root = workspace_root(state)?;
+    let path = resolve_workspace_path(&root, &request.path)?;
+    let metadata = file_metadata_for_edit(&path)?;
+    let kind = workspace_file_kind(&path, &metadata);
+    if !workspace_kind_is_editable(kind) {
+        return Err(workspace_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "not_editable",
+            "workspace file is not editable text",
+        ));
+    }
+    if request.content.len() as u64 > WORKSPACE_TEXT_FILE_MAX_BYTES {
+        return Err(workspace_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "file_too_large",
+            format!("saved text content must be <= {WORKSPACE_TEXT_FILE_MAX_BYTES} bytes"),
+        ));
+    }
+    let current_token = conflict_token(&metadata);
+    if request.conflict_token != current_token {
+        return Err(workspace_error(
+            StatusCode::CONFLICT,
+            "stale_conflict_token",
+            "file changed on disk after it was opened",
+        ));
+    }
+    std::fs::write(&path, request.content).map_err(|error| {
+        workspace_error(
+            StatusCode::FORBIDDEN,
+            "write_failed",
+            format!("failed to save workspace file: {error}"),
+        )
+    })?;
+    let metadata = std::fs::metadata(&path).map_err(|error| {
+        workspace_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "metadata_failed",
+            format!("failed to read saved file metadata: {error}"),
+        )
+    })?;
+    Ok(WorkspaceSaveResponse {
+        path: project_relative_path(&root, &path)?,
+        kind: workspace_file_kind(&path, &metadata),
+        size_bytes: metadata.len(),
+        modified_at_ms: metadata_modified_at_ms(&metadata),
+        conflict_token: conflict_token(&metadata),
+    })
+}
+
+fn build_workspace_preview_response(
+    state: &WebAppState,
+    raw_path: &str,
+) -> Result<Response, Response> {
+    let root = workspace_root(state)?;
+    let path = resolve_workspace_path(&root, raw_path)?;
+    let metadata = file_metadata_for_edit(&path)?;
+    let kind = workspace_file_kind(&path, &metadata);
+    if !workspace_kind_is_previewable(kind) {
+        return Err(workspace_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "not_previewable",
+            "workspace file type is not previewable",
+        ));
+    }
+    if metadata.len() > WORKSPACE_PREVIEW_FILE_MAX_BYTES {
+        return Err(workspace_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "file_too_large",
+            format!("preview files must be <= {WORKSPACE_PREVIEW_FILE_MAX_BYTES} bytes"),
+        ));
+    }
+    if kind == WorkspaceFileKind::Markdown {
+        let markdown = std::fs::read_to_string(&path).map_err(|error| {
+            workspace_error(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "not_utf8",
+                format!("failed to read Markdown preview as UTF-8: {error}"),
+            )
+        })?;
+        return Ok(asset_response(
+            markdown_preview_html(&markdown).as_bytes(),
+            "text/html; charset=utf-8",
+        ));
+    }
+    let bytes = std::fs::read(&path).map_err(|error| {
+        workspace_error(
+            StatusCode::FORBIDDEN,
+            "read_failed",
+            format!("failed to read preview file: {error}"),
+        )
+    })?;
+    Ok(binary_asset_response(
+        &bytes,
+        workspace_content_type(&path, kind),
+    ))
+}
+
 fn html_response(body: String) -> Response {
     let mut response = Html(body).into_response();
     response.headers_mut().insert(
@@ -1268,6 +1655,278 @@ fn truncate_text(value: &str, max_chars: usize) -> String {
     truncated
 }
 
+fn workspace_root(state: &WebAppState) -> Result<PathBuf, Response> {
+    state
+        .app_state
+        .runtime
+        .project_dir
+        .canonicalize()
+        .map_err(|error| {
+            workspace_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "project_root_unavailable",
+                format!("failed to resolve project root: {error}"),
+            )
+        })
+}
+
+fn resolve_workspace_path(root: &Path, raw_path: &str) -> Result<PathBuf, Response> {
+    let relative = Path::new(raw_path.trim_start_matches('/'));
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        if raw_path.trim().is_empty() {
+            return Ok(root.to_path_buf());
+        }
+        return Err(workspace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_path",
+            "workspace path must be project-relative and cannot contain traversal",
+        ));
+    }
+    let candidate = if raw_path.trim().is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(relative)
+    };
+    let canonical = candidate.canonicalize().map_err(|error| {
+        workspace_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("workspace path not found: {error}"),
+        )
+    })?;
+    if !canonical.starts_with(root) {
+        return Err(workspace_error(
+            StatusCode::FORBIDDEN,
+            "path_escape",
+            "workspace path resolves outside the project root",
+        ));
+    }
+    Ok(canonical)
+}
+
+fn path_within_root(root: &Path, path: &Path) -> bool {
+    path.canonicalize()
+        .map(|canonical| canonical.starts_with(root))
+        .unwrap_or(false)
+}
+
+fn project_relative_path(root: &Path, path: &Path) -> Result<String, Response> {
+    let relative = path.strip_prefix(root).map_err(|_| {
+        workspace_error(
+            StatusCode::FORBIDDEN,
+            "path_escape",
+            "workspace path resolves outside the project root",
+        )
+    })?;
+    Ok(relative.to_string_lossy().replace('\\', "/"))
+}
+
+fn file_metadata_for_edit(path: &Path) -> Result<std::fs::Metadata, Response> {
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        workspace_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("workspace file not found: {error}"),
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(workspace_error(
+            StatusCode::BAD_REQUEST,
+            "not_file",
+            "workspace path is not a file",
+        ));
+    }
+    Ok(metadata)
+}
+
+fn workspace_file_kind(path: &Path, metadata: &std::fs::Metadata) -> WorkspaceFileKind {
+    if metadata.is_dir() {
+        return WorkspaceFileKind::Directory;
+    }
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "md" | "markdown" => WorkspaceFileKind::Markdown,
+        "html" | "htm" => WorkspaceFileKind::Html,
+        "pdf" => WorkspaceFileKind::Pdf,
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" => WorkspaceFileKind::Image,
+        "mp4" | "webm" | "ogg" | "mov" | "m4v" => WorkspaceFileKind::Video,
+        "rs" | "toml" | "json" | "yaml" | "yml" | "css" | "js" | "jsx" | "ts" | "tsx" | "sh"
+        | "bash" | "zsh" | "fish" | "txt" | "sql" | "py" | "go" | "java" | "c" | "h" | "cpp"
+        | "hpp" | "lua" | "rb" => WorkspaceFileKind::Text,
+        "lock" => WorkspaceFileKind::Text,
+        "bin" | "exe" | "wasm" | "so" | "dylib" | "dll" | "zip" | "gz" | "tar" => {
+            WorkspaceFileKind::Binary
+        }
+        _ => {
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if matches!(
+                name.as_str(),
+                "makefile" | "dockerfile" | "license" | "readme"
+            ) {
+                WorkspaceFileKind::Text
+            } else {
+                WorkspaceFileKind::Unsupported
+            }
+        }
+    }
+}
+
+fn workspace_kind_is_editable(kind: WorkspaceFileKind) -> bool {
+    matches!(
+        kind,
+        WorkspaceFileKind::Text | WorkspaceFileKind::Markdown | WorkspaceFileKind::Html
+    )
+}
+
+fn workspace_kind_is_previewable(kind: WorkspaceFileKind) -> bool {
+    matches!(
+        kind,
+        WorkspaceFileKind::Image
+            | WorkspaceFileKind::Video
+            | WorkspaceFileKind::Markdown
+            | WorkspaceFileKind::Html
+            | WorkspaceFileKind::Pdf
+    )
+}
+
+fn workspace_content_type(path: &Path, kind: WorkspaceFileKind) -> &'static str {
+    match kind {
+        WorkspaceFileKind::Image => match path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "svg" => "image/svg+xml",
+            "bmp" => "image/bmp",
+            "ico" => "image/x-icon",
+            _ => "image/png",
+        },
+        WorkspaceFileKind::Video => match path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "webm" => "video/webm",
+            "ogg" => "video/ogg",
+            "mov" => "video/quicktime",
+            _ => "video/mp4",
+        },
+        WorkspaceFileKind::Markdown => "text/markdown; charset=utf-8",
+        WorkspaceFileKind::Html => "text/html; charset=utf-8",
+        WorkspaceFileKind::Pdf => "application/pdf",
+        _ => "application/octet-stream",
+    }
+}
+
+fn markdown_preview_html(markdown: &str) -> String {
+    let mut body = String::new();
+    let mut in_code = false;
+    for line in markdown.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.starts_with("```") {
+            if in_code {
+                body.push_str("</code></pre>");
+            } else {
+                body.push_str("<pre><code>");
+            }
+            in_code = !in_code;
+            continue;
+        }
+        if in_code {
+            body.push_str(&escape_html(trimmed));
+            body.push('\n');
+            continue;
+        }
+        if trimmed.is_empty() {
+            continue;
+        }
+        let hashes = trimmed.chars().take_while(|ch| *ch == '#').count();
+        if (1..=6).contains(&hashes) && trimmed.chars().nth(hashes) == Some(' ') {
+            let text = escape_html(trimmed[hashes + 1..].trim());
+            body.push_str(&format!("<h{hashes}>{text}</h{hashes}>"));
+        } else if let Some(item) = trimmed.strip_prefix("- ") {
+            body.push_str("<ul><li>");
+            body.push_str(&escape_html(item));
+            body.push_str("</li></ul>");
+        } else {
+            body.push_str("<p>");
+            body.push_str(&escape_html(trimmed));
+            body.push_str("</p>");
+        }
+    }
+    if in_code {
+        body.push_str("</code></pre>");
+    }
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><style>body{{margin:0;padding:0.75rem;background:#020617;color:#dce3f0;font:14px/1.55 "JetBrains Mono Nerd",ui-monospace,monospace;}}pre,p,ul{{margin:0 0 .75rem;}}pre{{padding:.55rem;background:#0f172a;overflow:auto;}}code{{color:#dbeafe;}}h1,h2,h3,h4,h5,h6{{color:#bae6fd;margin:.2rem 0 .55rem;}}</style></head><body>{body}</body></html>"#
+    )
+}
+
+fn escape_html(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn metadata_modified_at_ms(metadata: &std::fs::Metadata) -> Option<u64> {
+    metadata.modified().ok().and_then(system_time_ms)
+}
+
+fn system_time_ms(time: SystemTime) -> Option<u64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as u64)
+}
+
+fn conflict_token(metadata: &std::fs::Metadata) -> String {
+    format!(
+        "size:{}:mtime:{}",
+        metadata.len(),
+        metadata_modified_at_ms(metadata).unwrap_or_default()
+    )
+}
+
+fn workspace_error(status: StatusCode, code: &'static str, message: impl Into<String>) -> Response {
+    (
+        status,
+        Json(WorkspaceErrorBody {
+            error: WorkspaceErrorDetail {
+                code,
+                message: message.into(),
+            },
+        }),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1319,5 +1978,30 @@ mod tests {
         assert_eq!(chat_entries[0].kind, "tool_call");
         assert_eq!(chat_entries[0].agent_id.as_deref(), Some("master"));
         assert!(chat_entries[0].completed);
+    }
+
+    #[test]
+    fn workspace_rejects_parent_traversal() {
+        let root = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let error = resolve_workspace_path(&root, "../Cargo.toml").unwrap_err();
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn workspace_classifies_common_preview_and_code_files() {
+        let metadata = std::fs::metadata("Cargo.toml").unwrap();
+        assert_eq!(
+            workspace_file_kind(Path::new("Cargo.toml"), &metadata),
+            WorkspaceFileKind::Text
+        );
+        assert!(workspace_kind_is_editable(WorkspaceFileKind::Markdown));
+        assert!(workspace_kind_is_previewable(WorkspaceFileKind::Pdf));
+    }
+
+    #[test]
+    fn markdown_preview_escapes_script_content() {
+        let html = markdown_preview_html("# Hi\n<script>alert(1)</script>");
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(!html.contains("<script>alert(1)</script>"));
     }
 }
