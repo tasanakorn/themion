@@ -1293,7 +1293,7 @@ fn App() -> impl IntoView {
                                     ></div>
                                     <aside class=move || workspace_preview_panel_class(workspace_view_mode.get())>
                                         <div class="panel-title"><h3>"Preview"</h3></div>
-                                        {move || workspace_preview_path.get().map(|url| view! { <WorkspacePreview url=url /> }.into_any()).unwrap_or_else(|| view! { <p class="muted">"Open an image, video, Markdown, HTML, or PDF file to preview it."</p> }.into_any())}
+                                        <div class="workspace-preview-body">{move || workspace_preview_path.get().map(|url| view! { <WorkspacePreview url=url /> }.into_any()).unwrap_or_else(|| view! { <p class="muted">"Open an image, video, Markdown, HTML, or PDF file to preview it."</p> }.into_any())}</div>
                                     </aside>
                                 </div>
                             </section>

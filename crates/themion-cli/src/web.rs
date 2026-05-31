@@ -5,7 +5,7 @@ use crate::surface_runner::{
 };
 use anyhow::{anyhow, Context};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, put};
@@ -355,6 +355,7 @@ fn router(state: WebAppState) -> Router {
         .route("/", get(index))
         .route("/app", get(index))
         .route("/assets/app.css", get(spa_css_asset))
+        .route("/assets/{asset}", get(hashed_asset))
         .route("/assets/themion_cli_web_ui.js", get(spa_js_asset))
         .route("/assets/themion_cli_web_ui_bg.wasm", get(spa_wasm_asset))
         .route(
@@ -365,6 +366,7 @@ fn router(state: WebAppState) -> Router {
             "/assets/fonts/JetBrainsMonoNerdFont-Regular.ttf",
             get(font_asset),
         )
+        .route("/assets/fonts/{font}", get(hashed_font_asset))
         .route("/transcript", get(index))
         .route("/shell", get(index))
         .route("/api/ws", get(multiplex_ws))
@@ -392,6 +394,43 @@ async fn spa_css_asset() -> Response {
     )
 }
 
+async fn hashed_asset(AxumPath(asset): AxumPath<String>) -> Response {
+    let web_assets = [
+        (
+            format!("app.{}.css", crate::web_assets::spa_css_hash()),
+            crate::web_assets::spa_css().as_bytes(),
+            "text/css; charset=utf-8",
+        ),
+        (
+            format!("themion_cli_web_ui.{}.js", crate::web_assets::spa_js_hash()),
+            crate::web_assets::spa_js().as_bytes(),
+            "application/javascript; charset=utf-8",
+        ),
+        (
+            format!(
+                "themion_cli_web_ui_bg.{}.wasm",
+                crate::web_assets::spa_wasm_hash()
+            ),
+            crate::web_assets::spa_wasm(),
+            "application/wasm",
+        ),
+        (
+            format!(
+                "codemirror_editor.{}.js",
+                crate::web_assets::codemirror_editor_js_hash()
+            ),
+            crate::web_assets::codemirror_editor_js().as_bytes(),
+            "application/javascript; charset=utf-8",
+        ),
+    ];
+    for (name, body, content_type) in web_assets {
+        if asset == name {
+            return immutable_asset_response(body, content_type);
+        }
+    }
+    StatusCode::NOT_FOUND.into_response()
+}
+
 async fn spa_js_asset() -> Response {
     asset_response(
         crate::web_assets::spa_js().as_bytes(),
@@ -408,6 +447,18 @@ async fn codemirror_editor_js_asset() -> Response {
 
 async fn font_asset() -> Response {
     binary_asset_response(crate::web_assets::jetbrains_mono_nerd_font(), "font/ttf")
+}
+
+async fn hashed_font_asset(AxumPath(font): AxumPath<String>) -> Response {
+    let expected = format!(
+        "JetBrainsMonoNerdFont-Regular.{}.ttf",
+        crate::web_assets::jetbrains_mono_nerd_font_hash()
+    );
+    if font == expected {
+        immutable_asset_response(crate::web_assets::jetbrains_mono_nerd_font(), "font/ttf")
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
 }
 
 async fn spa_wasm_asset() -> Response {
@@ -1205,6 +1256,18 @@ fn asset_response(body: &[u8], content_type: &'static str) -> Response {
     response
 }
 
+fn immutable_asset_response(body: &[u8], content_type: &'static str) -> Response {
+    let mut response = Response::new(axum::body::Body::from(body.to_vec()));
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+    response
+}
+
 fn binary_asset_response(body: &[u8], content_type: &'static str) -> Response {
     asset_response(body, content_type)
 }
@@ -1940,8 +2003,18 @@ mod tests {
     #[test]
     fn spa_index_asset_contains_module_bootstrap() {
         let html = crate::web_assets::spa_html();
-        assert!(html.contains("/assets/app.css"));
-        assert!(html.contains("/assets/themion_cli_web_ui.js"));
+        assert!(html.contains(&format!(
+            "/assets/app.{}.css",
+            crate::web_assets::spa_css_hash()
+        )));
+        assert!(html.contains(&format!(
+            "/assets/codemirror_editor.{}.js",
+            crate::web_assets::codemirror_editor_js_hash()
+        )));
+        assert!(html.contains(&format!(
+            "/assets/themion_cli_web_ui.{}.js",
+            crate::web_assets::spa_js_hash()
+        )));
         assert!(html.contains(r#"type="module""#));
     }
 

@@ -109,24 +109,83 @@ fn build_web_assets(repo_root: &Path) {
         "generate browser bindings for themion-cli-web-ui",
     );
 
-    copy_file(
-        &repo_root.join("crates/themion-cli-web-ui/assets/index.html"),
-        &web_out_dir.join("index.html"),
-    );
-    copy_file(
-        &repo_root.join("crates/themion-cli-web-ui/assets/app.css"),
-        &web_out_dir.join("app.css"),
-    );
-    copy_file(
-        &repo_root.join("crates/themion-cli-web-ui/assets/codemirror_editor.js"),
-        &web_out_dir.join("codemirror_editor.js"),
-    );
     let font_out_dir = web_out_dir.join("fonts");
     std::fs::create_dir_all(&font_out_dir).expect("create web font output dir");
-    copy_file(
-        &repo_root.join("crates/themion-cli-web-ui/assets/fonts/JetBrainsMonoNerdFont-Regular.ttf"),
+
+    let font_source =
+        repo_root.join("crates/themion-cli-web-ui/assets/fonts/JetBrainsMonoNerdFont-Regular.ttf");
+    let font_bytes = read_bytes(&font_source);
+    let font_hash = content_hash(&font_bytes);
+    write_bytes(
         &font_out_dir.join("JetBrainsMonoNerdFont-Regular.ttf"),
+        &font_bytes,
     );
+    write_bytes(
+        &font_out_dir.join(format!("JetBrainsMonoNerdFont-Regular.{font_hash}.ttf")),
+        &font_bytes,
+    );
+    write_text(&web_out_dir.join("font.hash"), &font_hash);
+
+    let css_source = repo_root.join("crates/themion-cli-web-ui/assets/app.css");
+    let css = read_text(&css_source).replace(
+        "/assets/fonts/JetBrainsMonoNerdFont-Regular.ttf",
+        &format!("/assets/fonts/JetBrainsMonoNerdFont-Regular.{font_hash}.ttf"),
+    );
+    let css_hash = content_hash(css.as_bytes());
+    write_text(&web_out_dir.join("app.css"), &css);
+    write_text(&web_out_dir.join(format!("app.{css_hash}.css")), &css);
+    write_text(&web_out_dir.join("app.css.hash"), &css_hash);
+
+    let codemirror_source = repo_root.join("crates/themion-cli-web-ui/assets/codemirror_editor.js");
+    let codemirror_js = read_text(&codemirror_source);
+    let codemirror_hash = content_hash(codemirror_js.as_bytes());
+    write_text(&web_out_dir.join("codemirror_editor.js"), &codemirror_js);
+    write_text(
+        &web_out_dir.join(format!("codemirror_editor.{codemirror_hash}.js")),
+        &codemirror_js,
+    );
+    write_text(
+        &web_out_dir.join("codemirror_editor.js.hash"),
+        &codemirror_hash,
+    );
+
+    let wasm_bytes = read_bytes(&web_out_dir.join("themion_cli_web_ui_bg.wasm"));
+    let wasm_hash = content_hash(&wasm_bytes);
+    write_bytes(
+        &web_out_dir.join(format!("themion_cli_web_ui_bg.{wasm_hash}.wasm")),
+        &wasm_bytes,
+    );
+    write_text(
+        &web_out_dir.join("themion_cli_web_ui_bg.wasm.hash"),
+        &wasm_hash,
+    );
+
+    let spa_js = read_text(&web_out_dir.join("themion_cli_web_ui.js")).replace(
+        "themion_cli_web_ui_bg.wasm",
+        &format!("themion_cli_web_ui_bg.{wasm_hash}.wasm"),
+    );
+    let spa_js_hash = content_hash(spa_js.as_bytes());
+    write_text(&web_out_dir.join("themion_cli_web_ui.js"), &spa_js);
+    write_text(
+        &web_out_dir.join(format!("themion_cli_web_ui.{spa_js_hash}.js")),
+        &spa_js,
+    );
+    write_text(
+        &web_out_dir.join("themion_cli_web_ui.js.hash"),
+        &spa_js_hash,
+    );
+
+    let index = read_text(&repo_root.join("crates/themion-cli-web-ui/assets/index.html"))
+        .replace("/assets/app.css", &format!("/assets/app.{css_hash}.css"))
+        .replace(
+            "/assets/codemirror_editor.js",
+            &format!("/assets/codemirror_editor.{codemirror_hash}.js"),
+        )
+        .replace(
+            "/assets/themion_cli_web_ui.js",
+            &format!("/assets/themion_cli_web_ui.{spa_js_hash}.js"),
+        );
+    write_text(&web_out_dir.join("index.html"), &index);
 }
 
 fn build_codemirror_editor_bundle(repo_root: &Path) {
@@ -181,14 +240,31 @@ fn run_command(command: &mut Command, description: &str) {
     );
 }
 
-fn copy_file(source: &Path, dest: &Path) {
-    std::fs::copy(source, dest).unwrap_or_else(|e| {
-        panic!(
-            "failed to copy {} to {}: {e}",
-            source.display(),
-            dest.display()
-        )
-    });
+fn read_bytes(path: &Path) -> Vec<u8> {
+    std::fs::read(path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+}
+
+fn read_text(path: &Path) -> String {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+}
+
+fn write_bytes(path: &Path, bytes: &[u8]) {
+    std::fs::write(path, bytes)
+        .unwrap_or_else(|e| panic!("failed to write {}: {e}", path.display()))
+}
+
+fn write_text(path: &Path, text: &str) {
+    write_bytes(path, text.as_bytes());
+}
+
+fn content_hash(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 fn detect_git_metadata(repo_root: &Path) -> Option<(String, bool)> {
