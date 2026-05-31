@@ -994,8 +994,8 @@ pre {
 
 .file-tree-entry {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 0.35rem;
+  grid-template-columns: calc(var(--tree-depth, 0) * 0.78rem) 0.7rem 1rem minmax(0, 1fr);
+  gap: 0.22rem;
   align-items: center;
   width: 100%;
   border: 1px solid transparent;
@@ -1003,13 +1003,25 @@ pre {
   background: transparent;
   color: #cbd5e1;
   cursor: pointer;
-  padding: 0.28rem 0.34rem;
+  font-size: 0.82rem;
+  padding: 0.2rem 0.28rem;
   text-align: left;
 }
 
 .file-tree-entry:hover {
   border-color: rgba(125, 211, 252, 0.28);
   background: rgba(14, 165, 233, 0.1);
+}
+
+.file-tree-entry.selected {
+  border-color: rgba(125, 211, 252, 0.34);
+  background: rgba(14, 165, 233, 0.16);
+  color: #e0f2fe;
+}
+
+.file-tree-chevron {
+  color: #7c8da6;
+  text-align: center;
 }
 
 .file-kind-icon { color: #7dd3fc; }
@@ -1019,8 +1031,6 @@ pre {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
-.file-tree-entry small { color: #64748b; }
 
 .codemirror-host {
   display: flex;

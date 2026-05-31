@@ -3,7 +3,7 @@ use leptos::html::Div;
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
@@ -125,6 +125,14 @@ struct WorkspaceEntry {
     kind: WorkspaceFileKind,
     size_bytes: u64,
     modified_at_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+struct WorkspaceTreeRow {
+    entry: WorkspaceEntry,
+    depth: usize,
+    expanded: bool,
+    selected: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -630,6 +638,8 @@ fn App() -> impl IntoView {
     let transcript_history_ref = NodeRef::<Div>::new();
     let transcript_trailing = RwSignal::new(true);
     let workspace_tree = RwSignal::new(None::<WorkspaceTreeResponse>);
+    let workspace_trees = RwSignal::new(BTreeMap::<String, WorkspaceTreeResponse>::new());
+    let workspace_expanded = RwSignal::new(BTreeSet::<String>::new());
     let workspace_path = RwSignal::new(String::new());
     let workspace_file = RwSignal::new(None::<WorkspaceFileResponse>);
     let workspace_content = RwSignal::new(String::new());
@@ -709,7 +719,13 @@ fn App() -> impl IntoView {
                         "Workspace root loaded: {} entries",
                         payload.entries.len()
                     ));
-                    workspace_tree.set(Some(payload));
+                    store_workspace_tree(
+                        payload,
+                        workspace_tree,
+                        workspace_trees,
+                        workspace_expanded,
+                        workspace_status,
+                    );
                 }
                 Err(error) => workspace_status.set(error),
             }
@@ -807,16 +823,26 @@ fn App() -> impl IntoView {
     let open_workspace_entry = move |entry: WorkspaceEntry| {
         let path = entry.path.clone();
         if entry.kind == WorkspaceFileKind::Directory {
+            let already_expanded =
+                workspace_expanded.with_untracked(|expanded| expanded.contains(&path));
+            if already_expanded {
+                workspace_expanded.update(|expanded| {
+                    expanded.remove(&path);
+                });
+                return;
+            }
             workspace_path.set(path.clone());
             workspace_status.set(format!("Opening directory {path}"));
             leptos::task::spawn_local(async move {
                 match fetch_workspace_tree(&path).await {
                     Ok(payload) => {
-                        workspace_status.set(format!(
-                            "Directory loaded: {} entries",
-                            payload.entries.len()
-                        ));
-                        workspace_tree.set(Some(payload));
+                        store_workspace_tree(
+                            payload,
+                            workspace_tree,
+                            workspace_trees,
+                            workspace_expanded,
+                            workspace_status,
+                        );
                     }
                     Err(error) => workspace_status.set(error),
                 }
@@ -947,8 +973,7 @@ fn App() -> impl IntoView {
                                         leptos::task::spawn_local(async move {
                                             match fetch_workspace_tree(&parent).await {
                                                 Ok(payload) => {
-                                                    workspace_status.set(format!("Directory loaded: {} entries", payload.entries.len()));
-                                                    workspace_tree.set(Some(payload));
+                                                    store_workspace_tree(payload, workspace_tree, workspace_trees, workspace_expanded, workspace_status);
                                                 }
                                                 Err(error) => workspace_status.set(error),
                                             }
@@ -960,37 +985,45 @@ fn App() -> impl IntoView {
                                     class="secondary-action"
                                     on:click=move |_| {
                                         let current = workspace_path.get_untracked();
+                                        let current_for_refresh = current.clone();
                                         leptos::task::spawn_local(async move {
                                             match fetch_workspace_tree(&current).await {
                                                 Ok(payload) => {
-                                                    workspace_status.set(format!("Directory loaded: {} entries", payload.entries.len()));
-                                                    workspace_tree.set(Some(payload));
+                                                    store_workspace_tree(payload, workspace_tree, workspace_trees, workspace_expanded, workspace_status);
                                                 }
                                                 Err(error) => workspace_status.set(error),
                                             }
                                         });
+                                        workspace_expanded.update(|expanded| { expanded.insert(current_for_refresh); });
                                     }
                                 >"Refresh"</button>
                             </div>
                             <div class="file-tree-list sidebar-tree">
-                                {move || match workspace_tree.get() {
-                                    Some(tree) => view! {
+                                {move || {
+                                    let trees = workspace_trees.get();
+                                    if trees.is_empty() {
+                                        return view! { <p class="muted">"Loading workspace tree…"</p> }.into_any();
+                                    }
+                                    let rows = workspace_tree_rows(&trees, &workspace_expanded.get(), workspace_file.get().as_ref().map(|file| file.path.as_str()));
+                                    view! {
                                         <For
-                                            each=move || tree.entries.clone().into_iter()
-                                            key=|entry| entry.path.clone()
-                                            children=move |entry| {
-                                                let click_entry = entry.clone();
+                                            each=move || rows.clone().into_iter()
+                                            key=|row| row.entry.path.clone()
+                                            children=move |row| {
+                                                let click_entry = row.entry.clone();
+                                                let entry = row.entry.clone();
+                                                let style = format!("--tree-depth: {}", row.depth);
                                                 view! {
-                                                    <button type="button" class="file-tree-entry" on:click=move |_| open_workspace_entry(click_entry.clone())>
+                                                    <button type="button" class=workspace_tree_entry_class(entry.kind, row.expanded, row.selected) style=style on:click=move |_| open_workspace_entry(click_entry.clone())>
+                                                        <span class="file-tree-indent" aria-hidden="true"></span>
+                                                        <span class="file-tree-chevron">{workspace_tree_chevron(entry.kind, row.expanded)}</span>
                                                         <span class="file-kind-icon">{workspace_kind_icon(entry.kind)}</span>
                                                         <span class="file-entry-name">{entry.name}</span>
-                                                        <small>{workspace_kind_label(entry.kind)}</small>
                                                     </button>
                                                 }
                                             }
                                         />
-                                    }.into_any(),
-                                    None => view! { <p class="muted">"Loading workspace tree…"</p> }.into_any(),
+                                    }.into_any()
                                 }}
                             </div>
                         </div>
@@ -1736,6 +1769,96 @@ fn workspace_kind_is_previewable(kind: WorkspaceFileKind) -> bool {
     )
 }
 
+fn store_workspace_tree(
+    payload: WorkspaceTreeResponse,
+    workspace_tree: RwSignal<Option<WorkspaceTreeResponse>>,
+    workspace_trees: RwSignal<BTreeMap<String, WorkspaceTreeResponse>>,
+    workspace_expanded: RwSignal<BTreeSet<String>>,
+    workspace_status: RwSignal<String>,
+) {
+    let path = payload.path.clone();
+    let count = payload.entries.len();
+    workspace_tree.set(Some(payload.clone()));
+    workspace_trees.update(|trees| {
+        trees.insert(path.clone(), payload);
+    });
+    workspace_expanded.update(|expanded| {
+        expanded.insert(path.clone());
+    });
+    workspace_status.set(format!("Directory loaded: {count} entries"));
+}
+
+fn workspace_tree_rows(
+    trees: &BTreeMap<String, WorkspaceTreeResponse>,
+    expanded: &BTreeSet<String>,
+    selected_file: Option<&str>,
+) -> Vec<WorkspaceTreeRow> {
+    let Some(root) = trees.get("").or_else(|| trees.values().next()) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    push_workspace_tree_rows(root, trees, expanded, selected_file, 0, &mut rows);
+    rows
+}
+
+fn push_workspace_tree_rows(
+    tree: &WorkspaceTreeResponse,
+    trees: &BTreeMap<String, WorkspaceTreeResponse>,
+    expanded: &BTreeSet<String>,
+    selected_file: Option<&str>,
+    depth: usize,
+    rows: &mut Vec<WorkspaceTreeRow>,
+) {
+    for entry in &tree.entries {
+        let is_dir = entry.kind == WorkspaceFileKind::Directory;
+        let is_expanded = is_dir && expanded.contains(&entry.path);
+        rows.push(WorkspaceTreeRow {
+            entry: entry.clone(),
+            depth,
+            expanded: is_expanded,
+            selected: selected_file == Some(entry.path.as_str()),
+        });
+        if is_expanded {
+            if let Some(child_tree) = trees.get(&entry.path) {
+                push_workspace_tree_rows(
+                    child_tree,
+                    trees,
+                    expanded,
+                    selected_file,
+                    depth + 1,
+                    rows,
+                );
+            }
+        }
+    }
+}
+
+fn workspace_tree_entry_class(
+    kind: WorkspaceFileKind,
+    expanded: bool,
+    selected: bool,
+) -> &'static str {
+    match (kind == WorkspaceFileKind::Directory, expanded, selected) {
+        (true, true, true) => "file-tree-entry directory expanded selected",
+        (true, true, false) => "file-tree-entry directory expanded",
+        (true, false, true) => "file-tree-entry directory selected",
+        (true, false, false) => "file-tree-entry directory",
+        (false, _, true) => "file-tree-entry selected",
+        (false, _, false) => "file-tree-entry",
+    }
+}
+
+fn workspace_tree_chevron(kind: WorkspaceFileKind, expanded: bool) -> &'static str {
+    if kind != WorkspaceFileKind::Directory {
+        return "";
+    }
+    if expanded {
+        "⌄"
+    } else {
+        "›"
+    }
+}
+
 fn workspace_kind_icon(kind: WorkspaceFileKind) -> &'static str {
     match kind {
         WorkspaceFileKind::Directory => "",
@@ -1747,20 +1870,6 @@ fn workspace_kind_icon(kind: WorkspaceFileKind) -> &'static str {
         WorkspaceFileKind::Text => "󰈙",
         WorkspaceFileKind::Binary => "󰞷",
         WorkspaceFileKind::Unsupported => "󰈔",
-    }
-}
-
-fn workspace_kind_label(kind: WorkspaceFileKind) -> &'static str {
-    match kind {
-        WorkspaceFileKind::Directory => "dir",
-        WorkspaceFileKind::Text => "text",
-        WorkspaceFileKind::Image => "image",
-        WorkspaceFileKind::Video => "video",
-        WorkspaceFileKind::Markdown => "md",
-        WorkspaceFileKind::Html => "html",
-        WorkspaceFileKind::Pdf => "pdf",
-        WorkspaceFileKind::Binary => "binary",
-        WorkspaceFileKind::Unsupported => "file",
     }
 }
 
